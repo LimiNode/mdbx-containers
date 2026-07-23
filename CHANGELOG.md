@@ -5,18 +5,26 @@ All notable changes to this project will be documented in this file.
 ## Unreleased
 - Added a persistent sync schema registry store for future logical table
   adapters. The registry records logical schema ids, table kinds, schema
-  versions, and owned DBI names without enabling logical replication yet.
+  versions, and canonical sorted unique owned DBI names without enabling
+  logical replication yet.
 - Added public `ChangeDomain`, `LogicalSchemaRef`, and `LogicalChange` model
   types for future logical table adapters. The current wire codec remains
   raw-DBI only.
 - Added `ISyncCaptureSink::record_change_op(MDBX_txn*, const ChangeOp&)` as the
   preferred capture entry point. The previous raw-field callback remains the
   source-compatible abstract sink contract; new full-`ChangeOp` sinks can
-  derive from `FullChangeSyncCaptureSink`.
+  derive from `FullChangeSyncCaptureSink`. Capture record or flush failures now
+  prevent committing the affected explicit transaction, and unmanaged raw
+  writable `MDBX_txn*` calls are rejected while sync capture is attached.
 - Added `ILogicalTableAdapter` and `LogicalTableRegistry` scaffolding for
-  future two-phase logical table preflight/apply support. `SyncEngine` still
-  rejects unknown logical operations until a wire format and registry
-  integration are added.
+  future two-phase logical table preflight/apply support. Apply exceptions are
+  converted to failure results so the caller-owned transaction can be aborted.
+  `SyncEngine` still rejects unknown logical operations until a wire format and
+  registry integration are added.
+- Documented the staged logical sync contract: schema marker, logical wire
+  frame, adapter preflight/apply, then capture. Deferred logical tables still
+  require single-writer or application-serialized conflicting writes until a
+  causal conflict model exists.
 - Breaking transport-wire change: `TransportMessageCodec` is now version 4.
   Response DTOs include `SyncResponseErrorCode` plus `error_retryable` after
   the human-readable error string, and pull request DTOs include

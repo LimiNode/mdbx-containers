@@ -100,6 +100,13 @@
   поддерживаемых таблиц, становится одним атомарным локальным batch.
   Read/search-вызовы не захватываются. Отдельный `SyncWorker` плюс транспорт
   `ISyncPeer` переносят закоммиченные batches между узлами.
+- При активном sync capture мутирующие вызовы поддерживаемых таблиц должны
+  использовать транзакции, созданные через `mdbx_containers::Transaction` или
+  `Connection::begin()` / `commit()`. Caller-created raw writable `MDBX_txn*`
+  не может вызвать capture pre-commit hook и отклоняется до мутации.
+  Caller-created raw read-only transactions остаются допустимыми для
+  read/search snapshot operations. Любое исключение из capture recording или
+  flush делает transaction rollback-only; повторный `commit()` отклоняется.
 - `SyncEngine` предоставляет pull/push/apply primitives, `DirectSyncPeer`
   используется для in-process синхронизации в тестах и примерах,
   `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт

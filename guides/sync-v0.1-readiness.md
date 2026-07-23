@@ -85,15 +85,37 @@ Do not add `record_op()` calls to these tables until their wire format and
 round-trip tests exist. A partial capture path is worse than no capture because
 it can make replication appear successful while logical state diverges.
 
+The logical sync scaffolding is preparatory only:
+
+- `_mdbxc_sync_schema` is a persistent compatibility marker, not an apply path.
+- `LogicalChange` payloads are opaque and are not serialized by the current
+  `ChangeBatchCodec`.
+- `LogicalTableRegistry` defines the future two-phase preflight/apply contract,
+  including full schema tuple validation before adapter callbacks, but
+  `SyncEngine` still applies raw DBI operations only.
+- Future `SyncEngine` integration must own the MDBX write transaction around
+  logical apply and abort it if an adapter reports failure or throws after any
+  mutation.
+
+Until a causal context or another conflict model is implemented, future logical
+table support should document either one authoritative writer for the affected
+logical dataset or application-level serialization of conflicting writes.
+General concurrent multi-writer convergence must not be claimed for deferred
+tables.
+
 ## Suggested Next PRs
 
 - Add optional table identity filters on top of the affected DBI names already
   reported by `ISyncApplyObserver`, if more cached wrappers need narrower
   subscriptions.
+- Add codec framing for logical table changes, including capability bits and
+  fail-closed tests for old or capability-limited decoders.
+- Integrate `LogicalTableRegistry` with `SyncEngine::handle_push()` only after
+  logical changes can be parsed separately from raw DBI operations.
 - Prototype `KeyMultiValueTable` capture/apply using the deferred
   single-writer/serialized unordered multiset design. Add explicit wire
-  sub-operation framing and repeated-pair round-trip tests before enabling
-  capture.
+  sub-operation framing, registry integration, and repeated-pair round-trip
+  tests before enabling capture.
 - Implement the deferred full snapshot protocol before treating
   `SnapshotRequired` as automatically recoverable by sync itself.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
