@@ -13,6 +13,10 @@ All notable changes to this project will be documented in this file.
   preferred capture entry point. The previous raw-field callback remains the
   source-compatible abstract sink contract; new full-`ChangeOp` sinks can
   derive from `FullChangeSyncCaptureSink`.
+- Added `ILogicalTableAdapter` and `LogicalTableRegistry` scaffolding for
+  future two-phase logical table preflight/apply support. `SyncEngine` still
+  rejects unknown logical operations until a wire format and registry
+  integration are added.
 - Breaking transport-wire change: `TransportMessageCodec` is now version 4.
   Response DTOs include `SyncResponseErrorCode` plus `error_retryable` after
   the human-readable error string, and pull request DTOs include

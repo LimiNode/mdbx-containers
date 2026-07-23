@@ -484,6 +484,18 @@ The v0.1 `ChangeBatchCodec` still serializes raw DBI operations only. Adding
 the logical domain to the wire format requires an explicit codec version bump
 and compatibility tests.
 
+`LogicalTableAdapter.hpp` reserves the apply-side extension point:
+
+- `ILogicalTableAdapter::preflight()` validates one logical change without
+  mutating user tables.
+- `ILogicalTableAdapter::apply()` mutates user tables only after every logical
+  change in the same apply transaction passed preflight.
+- `LogicalTableRegistry` is a non-owning lifecycle registry keyed by
+  `LogicalSchemaRef::schema_id`.
+
+The current `SyncEngine` does not call this registry yet. Unknown logical
+payloads must not fall back to raw DBI apply.
+
 ## Codec — `ChangeBatchCodec`
 
 See `ChangeBatchCodec.hpp` layout comment for the full byte layout. Locked

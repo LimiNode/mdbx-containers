@@ -18,6 +18,7 @@
 #include "sync/LogicalSchema.hpp"
 #include "sync/ChangeOp.hpp"
 #include "sync/LogicalChange.hpp"
+#include "sync/LogicalTableAdapter.hpp"
 #include "sync/CodecBounds.hpp"
 #include "sync/ChangeBatch.hpp"
 #include "sync/ChangeBatchCodec.hpp"
