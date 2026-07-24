@@ -470,6 +470,20 @@ The registry intentionally uses an explicit application schema id instead of
 must still be rejected by the apply path until a matching logical adapter is
 registered.
 
+`LogicalChange.hpp` defines the public in-memory model for the future logical
+domain:
+
+- `ChangeDomain::RawDbi` is the current `ChangeOp`/`ChangeBatchCodec` domain.
+- `ChangeDomain::LogicalTable` is reserved for adapter-owned logical payloads.
+- `LogicalSchemaRef` repeats the expected schema id, logical table kind, and
+  schema version on each logical operation.
+- `LogicalChange::payload` is opaque to the sync core; only a registered
+  adapter for the referenced schema may decode it.
+
+The v0.1 `ChangeBatchCodec` still serializes raw DBI operations only. Adding
+the logical domain to the wire format requires an explicit codec version bump
+and compatibility tests.
+
 ## Codec — `ChangeBatchCodec`
 
 See `ChangeBatchCodec.hpp` layout comment for the full byte layout. Locked
