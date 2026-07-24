@@ -40,15 +40,15 @@ namespace sync {
         ///        change.
         /// \param change Full raw-domain change operation.
         /// \details Default implementation forwards to the legacy raw-field
-        /// overload only when \p change contains no enriched metadata. New
-        /// sinks should override this overload when they need access to the
+        /// callback only when \p change contains no enriched metadata. New
+        /// sinks should override this entry point when they need access to the
         /// complete \c ChangeOp shape.
         virtual void record_change_op(MDBX_txn* txn, const ChangeOp& change) {
             if (change.op_flags != OP_NONE ||
                 !change.identity_key.empty() ||
                 !change.revision_key.empty()) {
                 throw std::logic_error(
-                    "ISyncCaptureSink legacy record_change_op cannot accept enriched ChangeOp");
+                    "ISyncCaptureSink default record_change_op forwarding cannot pass an enriched ChangeOp to a legacy raw-field sink");
             }
             record_change(txn, change.dbi_name, change.op_type,
                           change.dbi_flags, change.storage_key, change.value);
@@ -95,7 +95,7 @@ namespace sync {
 
     /// \brief Adapter base for sinks that want to implement only the full
     ///        \c ChangeOp entry point.
-    /// \details The legacy raw-field overload is still the abstract compatibility
+    /// \details The legacy raw-field callback is still the abstract compatibility
     /// contract of \c ISyncCaptureSink. Derive from this helper when new code
     /// wants every raw-shaped operation converted into a \c ChangeOp object.
     class FullChangeSyncCaptureSink : public ISyncCaptureSink {
