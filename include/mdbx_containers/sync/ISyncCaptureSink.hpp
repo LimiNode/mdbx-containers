@@ -55,7 +55,7 @@ namespace sync {
         }
 
         /// \brief Legacy raw-field capture entry point.
-        /// \details Existing sinks may continue overriding this overload.
+        /// \details Existing sinks may continue overriding this raw-field callback.
         /// New code should prefer \c record_change_op(MDBX_txn*, const ChangeOp&).
         /// \param txn The active MDBX write transaction that performed the
         ///        change. Implementations may stage the op in thread-local
@@ -85,7 +85,7 @@ namespace sync {
         /// \brief Discards any pending ops recorded for a transaction that
         /// is about to be aborted or rolled back.
         /// \param txn The about-to-be-aborted write transaction.
-        /// \details Default implementation is a no-op; overloads drop the
+        /// \details Default implementation is a no-op; overrides drop the
         /// pending ops so the next transaction on the same thread (or the
         /// next MDBX_txn* address if the allocator reuses it) starts clean.
         virtual void discard_txn(MDBX_txn* txn) noexcept {
