@@ -50,26 +50,30 @@ namespace sync {
               m_meta(m_env),
               m_change_log(m_env) {}
 
+        void record_change_op(MDBX_txn* txn, const ChangeOp& change) override {
+            txn = checked_txn_env(txn, m_env, "ThreadLocalChangeAccumulator::record_change");
+            std::lock_guard<std::mutex> lk(m_mutex);
+            m_pending[txn].push_back(change);
+        }
+
         void record_change(MDBX_txn* txn,
                            const std::string& dbi_name,
                            ChangeOpType op_type,
                            std::uint32_t dbi_flags,
                            const std::vector<std::uint8_t>& storage_key,
                            const std::vector<std::uint8_t>& value) override {
-            txn = checked_txn_env(txn, m_env, "ThreadLocalChangeAccumulator::record_change");
-            PendingOp op;
+            ChangeOp op;
             op.op_type = op_type;
             op.dbi_flags = dbi_flags;
             op.dbi_name = dbi_name;
             op.storage_key = storage_key;
             op.value = value;
-            std::lock_guard<std::mutex> lk(m_mutex);
-            m_pending[txn].push_back(std::move(op));
+            record_change_op(txn, op);
         }
 
         void flush_in_txn(MDBX_txn* txn) override {
             txn = checked_txn_env(txn, m_env, "ThreadLocalChangeAccumulator::flush_in_txn");
-            std::vector<PendingOp> ops;
+            std::vector<ChangeOp> ops;
             {
                 std::lock_guard<std::mutex> lk(m_mutex);
                 auto it = m_pending.find(txn);
@@ -92,14 +96,6 @@ namespace sync {
         }
 
     private:
-        struct PendingOp {
-            ChangeOpType op_type = ChangeOpType::Put;
-            std::uint32_t dbi_flags = 0;
-            std::string dbi_name;
-            std::vector<std::uint8_t> storage_key;
-            std::vector<std::uint8_t> value;
-        };
-
         void open_stores(MDBX_txn* txn) {
             /// \note Each flush_in_txn call must reopen the stores inside the
             /// about-to-commit write transaction. \c m_open is set on first
@@ -124,21 +120,12 @@ namespace sync {
             }
         }
 
-        void build_and_append_batch(MDBX_txn* txn, const std::vector<PendingOp>& ops) {
+        void build_and_append_batch(MDBX_txn* txn, const std::vector<ChangeOp>& ops) {
             ChangeBatch batch;
             batch.version = 1;
             batch.origin_node_id = m_node_id;
             batch.seq = m_meta.increment_local_seq(txn);
-            batch.ops.reserve(ops.size());
-            for (const PendingOp& op : ops) {
-                ChangeOp co;
-                co.op_type = op.op_type;
-                co.dbi_flags = op.dbi_flags;
-                co.dbi_name = op.dbi_name;
-                co.storage_key = op.storage_key;
-                co.value = op.value;
-                batch.ops.push_back(std::move(co));
-            }
+            batch.ops = ops;
             const std::vector<std::uint8_t> bytes = ChangeBatchCodec::encode(batch);
             m_change_log.append(txn, m_node_id, batch.seq, bytes);
         }
@@ -148,7 +135,7 @@ namespace sync {
         MetaStore m_meta;
         ChangeLogStore m_change_log;
         std::mutex m_mutex;
-        std::unordered_map<MDBX_txn*, std::vector<PendingOp>> m_pending;
+        std::unordered_map<MDBX_txn*, std::vector<ChangeOp>> m_pending;
 
         void discard_txn(MDBX_txn* txn) noexcept override {
             std::lock_guard<std::mutex> lk(m_mutex);

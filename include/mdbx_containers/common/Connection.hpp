@@ -292,6 +292,11 @@ namespace mdbxc {
                                              std::uint64_t expected_token,
                                              sync::ISyncCaptureSink* restore_sink,
                                              std::uint64_t restore_token);
+        void mark_sync_capture_failed(MDBX_txn* txn) noexcept;
+        bool sync_capture_failed(MDBX_txn* txn) const noexcept;
+        void clear_sync_capture_failed(MDBX_txn* txn) noexcept;
+        void ensure_sync_capture_txn_supported(MDBX_txn* txn,
+                                               const char* context) const;
         struct SyncApplyObserverState;
 
         struct SyncApplyObserverCallback {
@@ -343,6 +348,8 @@ namespace mdbxc {
         sync::ISyncCaptureSink* m_sync_capture = nullptr;
         std::uint64_t m_sync_capture_token = 0;
         std::uint64_t m_next_sync_capture_token = 0;
+        MDBX_txn* m_sync_capture_failed_txn = nullptr;
+        mutable std::mutex m_sync_capture_failure_mutex;
         std::uint64_t m_next_sync_apply_observer_token = 0;
         std::uint64_t m_sync_apply_generation = 0;
         std::vector<std::shared_ptr<SyncApplyObserverState>> m_sync_apply_observers;

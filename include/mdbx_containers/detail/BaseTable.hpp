@@ -164,9 +164,15 @@ namespace mdbxc {
 
         /// \brief Validates a caller-supplied transaction for this table env.
         MDBX_txn* checked_external_txn(MDBX_txn* txn) const {
-            return checked_txn_env(txn,
-                                   m_connection->env_handle(),
-                                   "BaseTable external transaction");
+            MDBX_txn* checked = checked_txn_env(
+                txn,
+                m_connection->env_handle(),
+                "BaseTable external transaction");
+#       if MDBXC_SYNC_ENABLED
+            m_connection->ensure_sync_capture_txn_supported(
+                checked, "BaseTable external transaction");
+#       endif
+            return checked;
         }
         
         /// \brief Gets the raw DBI handle.
@@ -206,8 +212,18 @@ namespace mdbxc {
             if (m_connection->is_read_only()) return;
             sync::ISyncCaptureSink* sink = m_connection->sync_capture();
             if (sink == nullptr) return;
-            sink->record_change(txn, m_name, op_type, m_dbi_flags,
-                                storage_key, value);
+            sync::ChangeOp op;
+            op.op_type = op_type;
+            op.dbi_flags = m_dbi_flags;
+            op.dbi_name = m_name;
+            op.storage_key = storage_key;
+            op.value = value;
+            try {
+                sink->record_change_op(txn, op);
+            } catch (...) {
+                m_connection->mark_sync_capture_failed(txn);
+                throw;
+            }
         }
 #       endif
     };

@@ -274,6 +274,57 @@ namespace mdbxc {
         return true;
     }
 
+    inline void Connection::mark_sync_capture_failed(MDBX_txn* txn) noexcept {
+        if (txn == nullptr) {
+            return;
+        }
+        std::lock_guard<std::mutex> locker(m_sync_capture_failure_mutex);
+        m_sync_capture_failed_txn = txn;
+    }
+
+    inline bool Connection::sync_capture_failed(MDBX_txn* txn) const noexcept {
+        if (txn == nullptr) {
+            return false;
+        }
+        std::lock_guard<std::mutex> locker(m_sync_capture_failure_mutex);
+        return m_sync_capture_failed_txn == txn;
+    }
+
+    inline void Connection::clear_sync_capture_failed(MDBX_txn* txn) noexcept {
+        if (txn == nullptr) {
+            return;
+        }
+        std::lock_guard<std::mutex> locker(m_sync_capture_failure_mutex);
+        if (m_sync_capture_failed_txn == txn) {
+            m_sync_capture_failed_txn = nullptr;
+        }
+    }
+
+    inline void Connection::ensure_sync_capture_txn_supported(
+            MDBX_txn* txn,
+            const char* context) const {
+        bool capture_attached = false;
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            capture_attached = m_sync_capture != nullptr;
+        }
+        if (!capture_attached) {
+            return;
+        }
+        if (thread_txn() == txn) {
+            return;
+        }
+        const MDBX_txn_flags_t flags = mdbx_txn_flags(txn);
+        if ((static_cast<int>(flags) &
+             static_cast<int>(MDBX_TXN_RDONLY)) != 0) {
+            return;
+        }
+        throw std::logic_error(
+            std::string(context) +
+            " cannot use caller-created raw writable MDBX_txn* while sync capture is attached; "
+            "use mdbx_containers::Transaction or Connection::begin()/commit()");
+    }
+
     inline Connection::SyncApplyNotification Connection::mark_sync_apply_committed(
         std::size_t applied_batches,
         std::size_t applied_ops,
@@ -352,14 +403,24 @@ namespace mdbxc {
     }
 
     inline void Connection::on_pre_commit(MDBX_txn* txn) {
+        if (sync_capture_failed(txn)) {
+            throw std::logic_error(
+                "Cannot commit transaction after sync capture failure");
+        }
         sync::ISyncCaptureSink* sink = sync_capture();
         if (sink != nullptr) {
-            sink->flush_in_txn(txn);
+            try {
+                sink->flush_in_txn(txn);
+            } catch (...) {
+                mark_sync_capture_failed(txn);
+                throw;
+            }
         }
     }
 
     inline void Connection::on_discard(MDBX_txn* txn) noexcept {
         try {
+            clear_sync_capture_failed(txn);
             sync::ISyncCaptureSink* sink = sync_capture();
             if (sink != nullptr) {
                 sink->discard_txn(txn);

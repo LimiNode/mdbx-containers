@@ -8,6 +8,7 @@
 #include <mutex>
 #include <stdexcept>
 #include <string>
+#include <type_traits>
 #include <utility>
 #include <vector>
 
@@ -52,6 +53,72 @@ public:
         std::lock_guard<std::mutex> lk(m_mutex);
         m_recorded.clear();
         m_flushed.clear();
+    }
+};
+
+class FullChangeSink : public mdbxc::sync::FullChangeSyncCaptureSink {
+public:
+    std::vector<mdbxc::sync::ChangeOp> m_recorded;
+
+    void record_change_op(MDBX_txn* txn,
+                          const mdbxc::sync::ChangeOp& change) override {
+        (void)txn;
+        m_recorded.push_back(change);
+    }
+
+    void flush_in_txn(MDBX_txn* txn) override {
+        (void)txn;
+    }
+};
+
+class ThrowingChangeSink : public mdbxc::sync::FullChangeSyncCaptureSink {
+public:
+    int flush_calls = 0;
+
+    void record_change_op(MDBX_txn* txn,
+                          const mdbxc::sync::ChangeOp& change) override {
+        (void)txn;
+        (void)change;
+        throw std::runtime_error("capture record failure");
+    }
+
+    void flush_in_txn(MDBX_txn* txn) override {
+        (void)txn;
+        ++flush_calls;
+    }
+};
+
+class ThrowOnceFlushSink : public mdbxc::sync::FullChangeSyncCaptureSink {
+public:
+    int record_calls = 0;
+    int flush_calls = 0;
+    bool consume_before_throw = false;
+    std::vector<mdbxc::sync::ChangeOp> pending;
+
+    void record_change_op(MDBX_txn* txn,
+                          const mdbxc::sync::ChangeOp& change) override {
+        (void)txn;
+        ++record_calls;
+        pending.push_back(change);
+    }
+
+    void flush_in_txn(MDBX_txn* txn) override {
+        (void)txn;
+        ++flush_calls;
+        if (flush_calls == 1) {
+            if (consume_before_throw) {
+                pending.clear();
+            }
+            throw std::runtime_error("capture flush failure");
+        }
+        pending.clear();
+    }
+};
+
+class FlushOnlySink : public mdbxc::sync::ISyncCaptureSink {
+public:
+    void flush_in_txn(MDBX_txn* txn) override {
+        (void)txn;
     }
 };
 
@@ -389,6 +456,70 @@ void run_capture_scope_out_of_order_destruction_child() {
     delete inner;
     conn->disconnect();
     cleanup(p);
+}
+
+void test_capture_uses_full_change_op_overload() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_full_change_op.mdbx";
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+
+    FullChangeSink sink;
+    conn->attach_sync_capture(&sink);
+
+    KeyValueTable<int, int> kv(conn, "full_capture");
+    kv.insert_or_assign(7, 70);
+
+    if (sink.m_recorded.size() != 1u) {
+        throw std::runtime_error("full ChangeOp sink did not receive capture");
+    }
+    const sync::ChangeOp& op = sink.m_recorded[0];
+    if (op.dbi_name != "full_capture" ||
+        op.op_type != sync::ChangeOpType::Put ||
+        op.storage_key.empty() ||
+        op.value.empty()) {
+        throw std::runtime_error("full ChangeOp capture fields mismatch");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_legacy_sink_rejects_enriched_change_op() {
+    StubSink sink;
+    mdbxc::sync::ISyncCaptureSink* base = &sink;
+
+    mdbxc::sync::ChangeOp op;
+    op.dbi_name = "legacy_capture";
+    op.op_type = mdbxc::sync::ChangeOpType::Put;
+    op.dbi_flags = MDBX_CREATE;
+    op.storage_key.push_back(0x01u);
+    op.value.push_back(0x02u);
+    op.op_flags = mdbxc::sync::OP_HAS_IDENTITY_KEY;
+    op.identity_key.push_back(0x03u);
+
+    bool rejected = false;
+    try {
+        base->record_change_op(nullptr, op);
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+
+    if (!rejected) {
+        throw std::runtime_error(
+            "legacy capture sink accepted enriched ChangeOp");
+    }
+
+    std::lock_guard<std::mutex> lk(sink.m_mutex);
+    if (!sink.m_recorded.empty()) {
+        throw std::runtime_error(
+            "legacy capture sink recorded truncated enriched ChangeOp");
+    }
 }
 
 void test_capture_scope_terminates_on_out_of_order_destruction() {
@@ -1038,6 +1169,302 @@ void test_capture_flush_on_commit() {
     }
 }
 
+void test_capture_record_failure_blocks_explicit_commit() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_record_failure.mdbx";
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+
+    KeyValueTable<int, int> table(conn, "data");
+    ThrowingChangeSink sink;
+    conn->attach_sync_capture(&sink);
+
+    auto txn = conn->transaction(TransactionMode::WRITABLE);
+    bool record_threw = false;
+    try {
+        table.insert_or_assign(1, 100, txn.handle());
+    } catch (const std::runtime_error&) {
+        record_threw = true;
+    }
+    if (!record_threw) {
+        throw std::runtime_error("capture record failure did not throw");
+    }
+
+    bool commit_rejected = false;
+    try {
+        txn.commit();
+    } catch (const std::logic_error&) {
+        commit_rejected = true;
+    }
+    if (!commit_rejected) {
+        throw std::runtime_error(
+            "transaction committed after capture record failure");
+    }
+    if (sink.flush_calls != 0) {
+        throw std::runtime_error(
+            "capture flush ran after record failure marker");
+    }
+
+    txn.rollback();
+    conn->detach_sync_capture();
+
+    {
+        auto clean_txn = conn->transaction(TransactionMode::WRITABLE);
+        table.insert_or_assign(2, 200, clean_txn.handle());
+        clean_txn.commit();
+    }
+
+    {
+        auto ro = conn->transaction(TransactionMode::READ_ONLY);
+        int value = 0;
+        if (table.try_get(1, value, ro.handle())) {
+            throw std::runtime_error(
+                "failed capture transaction committed user value");
+        }
+        if (!table.try_get(2, value, ro.handle()) || value != 200) {
+            throw std::runtime_error(
+                "capture failure marker was not cleared after rollback");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_capture_flush_failure_blocks_commit_retry() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_flush_failure.mdbx";
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+
+    KeyValueTable<int, int> table(conn, "data");
+    ThrowOnceFlushSink sink;
+    conn->attach_sync_capture(&sink);
+
+    auto txn = conn->transaction(TransactionMode::WRITABLE);
+    table.insert_or_assign(1, 100, txn.handle());
+
+    bool flush_threw = false;
+    try {
+        txn.commit();
+    } catch (const std::runtime_error&) {
+        flush_threw = true;
+    }
+    if (!flush_threw || sink.flush_calls != 1) {
+        throw std::runtime_error("first commit did not fail in capture flush");
+    }
+
+    bool retry_rejected = false;
+    try {
+        txn.commit();
+    } catch (const std::logic_error&) {
+        retry_rejected = true;
+    }
+    if (!retry_rejected || sink.flush_calls != 1) {
+        throw std::runtime_error(
+            "commit retry after capture flush failure was not rejected early");
+    }
+
+    txn.rollback();
+    conn->detach_sync_capture();
+
+    {
+        auto ro = conn->transaction(TransactionMode::READ_ONLY);
+        int value = 0;
+        if (table.try_get(1, value, ro.handle())) {
+            throw std::runtime_error(
+                "failed capture flush transaction committed user value");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_partial_capture_flush_failure_blocks_commit_retry() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_partial_flush_failure.mdbx";
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+
+    KeyValueTable<int, int> table(conn, "data");
+    ThrowOnceFlushSink sink;
+    sink.consume_before_throw = true;
+    conn->attach_sync_capture(&sink);
+
+    auto txn = conn->transaction(TransactionMode::WRITABLE);
+    table.insert_or_assign(1, 100, txn.handle());
+
+    bool flush_threw = false;
+    try {
+        txn.commit();
+    } catch (const std::runtime_error&) {
+        flush_threw = true;
+    }
+    if (!flush_threw || !sink.pending.empty()) {
+        throw std::runtime_error(
+            "partial capture flush failure precondition mismatch");
+    }
+
+    bool retry_rejected = false;
+    try {
+        txn.commit();
+    } catch (const std::logic_error&) {
+        retry_rejected = true;
+    }
+    if (!retry_rejected || sink.flush_calls != 1) {
+        throw std::runtime_error(
+            "partial capture flush failure allowed commit retry");
+    }
+
+    txn.rollback();
+    conn->detach_sync_capture();
+
+    {
+        auto ro = conn->transaction(TransactionMode::READ_ONLY);
+        int value = 0;
+        if (table.try_get(1, value, ro.handle())) {
+            throw std::runtime_error(
+                "partial capture flush failure committed user value");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_raw_external_transaction_rejected_while_capture_attached() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_raw_txn_rejected.mdbx";
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+
+    KeyValueTable<int, int> table(conn, "data");
+    StubSink sink;
+    conn->attach_sync_capture(&sink);
+
+    MDBX_txn* raw = nullptr;
+    check_mdbx(
+        mdbx_txn_begin(conn->env_handle(),
+                       nullptr,
+                       MDBX_TXN_READWRITE,
+                       &raw),
+        "failed to begin raw transaction");
+
+    bool rejected = false;
+    try {
+        table.insert_or_assign(1, 100, raw);
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        mdbx_txn_abort(raw);
+        throw std::runtime_error(
+            "raw unmanaged transaction accepted with sync capture attached");
+    }
+    check_mdbx(mdbx_txn_commit(raw), "failed to commit empty raw transaction");
+    conn->detach_sync_capture();
+
+    {
+        auto ro = conn->transaction(TransactionMode::READ_ONLY);
+        int value = 0;
+        if (table.try_get(1, value, ro.handle())) {
+            throw std::runtime_error(
+                "raw rejected transaction still wrote user value");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_raw_read_only_transaction_allowed_while_capture_attached() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_raw_read_only_txn_allowed.mdbx";
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+
+    KeyValueTable<int, int> table(conn, "data");
+    table.insert_or_assign(1, 100);
+    table.insert_or_assign(2, 200);
+    table.insert_or_assign(3, 300);
+
+    StubSink sink;
+    conn->attach_sync_capture(&sink);
+
+    MDBX_txn* raw = nullptr;
+    check_mdbx(
+        mdbx_txn_begin(conn->env_handle(),
+                       nullptr,
+                       MDBX_TXN_RDONLY,
+                       &raw),
+        "failed to begin raw read-only transaction");
+
+    try {
+        int value = 0;
+        if (!table.try_get(1, value, raw) || value != 100) {
+            throw std::runtime_error(
+                "raw read-only transaction failed point lookup");
+        }
+        if (!table.contains(2, raw)) {
+            throw std::runtime_error(
+                "raw read-only transaction failed contains");
+        }
+        if (!table.contains_range(1, 3, raw)) {
+            throw std::runtime_error(
+                "raw read-only transaction failed contains_range");
+        }
+        if (table.count(raw) != 3u) {
+            throw std::runtime_error(
+                "raw read-only transaction failed count");
+        }
+        const std::map<int, int> pairs =
+            table.range(1, 3, raw);
+        if (pairs.size() != 3u) {
+            throw std::runtime_error(
+                "raw read-only transaction failed range scan");
+        }
+    } catch (...) {
+        mdbx_txn_abort(raw);
+        throw;
+    }
+    mdbx_txn_abort(raw);
+
+    conn->detach_sync_capture();
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_flush_only_capture_sink_is_abstract() {
+    static_assert(std::is_abstract<FlushOnlySink>::value,
+                  "flush-only capture sink must be abstract");
+}
+
 void test_changelog_capture_roundtrip() {
     using namespace mdbxc;
     const std::string p = "test_capture_changelog.mdbx";
@@ -1095,6 +1522,86 @@ void test_changelog_capture_roundtrip() {
         if (cl.contains(txn.handle(), node_id, 3)) {
             throw std::runtime_error("changelog unexpectedly has seq 3");
         }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_changelog_capture_preserves_enriched_change_op() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_enriched_changelog.mdbx";
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+
+    sync::NodeId node_id{};
+    for (int i = 0; i < 16; ++i) {
+        node_id[i] = static_cast<std::uint8_t>(0xB0 + i);
+    }
+
+    {
+        sync::MetaStore meta(conn->env_handle());
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        meta.open(txn.handle());
+        meta.set_node_id(txn.handle(), node_id);
+        txn.commit();
+    }
+
+    sync::ThreadLocalChangeAccumulator sink(conn);
+    conn->attach_sync_capture(&sink);
+
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeOp op;
+        op.op_type = sync::ChangeOpType::Put;
+        op.op_flags =
+            sync::OP_HAS_IDENTITY_KEY | sync::OP_HAS_REVISION_KEY;
+        op.dbi_flags = MDBX_CREATE;
+        op.dbi_name = "logical_data";
+        op.storage_key.push_back(0x01u);
+        op.value.push_back(0x02u);
+        op.identity_key.push_back(0x03u);
+        op.revision_key.push_back(0x04u);
+        sink.record_change_op(txn.handle(), op);
+        txn.commit();
+    }
+
+    conn->detach_sync_capture();
+
+    sync::ChangeLogStore cl(conn->env_handle());
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        cl.open(txn.handle());
+        txn.commit();
+    }
+
+    std::vector<std::uint8_t> bytes;
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        if (!cl.get(txn.handle(), node_id, 1, bytes)) {
+            throw std::runtime_error("enriched changelog batch missing");
+        }
+    }
+
+    const sync::ChangeBatch batch = sync::ChangeBatchCodec::decode(bytes);
+    if (batch.ops.size() != 1u) {
+        throw std::runtime_error("enriched changelog batch op count mismatch");
+    }
+
+    const sync::ChangeOp& decoded = batch.ops[0];
+    if (decoded.op_flags !=
+            (sync::OP_HAS_IDENTITY_KEY | sync::OP_HAS_REVISION_KEY) ||
+        decoded.identity_key.size() != 1u ||
+        decoded.identity_key[0] != 0x03u ||
+        decoded.revision_key.size() != 1u ||
+        decoded.revision_key[0] != 0x04u) {
+        throw std::runtime_error(
+            "enriched ChangeOp metadata was not preserved");
     }
 
     conn->disconnect();
@@ -1322,6 +1829,10 @@ int main(int argc, char** argv) {
     const Case cases[] = {
         { "test_no_sink_no_capture", &test_no_sink_no_capture },
         { "test_capture_writes_via_sink", &test_capture_writes_via_sink },
+        { "test_capture_uses_full_change_op_overload",
+          &test_capture_uses_full_change_op_overload },
+        { "test_legacy_sink_rejects_enriched_change_op",
+          &test_legacy_sink_rejects_enriched_change_op },
         { "test_capture_scope_restores_previous_sink",
           &test_capture_scope_restores_previous_sink },
         { "test_capture_scope_nested_scopes_restore_in_order",
@@ -1346,6 +1857,18 @@ int main(int argc, char** argv) {
         { "test_vector_store_writes_via_sink",
           &test_vector_store_writes_via_sink },
         { "test_capture_flush_on_commit", &test_capture_flush_on_commit },
+        { "test_capture_record_failure_blocks_explicit_commit",
+          &test_capture_record_failure_blocks_explicit_commit },
+        { "test_capture_flush_failure_blocks_commit_retry",
+          &test_capture_flush_failure_blocks_commit_retry },
+        { "test_partial_capture_flush_failure_blocks_commit_retry",
+          &test_partial_capture_flush_failure_blocks_commit_retry },
+        { "test_raw_external_transaction_rejected_while_capture_attached",
+          &test_raw_external_transaction_rejected_while_capture_attached },
+        { "test_raw_read_only_transaction_allowed_while_capture_attached",
+          &test_raw_read_only_transaction_allowed_while_capture_attached },
+        { "test_flush_only_capture_sink_is_abstract",
+          &test_flush_only_capture_sink_is_abstract },
         { "test_any_value_table_does_not_capture_in_v01",
           &test_any_value_table_does_not_capture_in_v01 },
         { "test_key_multi_value_table_does_not_capture_in_v01",
@@ -1353,6 +1876,8 @@ int main(int argc, char** argv) {
         { "test_hashed_key_value_store_does_not_capture_in_v01",
           &test_hashed_key_value_store_does_not_capture_in_v01 },
         { "test_changelog_capture_roundtrip", &test_changelog_capture_roundtrip },
+        { "test_changelog_capture_preserves_enriched_change_op",
+          &test_changelog_capture_preserves_enriched_change_op },
         { "test_zero_node_id_rejected", &test_zero_node_id_rejected },
         { "test_aborted_transaction_does_not_flush",
           &test_aborted_transaction_does_not_flush },

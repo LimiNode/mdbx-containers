@@ -9,6 +9,10 @@ All notable changes to this project will be documented in this file.
 - Added public `ChangeDomain`, `LogicalSchemaRef`, and `LogicalChange` model
   types for future logical table adapters. The current wire codec remains
   raw-DBI only.
+- Added `ISyncCaptureSink::record_change_op(MDBX_txn*, const ChangeOp&)` as the
+  preferred capture entry point. The previous raw-field callback remains the
+  source-compatible abstract sink contract; new full-`ChangeOp` sinks can
+  derive from `FullChangeSyncCaptureSink`.
 - Breaking transport-wire change: `TransportMessageCodec` is now version 4.
   Response DTOs include `SyncResponseErrorCode` plus `error_retryable` after
   the human-readable error string, and pull request DTOs include

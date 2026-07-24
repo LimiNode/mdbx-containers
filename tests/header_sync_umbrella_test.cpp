@@ -50,6 +50,21 @@ public:
     }
 };
 
+class HeaderFullChangeSyncSink : public mdbxc::sync::FullChangeSyncCaptureSink {
+public:
+    void record_change_op(MDBX_txn* txn,
+                          const mdbxc::sync::ChangeOp& change) override {
+        (void)txn;
+        last_change = change;
+    }
+
+    void flush_in_txn(MDBX_txn* txn) override {
+        (void)txn;
+    }
+
+    mdbxc::sync::ChangeOp last_change;
+};
+
 class HeaderSyncApplyObserver : public mdbxc::sync::ISyncApplyObserver {
 public:
     HeaderSyncApplyObserver() : calls(0) {}
@@ -140,6 +155,7 @@ int main() {
     mdbxc::sync::SyncNodeSession* node_session = nullptr;
     mdbxc::sync::SyncNodeSessionOptions node_session_options;
     HeaderSyncSink header_sink;
+    HeaderFullChangeSyncSink header_full_sink;
     HeaderSyncApplyObserver apply_observer;
     mdbxc::sync::SyncApplyEvent apply_event;
     apply_event.generation = 1u;
@@ -156,6 +172,7 @@ int main() {
     (void)node_session;
     (void)node_session_options;
     (void)header_sink;
+    (void)header_full_sink;
     mdbxc::sync::TransportMessageSizePolicy size_policy(1024u);
     (void)size_policy;
     mdbxc::sync::IWebSocketSyncChannel* websocket_channel = nullptr;

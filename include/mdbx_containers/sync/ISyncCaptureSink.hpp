@@ -35,8 +35,28 @@ namespace sync {
     public:
         virtual ~ISyncCaptureSink() = default;
 
-        /// \brief Called by \c BaseTable after a successful \c mdbx_put /
-        /// \c mdbx_del on a user table.
+        /// \brief Called by \c BaseTable after a successful user-table write.
+        /// \param txn The active MDBX write transaction that performed the
+        ///        change.
+        /// \param change Full raw-domain change operation.
+        /// \details Default implementation forwards to the legacy raw-field
+        /// callback only when \p change contains no enriched metadata. New
+        /// sinks should override this entry point when they need access to the
+        /// complete \c ChangeOp shape.
+        virtual void record_change_op(MDBX_txn* txn, const ChangeOp& change) {
+            if (change.op_flags != OP_NONE ||
+                !change.identity_key.empty() ||
+                !change.revision_key.empty()) {
+                throw std::logic_error(
+                    "ISyncCaptureSink default record_change_op forwarding cannot pass an enriched ChangeOp to a legacy raw-field sink");
+            }
+            record_change(txn, change.dbi_name, change.op_type,
+                          change.dbi_flags, change.storage_key, change.value);
+        }
+
+        /// \brief Legacy raw-field capture entry point.
+        /// \details Existing sinks may continue overriding this raw-field callback.
+        /// New code should prefer \c record_change_op(MDBX_txn*, const ChangeOp&).
         /// \param txn The active MDBX write transaction that performed the
         ///        change. Implementations may stage the op in thread-local
         ///        memory and defer the on-disk write to \c flush_in_txn.
@@ -65,12 +85,38 @@ namespace sync {
         /// \brief Discards any pending ops recorded for a transaction that
         /// is about to be aborted or rolled back.
         /// \param txn The about-to-be-aborted write transaction.
-        /// \details Default implementation is a no-op; overloads drop the
+        /// \details Default implementation is a no-op; overrides drop the
         /// pending ops so the next transaction on the same thread (or the
         /// next MDBX_txn* address if the allocator reuses it) starts clean.
         virtual void discard_txn(MDBX_txn* txn) noexcept {
             (void)txn;
         }
+    };
+
+    /// \brief Adapter base for sinks that want to implement only the full
+    ///        \c ChangeOp entry point.
+    /// \details The legacy raw-field callback is still the abstract compatibility
+    /// contract of \c ISyncCaptureSink. Derive from this helper when new code
+    /// wants every raw-shaped operation converted into a \c ChangeOp object.
+    class FullChangeSyncCaptureSink : public ISyncCaptureSink {
+    public:
+        void record_change(MDBX_txn* txn,
+                           const std::string& dbi_name,
+                           ChangeOpType op_type,
+                           std::uint32_t dbi_flags,
+                           const std::vector<std::uint8_t>& storage_key,
+                           const std::vector<std::uint8_t>& value) override {
+            ChangeOp op;
+            op.op_type = op_type;
+            op.dbi_flags = dbi_flags;
+            op.dbi_name = dbi_name;
+            op.storage_key = storage_key;
+            op.value = value;
+            record_change_op(txn, op);
+        }
+
+        void record_change_op(MDBX_txn* txn,
+                              const ChangeOp& change) override = 0;
     };
 
 } // namespace sync

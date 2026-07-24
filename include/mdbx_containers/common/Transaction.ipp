@@ -50,18 +50,18 @@ namespace mdbxc {
         m_txn = nullptr;
         m_started = false;
 
+#       if MDBXC_SYNC_ENABLED
+        if (registry && txn && was_started && mode == TransactionMode::WRITABLE) {
+            registry->on_discard(txn);
+        }
+#       endif
+
         if (txn) {
             const int rc = mdbx_txn_abort(txn);
             assert((rc == MDBX_SUCCESS || rc == MDBX_THREAD_MISMATCH) &&
                    "mdbx_txn_abort() failed in Transaction::release()");
             (void)rc;
         }
-
-#       if MDBXC_SYNC_ENABLED
-        if (registry && txn && was_started && mode == TransactionMode::WRITABLE) {
-            registry->on_discard(txn);
-        }
-#       endif
 
         if (registry && txn && was_started) {
             safe_unbind_txn(registry, txn);
@@ -186,6 +186,10 @@ namespace mdbxc {
         case TransactionMode::WRITABLE:
         {
             MDBX_txn* txn = m_txn;
+
+#           if MDBXC_SYNC_ENABLED
+            m_registry->on_discard(txn);
+#           endif
             const int rc = mdbx_txn_abort(txn);
 
             if (rc == MDBX_THREAD_MISMATCH) {
@@ -199,9 +203,6 @@ namespace mdbxc {
             m_txn = nullptr;
             m_started = false;
 
-#           if MDBXC_SYNC_ENABLED
-            registry->on_discard(txn);
-#           endif
             safe_unbind_txn(registry, txn);
             safe_unregister_txn_handle(registry);
 
