@@ -626,13 +626,13 @@ Application integration contract:
   pre-commit hook;
 - `BaseTable::record_op()` constructs a full `ChangeOp` and forwards it through
   `ISyncCaptureSink::record_change_op(txn, change)`. The older raw-field callback
-  remains the source-compatible abstract sink callback for existing custom
+  remains the source-compatible abstract sink contract for existing custom
   sinks; new full-`ChangeOp` sinks may derive from `FullChangeSyncCaptureSink`;
-- if `record_change()` throws after the user-table MDBX write succeeded, or
-  `flush_in_txn()` throws during pre-commit capture flush, the transaction is
-  marked as failed for sync capture. A later commit is rejected before another
-  flush attempt, so the caller must roll back or let the transaction guard
-  abort it;
+- if `record_change_op()` throws after the user-table MDBX write succeeded
+  including from legacy `record_change()` forwarding, or `flush_in_txn()`
+  throws during pre-commit capture flush, the transaction is marked as failed
+  for sync capture. A later commit is rejected before another flush attempt, so
+  the caller must roll back or let the transaction guard abort it;
 - mutating supported table calls must use connection-managed transactions while
   capture is attached. Caller-created raw writable `MDBX_txn*` handles are
   rejected before mutation because native `mdbx_txn_commit()` cannot invoke the
