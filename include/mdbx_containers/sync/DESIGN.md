@@ -587,7 +587,7 @@ Application integration contract:
   write operations are recorded by table code and flushed by the transaction
   pre-commit hook;
 - `BaseTable::record_op()` constructs a full `ChangeOp` and forwards it through
-  `ISyncCaptureSink::record_change(txn, change)`. The older raw-field overload
+  `ISyncCaptureSink::record_change_op(txn, change)`. The older raw-field overload
   remains the source-compatible abstract sink contract for existing custom
   sinks; new full-`ChangeOp` sinks may derive from `FullChangeSyncCaptureSink`;
 - choose the scope helper for bounded write phases owned by one stack frame;

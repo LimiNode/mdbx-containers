@@ -43,12 +43,12 @@ namespace sync {
         /// overload only when \p change contains no enriched metadata. New
         /// sinks should override this overload when they need access to the
         /// complete \c ChangeOp shape.
-        virtual void record_change(MDBX_txn* txn, const ChangeOp& change) {
+        virtual void record_change_op(MDBX_txn* txn, const ChangeOp& change) {
             if (change.op_flags != OP_NONE ||
                 !change.identity_key.empty() ||
                 !change.revision_key.empty()) {
                 throw std::logic_error(
-                    "ISyncCaptureSink legacy record_change overload cannot accept enriched ChangeOp");
+                    "ISyncCaptureSink legacy record_change_op cannot accept enriched ChangeOp");
             }
             record_change(txn, change.dbi_name, change.op_type,
                           change.dbi_flags, change.storage_key, change.value);
@@ -56,7 +56,7 @@ namespace sync {
 
         /// \brief Legacy raw-field capture entry point.
         /// \details Existing sinks may continue overriding this overload.
-        /// New code should prefer \c record_change(MDBX_txn*, const ChangeOp&).
+        /// New code should prefer \c record_change_op(MDBX_txn*, const ChangeOp&).
         /// \param txn The active MDBX write transaction that performed the
         ///        change. Implementations may stage the op in thread-local
         ///        memory and defer the on-disk write to \c flush_in_txn.
@@ -112,11 +112,11 @@ namespace sync {
             op.dbi_name = dbi_name;
             op.storage_key = storage_key;
             op.value = value;
-            record_change(txn, op);
+            record_change_op(txn, op);
         }
 
-        void record_change(MDBX_txn* txn,
-                           const ChangeOp& change) override = 0;
+        void record_change_op(MDBX_txn* txn,
+                              const ChangeOp& change) override = 0;
     };
 
 } // namespace sync

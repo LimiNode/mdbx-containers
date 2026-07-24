@@ -50,7 +50,7 @@ namespace sync {
               m_meta(m_env),
               m_change_log(m_env) {}
 
-        void record_change(MDBX_txn* txn, const ChangeOp& change) override {
+        void record_change_op(MDBX_txn* txn, const ChangeOp& change) override {
             txn = checked_txn_env(txn, m_env, "ThreadLocalChangeAccumulator::record_change");
             std::lock_guard<std::mutex> lk(m_mutex);
             m_pending[txn].push_back(change);
@@ -68,7 +68,7 @@ namespace sync {
             op.dbi_name = dbi_name;
             op.storage_key = storage_key;
             op.value = value;
-            record_change(txn, op);
+            record_change_op(txn, op);
         }
 
         void flush_in_txn(MDBX_txn* txn) override {

@@ -60,8 +60,8 @@ class FullChangeSink : public mdbxc::sync::FullChangeSyncCaptureSink {
 public:
     std::vector<mdbxc::sync::ChangeOp> m_recorded;
 
-    void record_change(MDBX_txn* txn,
-                       const mdbxc::sync::ChangeOp& change) override {
+    void record_change_op(MDBX_txn* txn,
+                          const mdbxc::sync::ChangeOp& change) override {
         (void)txn;
         m_recorded.push_back(change);
     }
@@ -75,8 +75,8 @@ class ThrowingChangeSink : public mdbxc::sync::FullChangeSyncCaptureSink {
 public:
     int flush_calls = 0;
 
-    void record_change(MDBX_txn* txn,
-                       const mdbxc::sync::ChangeOp& change) override {
+    void record_change_op(MDBX_txn* txn,
+                          const mdbxc::sync::ChangeOp& change) override {
         (void)txn;
         (void)change;
         throw std::runtime_error("capture record failure");
@@ -95,8 +95,8 @@ public:
     bool consume_before_throw = false;
     std::vector<mdbxc::sync::ChangeOp> pending;
 
-    void record_change(MDBX_txn* txn,
-                       const mdbxc::sync::ChangeOp& change) override {
+    void record_change_op(MDBX_txn* txn,
+                          const mdbxc::sync::ChangeOp& change) override {
         (void)txn;
         ++record_calls;
         pending.push_back(change);
@@ -505,7 +505,7 @@ void test_legacy_sink_rejects_enriched_change_op() {
 
     bool rejected = false;
     try {
-        base->record_change(nullptr, op);
+        base->record_change_op(nullptr, op);
     } catch (const std::logic_error&) {
         rejected = true;
     }
@@ -1567,7 +1567,7 @@ void test_changelog_capture_preserves_enriched_change_op() {
         op.value.push_back(0x02u);
         op.identity_key.push_back(0x03u);
         op.revision_key.push_back(0x04u);
-        sink.record_change(txn.handle(), op);
+        sink.record_change_op(txn.handle(), op);
         txn.commit();
     }
 

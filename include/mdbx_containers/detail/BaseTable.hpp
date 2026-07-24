@@ -219,7 +219,7 @@ namespace mdbxc {
             op.storage_key = storage_key;
             op.value = value;
             try {
-                sink->record_change(txn, op);
+                sink->record_change_op(txn, op);
             } catch (...) {
                 m_connection->mark_sync_capture_failed(txn);
                 throw;
