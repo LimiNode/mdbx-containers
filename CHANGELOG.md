@@ -22,6 +22,10 @@ All notable changes to this project will be documented in this file.
   converted to failure results so the caller-owned transaction can be aborted.
   `SyncEngine` still rejects unknown logical operations until a wire format and
   registry integration are added.
+- Added `KeyValueTableLogicalAdapter` as the first concrete logical adapter
+  helper for explicit `LogicalTableRegistry::preflight_then_apply()` usage.
+  It covers typed upsert/delete/clear payloads for `KeyValueTable` without
+  enabling automatic logical replication in `SyncEngine`.
 - Documented the staged logical sync contract: schema marker, logical wire
   frame, adapter preflight/apply, then capture. Deferred logical tables still
   require single-writer or application-serialized conflicting writes until a

@@ -85,6 +85,9 @@
   rejected.
 - `SyncEngine` exposes pull/push/apply primitives and
   `register_logical_schema()` for committed logical schema marker setup.
+  `KeyValueTableLogicalAdapter` is the first concrete logical adapter helper
+  for explicit `LogicalTableRegistry::preflight_then_apply()` calls; it is not
+  wired into the automatic sync pipeline yet.
   `DirectSyncPeer` provides in-process sync for tests and examples,
   `HttpSyncPeer` defines an HTTP-shaped
   adapter seam, `WebSocketSyncPeer` defines a binary message seam, and

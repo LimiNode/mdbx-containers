@@ -109,6 +109,9 @@
   flush делает transaction rollback-only; повторный `commit()` отклоняется.
 - `SyncEngine` предоставляет pull/push/apply primitives и
   `register_logical_schema()` для committed setup logical schema markers.
+  `KeyValueTableLogicalAdapter` - первый concrete logical adapter helper для
+  явных вызовов `LogicalTableRegistry::preflight_then_apply()`; он ещё не
+  подключён к automatic sync pipeline.
   `DirectSyncPeer` используется для in-process синхронизации в тестах и примерах,
   `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт
   binary message seam, а `SyncWorker` запускает фоновой polling.

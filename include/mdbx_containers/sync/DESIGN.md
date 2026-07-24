@@ -508,6 +508,14 @@ and compatibility tests.
   must abort that transaction; the registry cannot roll back a transaction it
   does not own.
 
+`adapters/KeyValueTableLogicalAdapter.hpp` provides the first concrete adapter
+helper. It translates typed `KeyValueTable` upsert/delete/clear operations into
+adapter-owned logical payloads and applies them through
+`LogicalTableRegistry::preflight_then_apply()` inside a caller-owned write
+transaction. It is intentionally standalone: it proves the adapter contract and
+payload shape for a simple table, but it is not yet connected to the automatic
+pull/push wire pipeline.
+
 The current `SyncEngine` does not call this registry yet. Unknown logical
 payloads must not fall back to raw DBI apply.
 
