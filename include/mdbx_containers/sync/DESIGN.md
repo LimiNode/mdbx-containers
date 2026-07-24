@@ -455,10 +455,14 @@ Real removal is explicit via `erase()`.
 | Value | `schema_id` repeated in the versioned value envelope, followed by `LogicalSchemaRecord { kind, schema_version, flags, dbi_name, dbi_names[] }`; owned `dbi_names[]` are stored as a sorted unique set |
 
 This store is a persistent compatibility marker for future logical table
-adapters. It does not enable logical sync by itself. A wrapper or adapter may
-call `register_or_verify(schema_id, record)` during lifecycle setup to ensure
-that an existing database was opened with the same logical table kind,
-application schema version, and owned physical DBI set.
+adapters. It does not enable logical sync by itself. Normal application setup
+should call `SyncEngine::register_logical_schema(schema_id, record)` so the
+marker is written through a committed sync-system lifecycle transaction. A
+wrapper or adapter may call `SchemaRegistryStore::register_or_verify()` only
+when it already owns the setup transaction, for example in tests, migrations,
+or repair tools. Both paths ensure that an existing database was opened with
+the same logical table kind, application schema version, and owned physical DBI
+set.
 
 `SyncEngine::initialize_local_identity()` creates this DBI together with the
 required sync metadata stores in a committed setup transaction. Standalone

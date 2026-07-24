@@ -846,6 +846,60 @@ void test_schema_registry_created_by_sync_engine_init() {
     cleanup(p);
 }
 
+void test_sync_engine_registers_logical_schema_marker() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_schema_engine_register.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+
+    SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x12), make_node(0x23));
+
+    LogicalSchemaRecord record;
+    record.dbi_name = "items";
+    record.kind = LogicalTableKind::KeyMultiValue;
+    record.schema_version = 1;
+    record.dbi_names.push_back("items");
+
+    engine.register_logical_schema("app.items.v1", record);
+    engine.register_logical_schema("app.items.v1", record);
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord out;
+        if (!store.get(txn.handle(), "app.items.v1", out) ||
+            out.dbi_name != record.dbi_name ||
+            out.kind != record.kind ||
+            out.schema_version != record.schema_version ||
+            out.dbi_names != record.dbi_names) {
+            throw std::runtime_error(
+                "SyncEngine logical schema marker was not persisted");
+        }
+    }
+
+    LogicalSchemaRecord mismatch = record;
+    mismatch.schema_version = 2;
+    bool caught = false;
+    try {
+        engine.register_logical_schema("app.items.v1", mismatch);
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    if (!caught) {
+        throw std::runtime_error(
+            "SyncEngine accepted mismatched logical schema marker");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 void expect_schema_get_failure(const std::string& label,
                                mdbxc::sync::SchemaRegistryStore& store,
                                MDBX_txn* txn,
@@ -1068,6 +1122,7 @@ int main() {
     test_schema_registry_store();
     test_schema_registry_open_after_aborted_create();
     test_schema_registry_created_by_sync_engine_init();
+    test_sync_engine_registers_logical_schema_marker();
     test_schema_registry_rejects_malformed_records();
     test_stores_require_open();
     return 0;

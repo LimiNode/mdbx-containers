@@ -6,7 +6,8 @@ All notable changes to this project will be documented in this file.
 - Added a persistent sync schema registry store for future logical table
   adapters. The registry records logical schema ids, table kinds, schema
   versions, and canonical sorted unique owned DBI names without enabling
-  logical replication yet.
+  logical replication yet. `SyncEngine::register_logical_schema()` is the
+  normal committed setup entry point for application schema markers.
 - Added public `ChangeDomain`, `LogicalSchemaRef`, and `LogicalChange` model
   types for future logical table adapters. The current wire codec remains
   raw-DBI only.

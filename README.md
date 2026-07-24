@@ -83,8 +83,10 @@
   read/search snapshot operations. Any exception from capture recording or
   flushing makes that transaction rollback-only; retrying `commit()` is
   rejected.
-- `SyncEngine` exposes pull/push/apply primitives, `DirectSyncPeer` provides
-  in-process sync for tests and examples, `HttpSyncPeer` defines an HTTP-shaped
+- `SyncEngine` exposes pull/push/apply primitives and
+  `register_logical_schema()` for committed logical schema marker setup.
+  `DirectSyncPeer` provides in-process sync for tests and examples,
+  `HttpSyncPeer` defines an HTTP-shaped
   adapter seam, `WebSocketSyncPeer` defines a binary message seam, and
   `SyncWorker` is the background polling driver. `mdbx_containers/sync/transport.hpp`
   is the transport-layer umbrella. Optional ready-made Simple-Web
