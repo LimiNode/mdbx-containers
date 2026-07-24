@@ -1,5 +1,6 @@
 #include <mdbx_containers.hpp>
 #include <mdbx_containers/sync.hpp>
+#include <algorithm>
 #include <cstdio>
 #include <cstdint>
 #include <cstring>
@@ -43,6 +44,67 @@ void put_raw_changelog(MDBX_txn* txn,
                    bytes.size() };
     mdbxc::check_mdbx(mdbx_put(txn, dbi, &k, &v, MDBX_NOOVERWRITE),
                       "raw changelog put failed");
+}
+
+void append_schema_string(std::vector<std::uint8_t>& out,
+                          const std::string& value) {
+    mdbxc::sync::detail::append_u32_le(out,
+        static_cast<std::uint32_t>(value.size()));
+    out.insert(out.end(), value.begin(), value.end());
+}
+
+std::vector<std::uint8_t> make_schema_record_bytes(
+        const std::string& embedded_schema_id,
+        std::uint16_t kind,
+        std::uint32_t schema_version,
+        std::uint32_t flags,
+        const std::string& dbi_name,
+        const std::vector<std::string>& dbi_names) {
+    std::vector<std::uint8_t> out;
+    append_schema_string(out, embedded_schema_id);
+    mdbxc::sync::detail::append_u16_le(out, kind);
+    mdbxc::sync::detail::append_u32_le(out, schema_version);
+    mdbxc::sync::detail::append_u32_le(out, flags);
+    append_schema_string(out, dbi_name);
+    mdbxc::sync::detail::append_u32_le(out,
+        static_cast<std::uint32_t>(dbi_names.size()));
+    for (std::size_t i = 0; i < dbi_names.size(); ++i) {
+        append_schema_string(out, dbi_names[i]);
+    }
+    return out;
+}
+
+std::vector<std::uint8_t> make_schema_record_bytes_with_count(
+        const std::string& embedded_schema_id,
+        std::uint16_t kind,
+        std::uint32_t schema_version,
+        std::uint32_t flags,
+        const std::string& dbi_name,
+        std::uint32_t dbi_names_count) {
+    std::vector<std::uint8_t> out;
+    append_schema_string(out, embedded_schema_id);
+    mdbxc::sync::detail::append_u16_le(out, kind);
+    mdbxc::sync::detail::append_u32_le(out, schema_version);
+    mdbxc::sync::detail::append_u32_le(out, flags);
+    append_schema_string(out, dbi_name);
+    mdbxc::sync::detail::append_u32_le(out, dbi_names_count);
+    return out;
+}
+
+void put_raw_schema_record(MDBX_txn* txn,
+                           MDBX_dbi dbi,
+                           const std::string& schema_id,
+                           const std::vector<std::uint8_t>& bytes) {
+    MDBX_val key = {
+        const_cast<char*>(schema_id.data()),
+        schema_id.size()
+    };
+    MDBX_val value = {
+        bytes.empty() ? nullptr : const_cast<std::uint8_t*>(&bytes[0]),
+        bytes.size()
+    };
+    mdbxc::check_mdbx(mdbx_put(txn, dbi, &key, &value, MDBX_UPSERT),
+                      "raw schema registry put failed");
 }
 
 void test_meta_store() {
@@ -617,6 +679,290 @@ void test_identity_key_collision() {
     cleanup(p);
 }
 
+void test_schema_registry_store() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_schema_registry.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+
+    LogicalSchemaRecord ordered;
+    ordered.dbi_name = "events";
+    ordered.kind = LogicalTableKind::KeyOrderedMultiValue;
+    ordered.schema_version = 1;
+    ordered.dbi_names.push_back("events");
+
+    LogicalSchemaRecord vector_like;
+    vector_like.dbi_name = "vectors";
+    vector_like.kind = LogicalTableKind::HashedKeyValue;
+    vector_like.schema_version = 3;
+    vector_like.dbi_names.push_back("vectors.ids");
+    vector_like.dbi_names.push_back("vectors.payload");
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        store.register_or_verify(txn.handle(), "app.events.v1", ordered);
+        store.register_or_verify(txn.handle(), "app.vectors.v3", vector_like);
+        store.register_or_verify(txn.handle(), "app.events.v1", ordered);
+        LogicalSchemaRecord permuted = vector_like;
+        std::reverse(permuted.dbi_names.begin(), permuted.dbi_names.end());
+        store.register_or_verify(txn.handle(), "app.vectors.v3", permuted);
+        txn.commit();
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+
+        LogicalSchemaRecord out;
+        if (!store.get(txn.handle(), "app.events.v1", out)) {
+            throw std::runtime_error("schema registry record missing");
+        }
+        if (out.dbi_name != ordered.dbi_name ||
+            out.kind != ordered.kind ||
+            out.schema_version != ordered.schema_version ||
+            out.dbi_names != ordered.dbi_names) {
+            throw std::runtime_error("schema registry record mismatch");
+        }
+
+        const std::vector<std::string> ids = store.schema_ids(txn.handle());
+        if (ids.size() != 2u ||
+            ids[0] != "app.events.v1" ||
+            ids[1] != "app.vectors.v3") {
+            throw std::runtime_error("schema registry ids mismatch");
+        }
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord duplicate = ordered;
+        duplicate.dbi_names.push_back("events");
+        bool caught = false;
+        try {
+            store.register_or_verify(txn.handle(), "app.duplicate.v1", duplicate);
+        } catch (const std::invalid_argument&) {
+            caught = true;
+        }
+        if (!caught) {
+            throw std::runtime_error("duplicate owned DBI was accepted");
+        }
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord mismatch = ordered;
+        mismatch.kind = LogicalTableKind::KeyMultiValue;
+        bool caught = false;
+        try {
+            store.register_or_verify(txn.handle(), "app.events.v1", mismatch);
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        if (!caught) {
+            throw std::runtime_error("schema registry mismatch was accepted");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_schema_registry_open_after_aborted_create() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_schema_abort_reuse.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+
+    LogicalSchemaRecord record;
+    record.dbi_name = "events";
+    record.kind = LogicalTableKind::KeyMultiValue;
+    record.schema_version = 1;
+    record.dbi_names.push_back("events");
+
+    SchemaRegistryStore store(conn->env_handle());
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        store.open(txn.handle());
+        store.register_or_verify(txn.handle(), "app.events.v1", record);
+        txn.rollback();
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        store.register_or_verify(txn.handle(), "app.events.v1", record);
+        txn.commit();
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        LogicalSchemaRecord out;
+        if (!store.get(txn.handle(), "app.events.v1", out) ||
+            out.dbi_name != "events") {
+            throw std::runtime_error(
+                "schema registry did not recover after aborted create");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_schema_registry_created_by_sync_engine_init() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_schema_engine_init.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+
+    SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x11), make_node(0x22));
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+        store.open(txn.handle());
+        if (!store.schema_ids(txn.handle()).empty()) {
+            throw std::runtime_error("new schema registry should be empty");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void expect_schema_get_failure(const std::string& label,
+                               mdbxc::sync::SchemaRegistryStore& store,
+                               MDBX_txn* txn,
+                               const std::string& schema_id) {
+    mdbxc::sync::LogicalSchemaRecord out;
+    out.dbi_name = "sentinel";
+    out.kind = mdbxc::sync::LogicalTableKind::KeyMultiValue;
+    out.schema_version = 99;
+    bool caught = false;
+    try {
+        (void)store.get(txn, schema_id, out);
+    } catch (const std::runtime_error&) {
+        caught = true;
+    } catch (const std::invalid_argument&) {
+        caught = true;
+    }
+    if (!caught) {
+        throw std::runtime_error(label + " was accepted");
+    }
+    if (out.dbi_name != "sentinel" ||
+        out.kind != mdbxc::sync::LogicalTableKind::KeyMultiValue ||
+        out.schema_version != 99u) {
+        throw std::runtime_error(label + " rewrote output on failure");
+    }
+}
+
+void test_schema_registry_rejects_malformed_records() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_schema_malformed.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        const MDBX_dbi raw = store.handle(txn.handle());
+        put_raw_schema_record(
+            txn.handle(), raw, "bad.count",
+            make_schema_record_bytes_with_count(
+                "bad.count",
+                static_cast<std::uint16_t>(LogicalTableKind::KeyMultiValue),
+                1, 0, "events", 0xffffffffu));
+        put_raw_schema_record(
+            txn.handle(), raw, "bad.kind",
+            make_schema_record_bytes(
+                "bad.kind", 0xffffu, 1, 0, "events",
+                std::vector<std::string>()));
+        put_raw_schema_record(
+            txn.handle(), raw, "bad.version",
+            make_schema_record_bytes(
+                "bad.version",
+                static_cast<std::uint16_t>(LogicalTableKind::KeyMultiValue),
+                0, 0, "events", std::vector<std::string>()));
+        put_raw_schema_record(
+            txn.handle(), raw, "bad.flags",
+            make_schema_record_bytes(
+                "bad.flags",
+                static_cast<std::uint16_t>(LogicalTableKind::KeyMultiValue),
+                1, 1, "events", std::vector<std::string>()));
+        put_raw_schema_record(
+            txn.handle(), raw, "bad.dbi",
+            make_schema_record_bytes(
+                "bad.dbi",
+                static_cast<std::uint16_t>(LogicalTableKind::KeyMultiValue),
+                1, 0, "", std::vector<std::string>()));
+        std::vector<std::string> empty_owned;
+        empty_owned.push_back("");
+        put_raw_schema_record(
+            txn.handle(), raw, "bad.owned",
+            make_schema_record_bytes(
+                "bad.owned",
+                static_cast<std::uint16_t>(LogicalTableKind::KeyMultiValue),
+                1, 0, "events", empty_owned));
+        put_raw_schema_record(
+            txn.handle(), raw, "bad.schema_id",
+            make_schema_record_bytes(
+                "other.schema",
+                static_cast<std::uint16_t>(LogicalTableKind::KeyMultiValue),
+                1, 0, "events", std::vector<std::string>()));
+        txn.commit();
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+        expect_schema_get_failure("bad count", store, txn.handle(), "bad.count");
+        expect_schema_get_failure("bad kind", store, txn.handle(), "bad.kind");
+        expect_schema_get_failure("bad version", store, txn.handle(), "bad.version");
+        expect_schema_get_failure("bad flags", store, txn.handle(), "bad.flags");
+        expect_schema_get_failure("bad dbi", store, txn.handle(), "bad.dbi");
+        expect_schema_get_failure("bad owned dbi", store, txn.handle(), "bad.owned");
+        expect_schema_get_failure(
+            "bad schema id", store, txn.handle(), "bad.schema_id");
+
+        bool schema_ids_failed = false;
+        try {
+            (void)store.schema_ids(txn.handle());
+        } catch (const std::runtime_error&) {
+            schema_ids_failed = true;
+        } catch (const std::invalid_argument&) {
+            schema_ids_failed = true;
+        }
+        if (!schema_ids_failed) {
+            throw std::runtime_error(
+                "schema_ids accepted malformed registry records");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 template<class Store, class Op>
 void expect_open_required(const std::string& label, Store& store, Op op) {
     bool caught = false;
@@ -719,6 +1065,10 @@ int main() {
     test_changelog_prune_up_to_boundary();
     test_changelog_prune_does_not_touch_other_origin();
     test_identity_key_collision();
+    test_schema_registry_store();
+    test_schema_registry_open_after_aborted_create();
+    test_schema_registry_created_by_sync_engine_init();
+    test_schema_registry_rejects_malformed_records();
     test_stores_require_open();
     return 0;
 }

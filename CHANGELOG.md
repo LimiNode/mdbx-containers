@@ -3,6 +3,9 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added a persistent sync schema registry store for future logical table
+  adapters. The registry records logical schema ids, table kinds, schema
+  versions, and owned DBI names without enabling logical replication yet.
 - Breaking transport-wire change: `TransportMessageCodec` is now version 4.
   Response DTOs include `SyncResponseErrorCode` plus `error_retryable` after
   the human-readable error string, and pull request DTOs include

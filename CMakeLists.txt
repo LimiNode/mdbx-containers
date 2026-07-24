@@ -437,12 +437,14 @@ if(MDBXC_BUILD_TESTS)
     )
     set(MDBXC_SYNC_STANDALONE_HEADERS
         mdbx_containers/sync/codec_flags.hpp
+        mdbx_containers/sync/LogicalSchema.hpp
         mdbx_containers/sync/ChangeOp.hpp
         mdbx_containers/sync/ChangeBatch.hpp
         mdbx_containers/sync/ChangeBatchCodec.hpp
         mdbx_containers/sync/SyncApplyObserver.hpp
         mdbx_containers/sync/SyncNodeSession.hpp
         mdbx_containers/sync/SyncWorkerGuard.hpp
+        mdbx_containers/sync/stores/SchemaRegistryStore.hpp
         mdbx_containers/sync/TransportMessageCodec.hpp
     )
 

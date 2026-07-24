@@ -47,6 +47,7 @@
 #include "stores/ChangeLogStore.hpp"
 #include "stores/MetaStore.hpp"
 #include "stores/OriginIndexStore.hpp"
+#include "stores/SchemaRegistryStore.hpp"
 
 namespace mdbxc {
 namespace sync {
@@ -149,6 +150,7 @@ namespace sync {
             auto txn = m_conn->transaction(TransactionMode::WRITABLE);
             MetaStore meta(m_conn->env_handle());
             meta.open(txn.handle());
+            initialize_system_stores(txn.handle());
             const NodeId existing_node = meta.get_node_id(txn.handle());
             const NodeId zero{};
             if (compare_node_id(existing_node, zero) != 0 &&
@@ -512,6 +514,18 @@ namespace sync {
             const NodeId zero{};
             if (compare_node_id(request_db_id, zero) == 0) return false;
             return compare_node_id(request_db_id, db_uuid()) == 0;
+        }
+
+        void initialize_system_stores(MDBX_txn* txn) {
+            txn = checked_external_txn(txn, "SyncEngine::initialize_system_stores");
+            MetaStore meta(m_conn->env_handle());
+            ChangeLogStore change_log(m_conn->env_handle());
+            AppliedStore applied(m_conn->env_handle());
+            SchemaRegistryStore schemas(m_conn->env_handle());
+            meta.open(txn);
+            change_log.open(txn);
+            applied.open(txn);
+            schemas.open(txn);
         }
 
         static ApplyOutcome make_apply_outcome(ApplyResult result,

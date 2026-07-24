@@ -447,6 +447,29 @@ back to a physical `storage_key` without re-reading the user table.
 the row readable for older incoming batches that still reference the key.
 Real removal is explicit via `erase()`.
 
+### `_mdbxc_sync_schema` (SchemaRegistryStore) — logical adapter marker
+
+| | |
+|---|---|
+| Key | application-defined logical schema id string |
+| Value | `LogicalSchemaRecord { kind, schema_version, flags, dbi_name, dbi_names[] }` |
+
+This store is a persistent compatibility marker for future logical table
+adapters. It does not enable logical sync by itself. A wrapper or adapter may
+call `register_or_verify(schema_id, record)` during lifecycle setup to ensure
+that an existing database was opened with the same logical table kind,
+application schema version, and owned physical DBI set.
+
+`SyncEngine::initialize_local_identity()` creates this DBI together with the
+required sync metadata stores in a committed setup transaction. Standalone
+maintenance code may still use `SchemaRegistryStore` directly, but must call
+`open(txn)` in each transaction before reading or writing.
+
+The registry intentionally uses an explicit application schema id instead of
+`typeid`, C++ type names, or ABI-dependent layout data. Unknown logical changes
+must still be rejected by the apply path until a matching logical adapter is
+registered.
+
 ## Codec — `ChangeBatchCodec`
 
 See `ChangeBatchCodec.hpp` layout comment for the full byte layout. Locked

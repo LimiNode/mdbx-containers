@@ -15,6 +15,7 @@
 #include "common.hpp"
 #include "sync/common.hpp"
 #include "sync/codec_flags.hpp"
+#include "sync/LogicalSchema.hpp"
 #include "sync/ChangeOp.hpp"
 #include "sync/CodecBounds.hpp"
 #include "sync/ChangeBatch.hpp"
@@ -43,6 +44,7 @@
 #include "sync/stores/ChangeLogStore.hpp"
 #include "sync/stores/AppliedStore.hpp"
 #include "sync/stores/IdentityIndexStore.hpp"
+#include "sync/stores/SchemaRegistryStore.hpp"
 #endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_HPP_INCLUDED
