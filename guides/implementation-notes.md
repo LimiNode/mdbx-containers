@@ -243,6 +243,15 @@ Operational rules:
   for a deliberate component lifecycle and keep the same lifecycle-only rule as
   `Connection`: do not change capture attachment concurrently with table
   operations or active transactions.
+- When capture is attached, mutating supported table calls must use
+  connection-managed transactions. Caller-created raw writable `MDBX_txn*`
+  handles are rejected before mutation because native `mdbx_txn_commit()`
+  cannot run the sync pre-commit hook. Caller-created raw read-only
+  transactions remain valid for read/search snapshot operations.
+- Any exception from capture recording or `flush_in_txn()` marks that write
+  transaction as failed for sync capture. The caller must roll it back or let
+  the transaction guard abort it; retrying `commit()` is rejected before a
+  second flush attempt.
 - Nested `SyncCaptureScope` objects are a stack discipline: detach or destroy
   the innermost scope first. Do not replace the connection capture sink through
   raw attach/detach while a scope owns it.

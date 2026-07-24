@@ -75,6 +75,14 @@
   atomic local batch. Read/search calls are not captured. A separate
   `SyncWorker` plus an `ISyncPeer` transport moves committed batches between
   nodes.
+- When sync capture is attached, mutating supported table calls must use
+  connection-managed transactions (`mdbx_containers::Transaction` or
+  `Connection::begin()` / `commit()`). Caller-created raw writable
+  `MDBX_txn*` handles cannot run the capture pre-commit hook and are rejected
+  before mutation. Caller-created raw read-only transactions remain valid for
+  read/search snapshot operations. Any exception from capture recording or
+  flushing makes that transaction rollback-only; retrying `commit()` is
+  rejected.
 - `SyncEngine` exposes pull/push/apply primitives, `DirectSyncPeer` provides
   in-process sync for tests and examples, `HttpSyncPeer` defines an HTTP-shaped
   adapter seam, `WebSocketSyncPeer` defines a binary message seam, and

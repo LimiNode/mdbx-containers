@@ -452,7 +452,7 @@ Real removal is explicit via `erase()`.
 | | |
 |---|---|
 | Key | application-defined logical schema id string |
-| Value | `LogicalSchemaRecord { kind, schema_version, flags, dbi_name, dbi_names[] }` |
+| Value | `schema_id` repeated in the versioned value envelope, followed by `LogicalSchemaRecord { kind, schema_version, flags, dbi_name, dbi_names[] }`; owned `dbi_names[]` are stored as a sorted unique set |
 
 This store is a persistent compatibility marker for future logical table
 adapters. It does not enable logical sync by itself. A wrapper or adapter may
@@ -462,8 +462,11 @@ application schema version, and owned physical DBI set.
 
 `SyncEngine::initialize_local_identity()` creates this DBI together with the
 required sync metadata stores in a committed setup transaction. Standalone
-maintenance code may still use `SchemaRegistryStore` directly, but must call
-`open(txn)` in each transaction before reading or writing.
+maintenance code may still use `SchemaRegistryStore` directly; public store
+operations reopen the DBI in the supplied transaction, while explicit
+`open(txn)` and `handle(txn)` remain available for low-level raw-handle
+maintenance code. `handle(txn)` also reopens the DBI in the supplied
+transaction before returning the raw DBI handle.
 
 The registry intentionally uses an explicit application schema id instead of
 `typeid`, C++ type names, or ABI-dependent layout data. Unknown logical changes
@@ -491,10 +494,33 @@ and compatibility tests.
 - `ILogicalTableAdapter::apply()` mutates user tables only after every logical
   change in the same apply transaction passed preflight.
 - `LogicalTableRegistry` is a non-owning lifecycle registry keyed by
-  `LogicalSchemaRef::schema_id`.
+  `LogicalSchemaRef::schema_id`, but dispatch validates the full
+  `(schema_id, kind, schema_version)` tuple and rejects non-zero reserved
+  logical flags before any adapter callback.
+- `LogicalTableRegistry::preflight_then_apply()` runs validation for every
+  change before any preflight, then runs every preflight before any apply. If
+  an adapter reports failure from `apply()` or throws after mutating data, the
+  helper returns failure and the caller that owns the MDBX write transaction
+  must abort that transaction; the registry cannot roll back a transaction it
+  does not own.
 
 The current `SyncEngine` does not call this registry yet. Unknown logical
 payloads must not fall back to raw DBI apply.
+
+Logical-table support therefore has a staged contract:
+
+1. Register a persistent schema marker for the table kind and physical DBI set.
+2. Add a versioned wire frame that distinguishes raw DBI operations from
+   logical operations and fails closed for unsupported capability bits.
+3. Register an adapter that can preflight every logical operation in the
+   incoming transaction before applying any of them.
+4. Enable capture only after every mutating public method maps to a tested
+   logical operation.
+
+Until a later causal-context PR defines dependency cursors, Lamport/HLC order,
+or another conflict-resolution model, logical table adapters may claim only
+single-writer or application-serialized conflicting writes for the affected
+logical dataset. General concurrent multi-writer convergence is out of scope.
 
 ## Codec — `ChangeBatchCodec`
 
@@ -600,8 +626,18 @@ Application integration contract:
   pre-commit hook;
 - `BaseTable::record_op()` constructs a full `ChangeOp` and forwards it through
   `ISyncCaptureSink::record_change_op(txn, change)`. The older raw-field callback
-  remains the source-compatible abstract sink callback for existing custom
+  remains the source-compatible abstract sink contract for existing custom
   sinks; new full-`ChangeOp` sinks may derive from `FullChangeSyncCaptureSink`;
+- if `record_change_op()` throws after the user-table MDBX write succeeded
+  including from legacy `record_change()` forwarding, or `flush_in_txn()`
+  throws during pre-commit capture flush, the transaction is marked as failed
+  for sync capture. A later commit is rejected before another flush attempt, so
+  the caller must roll back or let the transaction guard abort it;
+- mutating supported table calls must use connection-managed transactions while
+  capture is attached. Caller-created raw writable `MDBX_txn*` handles are
+  rejected before mutation because native `mdbx_txn_commit()` cannot invoke the
+  capture pre-commit hook. Caller-created raw read-only transactions remain
+  valid for read/search snapshot operations;
 - choose the scope helper for bounded write phases owned by one stack frame;
   choose explicit attach/detach only for a wider component lifecycle where the
   caller can prove no concurrent table operation or active transaction races

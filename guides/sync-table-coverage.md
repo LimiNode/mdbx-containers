@@ -40,6 +40,20 @@ The captured DBI name, DBI flags, physical key bytes, and value bytes must
 remain sufficient to open or validate the destination DBI and replay the
 operation without table-specific decoding.
 
+Logical table sync is still a reserved extension. The scaffolding added for it
+has three separate pieces that must not be treated as support by themselves:
+
+- `_mdbxc_sync_schema` records an explicit application schema id, logical kind,
+  schema version, and owned DBI names. Owned DBI names are treated as a
+  canonical sorted unique set;
+- `LogicalChange` describes an opaque adapter-owned payload;
+- `LogicalTableRegistry` reserves a two-phase preflight/apply path and validates
+  the full schema tuple plus reserved flags before invoking adapters.
+
+Until a wrapper has a codec extension, a registered adapter, capture tests, and
+round-trip tests, it must remain in the deferred rows below and must not emit
+logical or raw `ChangeOp` records.
+
 Focused capture and round-trip tests currently cover representative write,
 delete, bulk, range-erase, wrapper-specific `ClearTable`, indirect
 `VectorStore`, and deferred-table negative paths.
@@ -49,8 +63,13 @@ delete, bulk, range-erase, wrapper-specific `ClearTable`, indirect
 Do not add `record_op()` calls to deferred wrappers until the same PR also
 defines:
 
+- a persistent logical schema id and `SchemaRegistryStore` record, when the
+  wrapper needs table-specific logical apply;
 - the wire representation, including any table-specific metadata;
+- the `ILogicalTableAdapter` implementation and preflight/apply rules;
 - apply-side reconstruction or validation rules;
+- a transaction owner that aborts the whole apply transaction if an adapter
+  reports failure or throws after any mutation;
 - capture tests for every mutating method that can change logical state;
 - round-trip replication tests that compare source and destination logical
   state;
