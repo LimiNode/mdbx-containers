@@ -929,7 +929,7 @@ void test_sync_engine_registers_logical_schema_without_identity_init() {
 
     LogicalSchemaRecord record;
     record.dbi_name = "fresh_items";
-    record.kind = LogicalTableKind::KeyValue;
+    record.kind = LogicalTableKind::KeyMultiValue;
     record.schema_version = 1;
     record.dbi_names.push_back("fresh_items");
 
