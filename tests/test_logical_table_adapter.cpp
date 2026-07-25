@@ -471,36 +471,53 @@ void test_mdbx_mutation_rolls_back_when_later_apply_fails() {
     if (result.ok) {
         throw std::runtime_error("failing logical apply succeeded");
     }
+
+    MDBX_dbi write_dbi = 0;
+    mdbxc::check_mdbx(
+        mdbx_dbi_open(txn.handle(), "logical_adapter_rollback_items",
+                      static_cast<MDBX_db_flags_t>(0), &write_dbi),
+        "logical adapter rollback write DBI open failed");
+    const char key_bytes[] = "logical-key";
+    MDBX_val key = {
+        const_cast<char*>(key_bytes),
+        std::strlen(key_bytes)
+    };
+    MDBX_val value;
+    mdbxc::check_mdbx(mdbx_get(txn.handle(), write_dbi, &key, &value),
+                      "logical adapter rollback write read failed");
+    const char expected_value[] = "partial-value";
+    if (value.iov_len != std::strlen(expected_value) ||
+        std::memcmp(value.iov_base, expected_value,
+                    std::strlen(expected_value)) != 0) {
+        throw std::runtime_error(
+            "logical adapter mutation was not visible before rollback");
+    }
     txn.rollback();
 
-    MDBX_txn* raw_read = nullptr;
-    mdbxc::check_mdbx(mdbx_txn_begin(conn->env_handle(), nullptr,
-                                     MDBX_TXN_RDONLY, &raw_read),
-                      "logical adapter rollback read txn begin failed");
-    struct ReadGuard {
-        MDBX_txn* txn;
-        ~ReadGuard() { if (txn != nullptr) mdbx_txn_abort(txn); }
-    } read_guard = { raw_read };
+    {
+        MDBX_txn* raw_read = nullptr;
+        mdbxc::check_mdbx(mdbx_txn_begin(conn->env_handle(), nullptr,
+                                         MDBX_TXN_RDONLY, &raw_read),
+                          "logical adapter rollback read txn begin failed");
+        struct ReadGuard {
+            MDBX_txn* txn;
+            ~ReadGuard() { if (txn != nullptr) mdbx_txn_abort(txn); }
+        } read_guard = { raw_read };
 
-    MDBX_dbi dbi = 0;
-    const int open_rc = mdbx_dbi_open(
-        raw_read, "logical_adapter_rollback_items",
-        static_cast<MDBX_db_flags_t>(0), &dbi);
-    if (open_rc != MDBX_NOTFOUND) {
-        mdbxc::check_mdbx(open_rc,
-                          "logical adapter rollback DBI open failed");
-        const char key_bytes[] = "logical-key";
-        MDBX_val key = {
-            const_cast<char*>(key_bytes),
-            std::strlen(key_bytes)
-        };
-        MDBX_val value;
-        const int get_rc = mdbx_get(raw_read, dbi, &key, &value);
-        if (get_rc != MDBX_NOTFOUND) {
-            mdbxc::check_mdbx(get_rc,
-                              "logical adapter rollback read failed");
-            throw std::runtime_error(
-                "logical adapter partial MDBX mutation survived rollback");
+        MDBX_dbi dbi = 0;
+        const int open_rc = mdbx_dbi_open(
+            raw_read, "logical_adapter_rollback_items",
+            static_cast<MDBX_db_flags_t>(0), &dbi);
+        if (open_rc != MDBX_NOTFOUND) {
+            mdbxc::check_mdbx(open_rc,
+                              "logical adapter rollback DBI open failed");
+            const int get_rc = mdbx_get(raw_read, dbi, &key, &value);
+            if (get_rc != MDBX_NOTFOUND) {
+                mdbxc::check_mdbx(get_rc,
+                                  "logical adapter rollback read failed");
+                throw std::runtime_error(
+                    "logical adapter partial MDBX mutation survived rollback");
+            }
         }
     }
 
