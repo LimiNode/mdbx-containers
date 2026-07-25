@@ -110,7 +110,10 @@
 - `SyncEngine` предоставляет pull/push/apply primitives и
   `register_logical_schema()` для committed setup logical schema markers.
   `KeyValueTableLogicalAdapter` - первый concrete logical adapter helper для
-  явных вызовов `LogicalTableRegistry::preflight_then_apply()`; он ещё не
+  явных вызовов `LogicalTableRegistry::preflight_then_apply()`. Его payload
+  codec отделён от физического storage-формата таблицы и сейчас поддерживает
+  `std::string`, `bool` и integral values до 64 бит; входящий logical apply
+  подавляет локальный raw capture для затронутой транзакции. Он ещё не
   подключён к automatic sync pipeline.
   `DirectSyncPeer` используется для in-process синхронизации в тестах и примерах,
   `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт

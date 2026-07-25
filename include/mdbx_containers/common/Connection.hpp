@@ -28,6 +28,7 @@
 #include "Transaction.hpp"
 
 namespace mdbxc {
+    class BaseTable;
     class VectorStore;
 
     namespace sync {
@@ -200,6 +201,29 @@ namespace mdbxc {
         /// \brief Returns the currently attached \c ISyncCaptureSink or \c nullptr.
         sync::ISyncCaptureSink* sync_capture() const;
 
+        /// \brief Temporarily suppresses sync capture for one writable transaction.
+        /// \details Intended for incoming logical sync apply paths that must
+        /// write through public table wrappers without re-publishing the same
+        /// incoming change as a local raw \c ChangeOp.
+        class SyncCaptureSuppressionScope {
+        public:
+            SyncCaptureSuppressionScope(Connection& connection, MDBX_txn* txn);
+            ~SyncCaptureSuppressionScope() noexcept;
+
+            SyncCaptureSuppressionScope(
+                const SyncCaptureSuppressionScope&) = delete;
+            SyncCaptureSuppressionScope& operator=(
+                const SyncCaptureSuppressionScope&) = delete;
+            SyncCaptureSuppressionScope(
+                SyncCaptureSuppressionScope&&) = delete;
+            SyncCaptureSuppressionScope& operator=(
+                SyncCaptureSuppressionScope&&) = delete;
+
+        private:
+            Connection* m_connection;
+            MDBX_txn* m_txn;
+        };
+
         /// \brief Returns the remote sync-apply invalidation generation.
         /// \details The value increments after a successful
         /// \c SyncEngine::handle_push() commit that applied at least one
@@ -259,6 +283,7 @@ namespace mdbxc {
         void sync_to_disk(bool force = true, bool nonblock = false);
 
     private:
+        friend class BaseTable;
         friend class Transaction;
 
         MDBX_env *m_env = nullptr;          ///< Pointer to the MDBX environment handle.
@@ -295,6 +320,9 @@ namespace mdbxc {
         void mark_sync_capture_failed(MDBX_txn* txn) noexcept;
         bool sync_capture_failed(MDBX_txn* txn) const noexcept;
         void clear_sync_capture_failed(MDBX_txn* txn) noexcept;
+        void begin_sync_capture_suppression(MDBX_txn* txn);
+        void end_sync_capture_suppression(MDBX_txn* txn) noexcept;
+        bool sync_capture_suppressed(MDBX_txn* txn) const;
         void ensure_sync_capture_txn_supported(MDBX_txn* txn,
                                                const char* context) const;
         struct SyncApplyObserverState;
@@ -349,6 +377,7 @@ namespace mdbxc {
         std::uint64_t m_sync_capture_token = 0;
         std::uint64_t m_next_sync_capture_token = 0;
         MDBX_txn* m_sync_capture_failed_txn = nullptr;
+        std::vector<MDBX_txn*> m_sync_capture_suppressed_txns;
         mutable std::mutex m_sync_capture_failure_mutex;
         std::uint64_t m_next_sync_apply_observer_token = 0;
         std::uint64_t m_sync_apply_generation = 0;

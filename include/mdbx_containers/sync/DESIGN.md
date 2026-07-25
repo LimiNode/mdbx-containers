@@ -516,6 +516,12 @@ transaction. It is intentionally standalone: it proves the adapter contract and
 payload shape for a simple table, but it is not yet connected to the automatic
 pull/push wire pipeline.
 
+The adapter payload codec is not the table storage serializer. The initial
+codec surface is deliberately small and stable: `std::string`, `bool`, and
+integral values whose width is at most 64 bits. Apply uses a transaction-scoped
+sync-capture suppression guard so an incoming logical change written through
+public table methods is not re-published as a local raw `ChangeOp`.
+
 The current `SyncEngine` does not call this registry yet. Unknown logical
 payloads must not fall back to raw DBI apply.
 

@@ -24,8 +24,11 @@ All notable changes to this project will be documented in this file.
   registry integration are added.
 - Added `KeyValueTableLogicalAdapter` as the first concrete logical adapter
   helper for explicit `LogicalTableRegistry::preflight_then_apply()` usage.
-  It covers typed upsert/delete/clear payloads for `KeyValueTable` without
-  enabling automatic logical replication in `SyncEngine`.
+  It covers typed upsert/delete/clear payloads for `KeyValueTable` with a
+  stable logical codec for `std::string`, `bool`, and integral values up to
+  64 bits. Incoming logical apply suppresses local raw capture for the affected
+  transaction and does not enable automatic logical replication in
+  `SyncEngine`.
 - Documented the staged logical sync contract: schema marker, logical wire
   frame, adapter preflight/apply, then capture. Deferred logical tables still
   require single-writer or application-serialized conflicting writes until a
