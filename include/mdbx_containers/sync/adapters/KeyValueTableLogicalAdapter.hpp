@@ -29,6 +29,40 @@ namespace sync {
 
 namespace detail {
 
+    template<class T>
+    struct KeyValueLogicalPlainCharType {
+        typedef typename std::remove_cv<T>::type value_type;
+        static const bool value =
+            std::is_same<value_type, char>::value ||
+            std::is_same<value_type, wchar_t>::value ||
+            std::is_same<value_type, char16_t>::value ||
+            std::is_same<value_type, char32_t>::value;
+    };
+
+    template<class T>
+    struct KeyValueLogicalFixedIntegralType {
+        typedef typename std::remove_cv<T>::type value_type;
+        static const bool value =
+            !KeyValueLogicalPlainCharType<value_type>::value &&
+            (std::is_same<value_type, std::int8_t>::value ||
+             std::is_same<value_type, std::uint8_t>::value ||
+             std::is_same<value_type, std::int16_t>::value ||
+             std::is_same<value_type, std::uint16_t>::value ||
+             std::is_same<value_type, std::int32_t>::value ||
+             std::is_same<value_type, std::uint32_t>::value ||
+             std::is_same<value_type, std::int64_t>::value ||
+             std::is_same<value_type, std::uint64_t>::value);
+    };
+
+    template<class T>
+    struct KeyValueLogicalCodecSupported {
+        typedef typename std::remove_cv<T>::type value_type;
+        static const bool value =
+            KeyValueLogicalFixedIntegralType<value_type>::value ||
+            std::is_same<value_type, bool>::value ||
+            std::is_same<value_type, std::string>::value;
+    };
+
     template<class T, class Enable = void>
     struct KeyValueLogicalCodec;
 
@@ -36,7 +70,7 @@ namespace detail {
     struct KeyValueLogicalCodec<
         T,
         typename std::enable_if<
-            std::is_integral<T>::value && !std::is_same<T, bool>::value
+            KeyValueLogicalFixedIntegralType<T>::value
         >::type> {
         static std::vector<std::uint8_t> encode(T value) {
             static_assert(sizeof(T) <= 8,
@@ -138,14 +172,21 @@ namespace detail {
     /// \brief First concrete logical adapter for simple one-value-per-key tables.
     /// \details The payload format is adapter-owned and intentionally separate
     /// from the raw DBI wire codec. The initial stable codec supports
-    /// \c std::string, \c bool, and integral types up to 64 bits. Incoming
-    /// logical apply suppresses local raw capture for the supplied transaction.
-    /// It is used only when a caller explicitly invokes
+    /// \c std::string, \c bool, and fixed-width integral aliases up to 64 bits.
+    /// Plain character types are rejected; platform-sized source spellings such
+    /// as \c long and \c size_t should not be used for portable logical schemas.
+    /// Incoming logical apply suppresses local raw capture for the supplied
+    /// transaction. It is used only when a caller explicitly invokes
     /// \c LogicalTableRegistry::preflight_then_apply().
     template<class KeyT, class ValueT, class Options = DefaultTableOptions>
     class KeyValueTableLogicalAdapter : public ILogicalTableAdapter {
     public:
         typedef KeyValueTable<KeyT, ValueT, Options> table_type;
+
+        static_assert(detail::KeyValueLogicalCodecSupported<KeyT>::value,
+                      "KeyValueTableLogicalAdapter key type is not supported by the stable logical codec");
+        static_assert(detail::KeyValueLogicalCodecSupported<ValueT>::value,
+                      "KeyValueTableLogicalAdapter value type is not supported by the stable logical codec");
 
         KeyValueTableLogicalAdapter(table_type& table,
                                     const std::string& schema_id,

@@ -4,11 +4,31 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace {
+
+static_assert(mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+                  std::int32_t>::value,
+              "int32_t must be supported by KeyValue logical codec");
+static_assert(mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+                  std::uint64_t>::value,
+              "uint64_t must be supported by KeyValue logical codec");
+static_assert(!mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+                  char>::value,
+              "plain char must not be supported by KeyValue logical codec");
+static_assert(!mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+                  wchar_t>::value,
+              "wchar_t must not be supported by KeyValue logical codec");
+static_assert(!mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+                  char16_t>::value,
+              "char16_t must not be supported by KeyValue logical codec");
+static_assert(!mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+                  char32_t>::value,
+              "char32_t must not be supported by KeyValue logical codec");
 
 void cleanup(const std::string& p) {
     std::remove(p.c_str());
@@ -163,6 +183,29 @@ void test_key_value_logical_adapter_uses_stable_payload() {
         expected_raw,
         expected_raw + sizeof(expected_raw) / sizeof(expected_raw[0]));
     MDBXC_TEST_ASSERT(change.payload == expected);
+
+    mdbxc::KeyValueTable<std::int32_t, std::uint64_t> fixed_table(
+        conn, "logical_key_value_payload_fixed");
+    mdbxc::sync::KeyValueTableLogicalAdapter<
+        std::int32_t, std::uint64_t> fixed_adapter(
+            fixed_table, "app.logical_kv_payload_fixed.v1");
+    const mdbxc::sync::LogicalChange fixed_change =
+        fixed_adapter.make_upsert(
+            (std::numeric_limits<std::int32_t>::min)(),
+            (std::numeric_limits<std::uint64_t>::max)());
+    const std::uint8_t expected_fixed_raw[] = {
+        8, 0, 0, 0,
+        0xFF, 0xFF, 0xFF, 0xFF,
+        0x80, 0x00, 0x00, 0x00,
+        8, 0, 0, 0,
+        0xFF, 0xFF, 0xFF, 0xFF,
+        0xFF, 0xFF, 0xFF, 0xFF
+    };
+    const std::vector<std::uint8_t> expected_fixed(
+        expected_fixed_raw,
+        expected_fixed_raw + sizeof(expected_fixed_raw) /
+            sizeof(expected_fixed_raw[0]));
+    MDBXC_TEST_ASSERT(fixed_change.payload == expected_fixed);
 
     conn->disconnect();
     cleanup(path);

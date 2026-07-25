@@ -112,9 +112,11 @@
   `KeyValueTableLogicalAdapter` - первый concrete logical adapter helper для
   явных вызовов `LogicalTableRegistry::preflight_then_apply()`. Его payload
   codec отделён от физического storage-формата таблицы и сейчас поддерживает
-  `std::string`, `bool` и integral values до 64 бит; входящий logical apply
-  подавляет локальный raw capture для затронутой транзакции. Он ещё не
-  подключён к automatic sync pipeline.
+  `std::string`, `bool` и fixed-width integer aliases до 64 бит; не используйте
+  plain character или platform-sized spellings вроде `long` и `size_t` как
+  переносимые поля logical schema. Входящий logical apply подавляет локальный
+  raw capture для затронутой транзакции. Он ещё не подключён к automatic sync
+  pipeline.
   `DirectSyncPeer` используется для in-process синхронизации в тестах и примерах,
   `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт
   binary message seam, а `SyncWorker` запускает фоновой polling.
