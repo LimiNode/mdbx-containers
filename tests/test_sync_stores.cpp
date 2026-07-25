@@ -896,6 +896,59 @@ void test_sync_engine_registers_logical_schema_marker() {
             "SyncEngine accepted mismatched logical schema marker");
     }
 
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord out;
+        if (!store.get(txn.handle(), "app.items.v1", out) ||
+            out.dbi_name != record.dbi_name ||
+            out.kind != record.kind ||
+            out.schema_version != record.schema_version ||
+            out.dbi_names != record.dbi_names) {
+            throw std::runtime_error(
+                "mismatched logical schema marker rewrote existing record");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_sync_engine_registers_logical_schema_without_identity_init() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_schema_engine_register_fresh.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+
+    SyncEngine engine(conn);
+
+    LogicalSchemaRecord record;
+    record.dbi_name = "fresh_items";
+    record.kind = LogicalTableKind::KeyValue;
+    record.schema_version = 1;
+    record.dbi_names.push_back("fresh_items");
+
+    engine.register_logical_schema("app.fresh_items.v1", record);
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord out;
+        if (!store.get(txn.handle(), "app.fresh_items.v1", out) ||
+            out.dbi_name != record.dbi_name ||
+            out.kind != record.kind ||
+            out.schema_version != record.schema_version ||
+            out.dbi_names != record.dbi_names) {
+            throw std::runtime_error(
+                "fresh SyncEngine logical schema marker was not persisted");
+        }
+    }
+
     conn->disconnect();
     cleanup(p);
 }
@@ -1123,6 +1176,7 @@ int main() {
     test_schema_registry_open_after_aborted_create();
     test_schema_registry_created_by_sync_engine_init();
     test_sync_engine_registers_logical_schema_marker();
+    test_sync_engine_registers_logical_schema_without_identity_init();
     test_schema_registry_rejects_malformed_records();
     test_stores_require_open();
     return 0;
