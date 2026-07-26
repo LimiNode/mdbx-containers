@@ -187,6 +187,20 @@ namespace mdbxc {
         return m_sync_capture;
     }
 
+    inline Connection::SyncCaptureSuppressionScope::
+    SyncCaptureSuppressionScope(Connection& connection, MDBX_txn* txn)
+        : m_connection(&connection),
+          m_txn(txn) {
+        m_connection->begin_sync_capture_suppression(m_txn);
+    }
+
+    inline Connection::SyncCaptureSuppressionScope::
+    ~SyncCaptureSuppressionScope() noexcept {
+        if (m_connection != nullptr) {
+            m_connection->end_sync_capture_suppression(m_txn);
+        }
+    }
+
     inline std::uint64_t Connection::sync_apply_generation() const {
         std::lock_guard<std::mutex> locker(m_mdbx_mutex);
         return m_sync_apply_generation;
@@ -298,6 +312,51 @@ namespace mdbxc {
         if (m_sync_capture_failed_txn == txn) {
             m_sync_capture_failed_txn = nullptr;
         }
+    }
+
+    inline void Connection::begin_sync_capture_suppression(MDBX_txn* txn) {
+        if (txn == nullptr) {
+            throw std::invalid_argument(
+                "Connection::SyncCaptureSuppressionScope transaction cannot be null");
+        }
+        checked_txn_env(txn, m_env,
+                        "Connection::SyncCaptureSuppressionScope");
+        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        m_sync_capture_suppressed_txns.push_back(txn);
+    }
+
+    inline void Connection::end_sync_capture_suppression(
+            MDBX_txn* txn) noexcept {
+        if (txn == nullptr) {
+            return;
+        }
+        try {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            for (std::vector<MDBX_txn*>::iterator it =
+                     m_sync_capture_suppressed_txns.begin();
+                 it != m_sync_capture_suppressed_txns.end(); ++it) {
+                if (*it == txn) {
+                    m_sync_capture_suppressed_txns.erase(it);
+                    return;
+                }
+            }
+        } catch (...) {
+            // Destructors must not throw; a missing suppression entry is benign.
+        }
+    }
+
+    inline bool Connection::sync_capture_suppressed(MDBX_txn* txn) const {
+        if (txn == nullptr) {
+            return false;
+        }
+        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        for (std::size_t i = 0; i < m_sync_capture_suppressed_txns.size();
+             ++i) {
+            if (m_sync_capture_suppressed_txns[i] == txn) {
+                return true;
+            }
+        }
+        return false;
     }
 
     inline void Connection::ensure_sync_capture_txn_supported(

@@ -508,6 +508,29 @@ and compatibility tests.
   must abort that transaction; the registry cannot roll back a transaction it
   does not own.
 
+`adapters/KeyValueTableLogicalAdapter.hpp` provides the first concrete adapter
+helper. It translates typed `KeyValueTable` upsert/delete/clear operations into
+adapter-owned logical payloads and applies them through
+`LogicalTableRegistry::preflight_then_apply()` inside a caller-owned write
+transaction. It is intentionally standalone: it proves the adapter contract and
+payload shape for a simple table, but it is not yet connected to the automatic
+pull/push wire pipeline.
+
+The adapter payload codec is not the table storage serializer. The initial
+codec surface is deliberately small and explicit: callers provide key/value
+codec tags such as `KeyValueLogicalInt64Codec<long>` and
+`KeyValueLogicalStringCodec<std::string>`. The codec tag, not the native C++
+source spelling, defines the logical wire type; for example, local `long` may
+be mapped to signed 64-bit wire integers and range-checked on decode. Codec
+tags are part of the logical schema contract, so changing them requires a new
+schema id, or an explicit schema-marker migration. The current registry is
+immutable: changing `schema_version` under an already registered schema id is
+detected as a mismatch. Integer logical payload bytes are little-endian,
+matching the project-wide payload integer rule above. Apply uses a
+transaction-scoped sync-capture suppression guard so an incoming logical change
+written through public table methods is not re-published as a local raw
+`ChangeOp`.
+
 The current `SyncEngine` does not call this registry yet. Unknown logical
 payloads must not fall back to raw DBI apply.
 
@@ -1180,6 +1203,10 @@ When HLC or similar lands in v0.2, it goes in as opaque bytes inside
 
 - `meta_schema_version()` currently returns 1; bump rule + migration
   procedure not defined.
+- Logical schema-marker migration API. The current `_mdbxc_sync_schema`
+  registry is immutable and only creates or verifies exact records; changing a
+  codec tag for an existing logical table requires a new schema id until an
+  explicit marker migration lifecycle is designed.
 - Public sync API stability after the first external transport adapter.
 - `PeerRegistry` for multi-peer fan-out — single peer per sync invocation
   in v0.1.

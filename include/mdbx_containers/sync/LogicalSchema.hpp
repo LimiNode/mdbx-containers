@@ -17,6 +17,7 @@ namespace sync {
         KeyOrderedMultiValue = 2, ///< Key-to-multiple-values table with presentation order.
         AnyValue             = 3, ///< Dynamically typed value table.
         HashedKeyValue       = 4, ///< Hashed key-value store.
+        KeyValue             = 5, ///< One value per key table.
     };
 
     /// \brief Returns true when \p kind is a supported logical table kind.
@@ -26,6 +27,7 @@ namespace sync {
             case LogicalTableKind::KeyOrderedMultiValue:
             case LogicalTableKind::AnyValue:
             case LogicalTableKind::HashedKeyValue:
+            case LogicalTableKind::KeyValue:
                 return true;
             case LogicalTableKind::Unknown:
                 return false;

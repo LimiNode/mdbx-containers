@@ -127,6 +127,16 @@ namespace mdbxc {
             }
         }
 
+        /// \brief Returns the MDBX DBI name used by this table wrapper.
+        const std::string& dbi_name() const noexcept {
+            return m_name;
+        }
+
+        /// \brief Returns the shared MDBX connection used by this table wrapper.
+        std::shared_ptr<Connection> connection() const {
+            return m_connection;
+        }
+
     protected:
         struct CursorGuard {
             MDBX_cursor* cursor;
@@ -210,6 +220,7 @@ namespace mdbxc {
                        const std::vector<std::uint8_t>& storage_key,
                        const std::vector<std::uint8_t>& value) const {
             if (m_connection->is_read_only()) return;
+            if (m_connection->sync_capture_suppressed(txn)) return;
             sync::ISyncCaptureSink* sink = m_connection->sync_capture();
             if (sink == nullptr) return;
             sync::ChangeOp op;
