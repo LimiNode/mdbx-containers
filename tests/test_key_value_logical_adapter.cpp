@@ -11,24 +11,29 @@
 
 namespace {
 
-static_assert(mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+typedef mdbxc::sync::KeyValueLogicalInt32Codec<int> IntKeyCodec;
+typedef mdbxc::sync::KeyValueLogicalStringCodec<std::string> StringValueCodec;
+typedef mdbxc::sync::KeyValueTableLogicalAdapter<
+    int, std::string, IntKeyCodec, StringValueCodec> IntStringAdapter;
+
+static_assert(mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
                   std::int32_t>::value,
-              "int32_t must be supported by KeyValue logical codec");
-static_assert(mdbxc::sync::detail::KeyValueLogicalCodecSupported<
-                  std::uint64_t>::value,
-              "uint64_t must be supported by KeyValue logical codec");
-static_assert(!mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+              "int32_t local type must be supported by integer codec");
+static_assert(mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
+                  long>::value,
+              "long can be used only with an explicit integer codec tag");
+static_assert(!mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
                   char>::value,
-              "plain char must not be supported by KeyValue logical codec");
-static_assert(!mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+              "plain char must not be supported by integer codec");
+static_assert(!mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
                   wchar_t>::value,
-              "wchar_t must not be supported by KeyValue logical codec");
-static_assert(!mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+              "wchar_t must not be supported by integer codec");
+static_assert(!mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
                   char16_t>::value,
-              "char16_t must not be supported by KeyValue logical codec");
-static_assert(!mdbxc::sync::detail::KeyValueLogicalCodecSupported<
+              "char16_t must not be supported by integer codec");
+static_assert(!mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
                   char32_t>::value,
-              "char32_t must not be supported by KeyValue logical codec");
+              "char32_t must not be supported by integer codec");
 
 void cleanup(const std::string& p) {
     std::remove(p.c_str());
@@ -68,8 +73,7 @@ void test_key_value_logical_adapter_applies_basic_ops() {
                                    make_record(dbi_name));
 
     mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
-    mdbxc::sync::KeyValueTableLogicalAdapter<int, std::string> adapter(
-        table, "app.logical_kv.v1");
+    IntStringAdapter adapter(table, "app.logical_kv.v1");
     MDBXC_TEST_ASSERT(adapter.affected_dbis().size() == 1u);
     MDBXC_TEST_ASSERT(adapter.affected_dbis()[0] == dbi_name);
     mdbxc::sync::LogicalTableRegistry registry;
@@ -127,8 +131,7 @@ void test_key_value_logical_adapter_rejects_malformed_payload() {
     std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
 
     mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
-    mdbxc::sync::KeyValueTableLogicalAdapter<int, std::string> adapter(
-        table, "app.logical_kv_malformed.v1");
+    IntStringAdapter adapter(table, "app.logical_kv_malformed.v1");
     mdbxc::sync::LogicalTableRegistry registry;
     registry.register_adapter(&adapter);
 
@@ -165,14 +168,12 @@ void test_key_value_logical_adapter_uses_stable_payload() {
     std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
 
     mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
-    mdbxc::sync::KeyValueTableLogicalAdapter<int, std::string> adapter(
-        table, "app.logical_kv_payload.v1");
+    IntStringAdapter adapter(table, "app.logical_kv_payload.v1");
 
     const mdbxc::sync::LogicalChange change =
         adapter.make_upsert(-1, "one");
     const std::uint8_t expected_raw[] = {
-        8, 0, 0, 0,
-        0xFF, 0xFF, 0xFF, 0xFF,
+        4, 0, 0, 0,
         0xFF, 0xFF, 0xFF, 0xFF,
         3, 0, 0, 0,
         static_cast<std::uint8_t>('o'),
@@ -186,17 +187,22 @@ void test_key_value_logical_adapter_uses_stable_payload() {
 
     mdbxc::KeyValueTable<std::int32_t, std::uint64_t> fixed_table(
         conn, "logical_key_value_payload_fixed");
-    mdbxc::sync::KeyValueTableLogicalAdapter<
-        std::int32_t, std::uint64_t> fixed_adapter(
-            fixed_table, "app.logical_kv_payload_fixed.v1");
+    typedef mdbxc::sync::KeyValueLogicalInt32Codec<std::int32_t>
+        FixedInt32Codec;
+    typedef mdbxc::sync::KeyValueLogicalUInt64Codec<std::uint64_t>
+        FixedUInt64Codec;
+    typedef mdbxc::sync::KeyValueTableLogicalAdapter<
+        std::int32_t, std::uint64_t,
+        FixedInt32Codec, FixedUInt64Codec> FixedAdapter;
+    FixedAdapter fixed_adapter(
+        fixed_table, "app.logical_kv_payload_fixed.v1");
     const mdbxc::sync::LogicalChange fixed_change =
         fixed_adapter.make_upsert(
             (std::numeric_limits<std::int32_t>::min)(),
             (std::numeric_limits<std::uint64_t>::max)());
     const std::uint8_t expected_fixed_raw[] = {
-        8, 0, 0, 0,
-        0xFF, 0xFF, 0xFF, 0xFF,
-        0x80, 0x00, 0x00, 0x00,
+        4, 0, 0, 0,
+        0x00, 0x00, 0x00, 0x80,
         8, 0, 0, 0,
         0xFF, 0xFF, 0xFF, 0xFF,
         0xFF, 0xFF, 0xFF, 0xFF
@@ -206,6 +212,86 @@ void test_key_value_logical_adapter_uses_stable_payload() {
         expected_fixed_raw + sizeof(expected_fixed_raw) /
             sizeof(expected_fixed_raw[0]));
     MDBXC_TEST_ASSERT(fixed_change.payload == expected_fixed);
+
+    mdbxc::KeyValueTable<long, std::string> long_table(
+        conn, "logical_key_value_payload_long");
+    typedef mdbxc::sync::KeyValueLogicalInt64Codec<long> LongInt64Codec;
+    typedef mdbxc::sync::KeyValueTableLogicalAdapter<
+        long, std::string, LongInt64Codec, StringValueCodec> LongAdapter;
+    LongAdapter long_adapter(
+        long_table, "app.logical_kv_payload_long.v1");
+    const mdbxc::sync::LogicalChange long_change =
+        long_adapter.make_upsert(42L, "forty-two");
+    const std::uint8_t expected_long_raw[] = {
+        8, 0, 0, 0,
+        42, 0, 0, 0, 0, 0, 0, 0,
+        9, 0, 0, 0,
+        static_cast<std::uint8_t>('f'),
+        static_cast<std::uint8_t>('o'),
+        static_cast<std::uint8_t>('r'),
+        static_cast<std::uint8_t>('t'),
+        static_cast<std::uint8_t>('y'),
+        static_cast<std::uint8_t>('-'),
+        static_cast<std::uint8_t>('t'),
+        static_cast<std::uint8_t>('w'),
+        static_cast<std::uint8_t>('o')
+    };
+    const std::vector<std::uint8_t> expected_long(
+        expected_long_raw,
+        expected_long_raw + sizeof(expected_long_raw) /
+            sizeof(expected_long_raw[0]));
+    MDBXC_TEST_ASSERT(long_change.payload == expected_long);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_adapter_decodes_literal_little_endian_payload() {
+    const std::string path = "test_key_value_logical_adapter_literal.mdbx";
+    const std::string dbi_name = "logical_key_value_literal";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, "app.logical_kv_literal.v1");
+    mdbxc::sync::LogicalTableRegistry registry;
+    registry.register_adapter(&adapter);
+
+    mdbxc::sync::LogicalChange literal;
+    literal.schema = adapter.schema_ref();
+    literal.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    const std::uint8_t literal_payload[] = {
+        4, 0, 0, 0,
+        1, 0, 0, 0,
+        3, 0, 0, 0,
+        static_cast<std::uint8_t>('u'),
+        static_cast<std::uint8_t>('n'),
+        static_cast<std::uint8_t>('o')
+    };
+    literal.payload.assign(
+        literal_payload,
+        literal_payload + sizeof(literal_payload) /
+            sizeof(literal_payload[0]));
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        std::vector<mdbxc::sync::LogicalChange> changes;
+        changes.push_back(literal);
+        const mdbxc::sync::LogicalApplyResult result =
+            registry.preflight_then_apply(txn.handle(), changes);
+        MDBXC_TEST_ASSERT(result.ok);
+        txn.commit();
+    }
+
+    const std::pair<bool, std::string> found = table.find_compat(1);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "uno");
 
     conn->disconnect();
     cleanup(path);
@@ -227,8 +313,7 @@ void test_key_value_logical_apply_does_not_recapture_incoming_change() {
     engine.initialize_local_identity(node, make_node(0x55));
 
     mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
-    mdbxc::sync::KeyValueTableLogicalAdapter<int, std::string> adapter(
-        table, "app.logical_kv_capture.v1");
+    IntStringAdapter adapter(table, "app.logical_kv_capture.v1");
     mdbxc::sync::LogicalTableRegistry registry;
     registry.register_adapter(&adapter);
 
@@ -279,6 +364,7 @@ int main() {
     test_key_value_logical_adapter_applies_basic_ops();
     test_key_value_logical_adapter_rejects_malformed_payload();
     test_key_value_logical_adapter_uses_stable_payload();
+    test_key_value_logical_adapter_decodes_literal_little_endian_payload();
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     return 0;
 }

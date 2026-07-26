@@ -111,11 +111,14 @@
   `register_logical_schema()` для committed setup logical schema markers.
   `KeyValueTableLogicalAdapter` - первый concrete logical adapter helper для
   явных вызовов `LogicalTableRegistry::preflight_then_apply()`. Его payload
-  codec отделён от физического storage-формата таблицы и сейчас поддерживает
-  `std::string`, `bool` и fixed-width integer aliases до 64 бит; не используйте
-  plain character или platform-sized spellings вроде `long` и `size_t` как
-  переносимые поля logical schema. Входящий logical apply подавляет локальный
-  raw capture для затронутой транзакции. Он ещё не подключён к automatic sync
+  codec отделён от физического storage-формата таблицы и выбирается через
+  явные key/value codec tags вроде `KeyValueLogicalInt64Codec<long>` и
+  `KeyValueLogicalStringCodec<std::string>`. Codec tags являются частью
+  logical schema contract; их смена требует нового schema id или явной
+  schema-marker migration. Смена `schema_version` под уже зарегистрированным
+  schema id отклоняется текущим immutable registry. Integer payloads
+  кодируются little-endian. Входящий logical apply подавляет локальный raw
+  capture для затронутой транзакции. Он ещё не подключён к automatic sync
   pipeline.
   `DirectSyncPeer` используется для in-process синхронизации в тестах и примерах,
   `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт

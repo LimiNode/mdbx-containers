@@ -40,107 +40,238 @@ namespace detail {
     };
 
     template<class T>
-    struct KeyValueLogicalFixedIntegralType {
+    struct KeyValueLogicalIntegerLocalSupported {
         typedef typename std::remove_cv<T>::type value_type;
         static const bool value =
+            std::is_integral<value_type>::value &&
+            !std::is_same<value_type, bool>::value &&
             !KeyValueLogicalPlainCharType<value_type>::value &&
-            (std::is_same<value_type, std::int8_t>::value ||
-             std::is_same<value_type, std::uint8_t>::value ||
-             std::is_same<value_type, std::int16_t>::value ||
-             std::is_same<value_type, std::uint16_t>::value ||
-             std::is_same<value_type, std::int32_t>::value ||
-             std::is_same<value_type, std::uint32_t>::value ||
-             std::is_same<value_type, std::int64_t>::value ||
-             std::is_same<value_type, std::uint64_t>::value);
+            sizeof(value_type) <= 8;
     };
 
-    template<class T>
-    struct KeyValueLogicalCodecSupported {
-        typedef typename std::remove_cv<T>::type value_type;
-        static const bool value =
-            KeyValueLogicalFixedIntegralType<value_type>::value ||
-            std::is_same<value_type, bool>::value ||
-            std::is_same<value_type, std::string>::value;
-    };
+    template<class LocalT, class WireT>
+    struct KeyValueLogicalIntegerCodecBase {
+        typedef LocalT value_type;
+        typedef WireT wire_type;
 
-    template<class T, class Enable = void>
-    struct KeyValueLogicalCodec;
+        static_assert(KeyValueLogicalIntegerLocalSupported<LocalT>::value,
+                      "KeyValue logical integer codec requires a non-character integral local type up to 64 bits");
+        static_assert(std::is_integral<WireT>::value &&
+                      !std::is_same<WireT, bool>::value &&
+                      sizeof(WireT) <= 8,
+                      "KeyValue logical integer wire type must be an integer up to 64 bits");
 
-    template<class T>
-    struct KeyValueLogicalCodec<
-        T,
-        typename std::enable_if<
-            KeyValueLogicalFixedIntegralType<T>::value
-        >::type> {
-        static std::vector<std::uint8_t> encode(T value) {
-            static_assert(sizeof(T) <= 8,
-                          "KeyValue logical integral codec supports up to 64 bits");
-            std::uint64_t raw = 0;
-            if (std::numeric_limits<T>::is_signed) {
-                const std::int64_t signed_value =
-                    static_cast<std::int64_t>(value);
-                raw = static_cast<std::uint64_t>(signed_value);
-            } else {
-                raw = static_cast<std::uint64_t>(value);
-            }
-            std::vector<std::uint8_t> out(8);
-            for (int i = 7; i >= 0; --i) {
-                out[static_cast<std::size_t>(i)] =
-                    static_cast<std::uint8_t>(raw & 0xFFu);
-                raw >>= 8;
-            }
+        static std::vector<std::uint8_t> encode(LocalT value) {
+            const std::uint64_t raw = encode_raw(value);
+            std::vector<std::uint8_t> out;
+            ::mdbxc::sync::detail::append_u64_le(out, raw);
+            out.resize(sizeof(WireT));
             return out;
         }
 
-        static T decode(const std::vector<std::uint8_t>& bytes) {
-            if (bytes.size() != 8u) {
+        static LocalT decode(const std::vector<std::uint8_t>& bytes) {
+            if (bytes.size() != sizeof(WireT)) {
                 throw std::runtime_error(
-                    "KeyValue logical integral payload must be 8 bytes");
+                    "KeyValue logical integer payload has unexpected width");
             }
-            std::uint64_t raw = 0;
+            std::uint8_t storage[8] = {};
             for (std::size_t i = 0; i < bytes.size(); ++i) {
-                raw = (raw << 8) | bytes[i];
+                storage[i] = bytes[i];
             }
-            if (std::numeric_limits<T>::is_signed) {
+            const std::uint64_t raw =
+                ::mdbxc::sync::detail::read_u64_le(storage);
+            return decode_raw(raw);
+        }
+
+    private:
+        static std::uint64_t bit_mask() {
+            return sizeof(WireT) == 8u
+                ? (std::numeric_limits<std::uint64_t>::max)()
+                : ((static_cast<std::uint64_t>(1) <<
+                    (sizeof(WireT) * 8u)) - 1u);
+        }
+
+        static std::int64_t wire_min() {
+            if (!std::numeric_limits<WireT>::is_signed) {
+                return 0;
+            }
+            if (sizeof(WireT) == 8u) {
+                return (std::numeric_limits<std::int64_t>::min)();
+            }
+            return -static_cast<std::int64_t>(
+                static_cast<std::uint64_t>(1) <<
+                (sizeof(WireT) * 8u - 1u));
+        }
+
+        static std::uint64_t wire_unsigned_max() {
+            return bit_mask();
+        }
+
+        static std::int64_t wire_signed_max() {
+            if (sizeof(WireT) == 8u) {
+                return (std::numeric_limits<std::int64_t>::max)();
+            }
+            return static_cast<std::int64_t>(
+                (static_cast<std::uint64_t>(1) <<
+                 (sizeof(WireT) * 8u - 1u)) - 1u);
+        }
+
+        static std::uint64_t signed_raw(std::int64_t value) {
+            if (value >= 0) {
+                return static_cast<std::uint64_t>(value) & bit_mask();
+            }
+            std::uint64_t magnitude = 0;
+            if (value == (std::numeric_limits<std::int64_t>::min)()) {
+                magnitude = static_cast<std::uint64_t>(1) << 63u;
+            } else {
+                magnitude = static_cast<std::uint64_t>(-value);
+            }
+            return ((~magnitude) + 1u) & bit_mask();
+        }
+
+        static std::uint64_t encode_raw(LocalT value) {
+            if (std::numeric_limits<WireT>::is_signed) {
                 std::int64_t signed_value = 0;
-                if (raw <= static_cast<std::uint64_t>(
-                        std::numeric_limits<std::int64_t>::max())) {
-                    signed_value = static_cast<std::int64_t>(raw);
+                if (std::numeric_limits<LocalT>::is_signed) {
+                    signed_value = static_cast<std::int64_t>(value);
                 } else {
-                    const std::uint64_t magnitude = (~raw) + 1u;
-                    const std::uint64_t min_magnitude =
+                    const std::uint64_t unsigned_value =
+                        static_cast<std::uint64_t>(value);
+                    if (unsigned_value >
                         static_cast<std::uint64_t>(
-                            std::numeric_limits<std::int64_t>::max()) + 1u;
-                    if (magnitude == min_magnitude) {
-                        signed_value =
-                            (std::numeric_limits<std::int64_t>::min)();
-                    } else {
-                        signed_value =
-                            -static_cast<std::int64_t>(magnitude);
+                            (std::numeric_limits<std::int64_t>::max)())) {
+                        throw std::out_of_range(
+                            "KeyValue logical integer value exceeds signed wire range");
                     }
+                    signed_value = static_cast<std::int64_t>(unsigned_value);
                 }
-                if (signed_value <
-                        static_cast<std::int64_t>(
-                            (std::numeric_limits<T>::min)()) ||
-                    signed_value >
-                        static_cast<std::int64_t>(
-                            (std::numeric_limits<T>::max)())) {
+                if (signed_value < wire_min() ||
+                    signed_value > wire_signed_max()) {
                     throw std::out_of_range(
-                        "KeyValue logical integral payload is out of range");
+                        "KeyValue logical integer value is out of wire range");
                 }
-                return static_cast<T>(signed_value);
+                return signed_raw(signed_value);
             }
-            if (raw > static_cast<std::uint64_t>(
-                    (std::numeric_limits<T>::max)())) {
+            if (std::numeric_limits<LocalT>::is_signed && value < 0) {
                 throw std::out_of_range(
-                    "KeyValue logical unsigned payload is out of range");
+                    "KeyValue logical integer value is negative for unsigned wire");
             }
-            return static_cast<T>(raw);
+            const std::uint64_t unsigned_value =
+                static_cast<std::uint64_t>(value);
+            if (unsigned_value > wire_unsigned_max()) {
+                throw std::out_of_range(
+                    "KeyValue logical integer value is out of wire range");
+            }
+            return unsigned_value;
+        }
+
+        static std::int64_t decode_signed_raw(std::uint64_t raw) {
+            raw &= bit_mask();
+            const std::size_t bits = sizeof(WireT) * 8u;
+            const std::uint64_t sign_bit =
+                static_cast<std::uint64_t>(1) << (bits - 1u);
+            if ((raw & sign_bit) == 0u) {
+                return static_cast<std::int64_t>(raw);
+            }
+            const std::uint64_t magnitude = ((~raw) & bit_mask()) + 1u;
+            if (magnitude ==
+                (static_cast<std::uint64_t>(1) << 63u)) {
+                return (std::numeric_limits<std::int64_t>::min)();
+            }
+            return -static_cast<std::int64_t>(magnitude);
+        }
+
+        static LocalT decode_raw(std::uint64_t raw) {
+            if (std::numeric_limits<WireT>::is_signed) {
+                const std::int64_t signed_value = decode_signed_raw(raw);
+                if (std::numeric_limits<LocalT>::is_signed) {
+                    if (signed_value <
+                            static_cast<std::int64_t>(
+                                (std::numeric_limits<LocalT>::min)()) ||
+                        signed_value >
+                            static_cast<std::int64_t>(
+                                (std::numeric_limits<LocalT>::max)())) {
+                        throw std::out_of_range(
+                            "KeyValue logical integer payload is out of local range");
+                    }
+                    return static_cast<LocalT>(signed_value);
+                }
+                if (signed_value < 0) {
+                    throw std::out_of_range(
+                        "KeyValue logical integer payload is negative for unsigned local type");
+                }
+                const std::uint64_t unsigned_value =
+                    static_cast<std::uint64_t>(signed_value);
+                if (unsigned_value >
+                    static_cast<std::uint64_t>(
+                        (std::numeric_limits<LocalT>::max)())) {
+                    throw std::out_of_range(
+                        "KeyValue logical integer payload is out of local range");
+                }
+                return static_cast<LocalT>(unsigned_value);
+            }
+
+            if (std::numeric_limits<LocalT>::is_signed) {
+                if (raw >
+                    static_cast<std::uint64_t>(
+                        (std::numeric_limits<LocalT>::max)())) {
+                    throw std::out_of_range(
+                        "KeyValue logical integer payload is out of local range");
+                }
+                return static_cast<LocalT>(raw);
+            }
+            if (raw >
+                static_cast<std::uint64_t>(
+                    (std::numeric_limits<LocalT>::max)())) {
+                throw std::out_of_range(
+                    "KeyValue logical integer payload is out of local range");
+            }
+            return static_cast<LocalT>(raw);
         }
     };
 
-    template<>
-    struct KeyValueLogicalCodec<bool, void> {
+} // namespace detail
+
+    template<class LocalT>
+    struct KeyValueLogicalInt8Codec
+        : detail::KeyValueLogicalIntegerCodecBase<LocalT, std::int8_t> {};
+
+    template<class LocalT>
+    struct KeyValueLogicalUInt8Codec
+        : detail::KeyValueLogicalIntegerCodecBase<LocalT, std::uint8_t> {};
+
+    template<class LocalT>
+    struct KeyValueLogicalInt16Codec
+        : detail::KeyValueLogicalIntegerCodecBase<LocalT, std::int16_t> {};
+
+    template<class LocalT>
+    struct KeyValueLogicalUInt16Codec
+        : detail::KeyValueLogicalIntegerCodecBase<LocalT, std::uint16_t> {};
+
+    template<class LocalT>
+    struct KeyValueLogicalInt32Codec
+        : detail::KeyValueLogicalIntegerCodecBase<LocalT, std::int32_t> {};
+
+    template<class LocalT>
+    struct KeyValueLogicalUInt32Codec
+        : detail::KeyValueLogicalIntegerCodecBase<LocalT, std::uint32_t> {};
+
+    template<class LocalT>
+    struct KeyValueLogicalInt64Codec
+        : detail::KeyValueLogicalIntegerCodecBase<LocalT, std::int64_t> {};
+
+    template<class LocalT>
+    struct KeyValueLogicalUInt64Codec
+        : detail::KeyValueLogicalIntegerCodecBase<LocalT, std::uint64_t> {};
+
+    template<class LocalT>
+    struct KeyValueLogicalBoolCodec {
+        typedef LocalT value_type;
+        static_assert(std::is_same<
+                          typename std::remove_cv<LocalT>::type,
+                          bool>::value,
+                      "KeyValue logical bool codec requires bool local type");
+
         static std::vector<std::uint8_t> encode(bool value) {
             std::vector<std::uint8_t> out(1);
             out[0] = value ? 1u : 0u;
@@ -156,8 +287,14 @@ namespace detail {
         }
     };
 
-    template<>
-    struct KeyValueLogicalCodec<std::string, void> {
+    template<class LocalT>
+    struct KeyValueLogicalStringCodec {
+        typedef LocalT value_type;
+        static_assert(std::is_same<
+                          typename std::remove_cv<LocalT>::type,
+                          std::string>::value,
+                      "KeyValue logical string codec requires std::string local type");
+
         static std::vector<std::uint8_t> encode(const std::string& value) {
             return std::vector<std::uint8_t>(value.begin(), value.end());
         }
@@ -167,26 +304,29 @@ namespace detail {
         }
     };
 
-} // namespace detail
-
     /// \brief First concrete logical adapter for simple one-value-per-key tables.
     /// \details The payload format is adapter-owned and intentionally separate
-    /// from the raw DBI wire codec. The initial stable codec supports
-    /// \c std::string, \c bool, and fixed-width integral aliases up to 64 bits.
-    /// Plain character types are rejected; platform-sized source spellings such
-    /// as \c long and \c size_t should not be used for portable logical schemas.
+    /// from the raw DBI wire codec. The caller supplies explicit key/value
+    /// codec tags, so local C++ storage types such as \c long can be mapped to
+    /// a named logical wire type such as \c KeyValueLogicalInt64Codec<long>.
+    /// Codec tags are part of the logical schema contract; changing them
+    /// requires a new schema id, or an explicit schema-marker migration.
     /// Incoming logical apply suppresses local raw capture for the supplied
     /// transaction. It is used only when a caller explicitly invokes
     /// \c LogicalTableRegistry::preflight_then_apply().
-    template<class KeyT, class ValueT, class Options = DefaultTableOptions>
+    template<class KeyT, class ValueT,
+             class KeyCodec, class ValueCodec,
+             class Options = DefaultTableOptions>
     class KeyValueTableLogicalAdapter : public ILogicalTableAdapter {
     public:
         typedef KeyValueTable<KeyT, ValueT, Options> table_type;
 
-        static_assert(detail::KeyValueLogicalCodecSupported<KeyT>::value,
-                      "KeyValueTableLogicalAdapter key type is not supported by the stable logical codec");
-        static_assert(detail::KeyValueLogicalCodecSupported<ValueT>::value,
-                      "KeyValueTableLogicalAdapter value type is not supported by the stable logical codec");
+        static_assert(std::is_same<typename KeyCodec::value_type,
+                                   KeyT>::value,
+                      "KeyValueTableLogicalAdapter key codec local type must match KeyT");
+        static_assert(std::is_same<typename ValueCodec::value_type,
+                                   ValueT>::value,
+                      "KeyValueTableLogicalAdapter value codec local type must match ValueT");
 
         KeyValueTableLogicalAdapter(table_type& table,
                                     const std::string& schema_id,
@@ -354,7 +494,7 @@ namespace detail {
                                     std::vector<std::uint8_t>& out) {
             out.clear();
             const std::vector<std::uint8_t> encoded_key =
-                detail::KeyValueLogicalCodec<KeyT>::encode(key);
+                KeyCodec::encode(key);
             append_blob(out, encoded_key);
         }
 
@@ -363,9 +503,9 @@ namespace detail {
                                   std::vector<std::uint8_t>& out) {
             out.clear();
             const std::vector<std::uint8_t> encoded_key =
-                detail::KeyValueLogicalCodec<KeyT>::encode(key);
+                KeyCodec::encode(key);
             const std::vector<std::uint8_t> encoded_value =
-                detail::KeyValueLogicalCodec<ValueT>::encode(value);
+                ValueCodec::encode(value);
             append_blob(out, encoded_key);
             append_blob(out, encoded_value);
         }
@@ -375,7 +515,7 @@ namespace detail {
             PayloadCursor cursor = make_cursor(payload);
             const std::vector<std::uint8_t> encoded_key = read_blob(cursor);
             ensure_end(cursor);
-            return detail::KeyValueLogicalCodec<KeyT>::decode(encoded_key);
+            return KeyCodec::decode(encoded_key);
         }
 
         static std::pair<KeyT, ValueT> decode_upsert(
@@ -385,8 +525,8 @@ namespace detail {
             const std::vector<std::uint8_t> encoded_value = read_blob(cursor);
             ensure_end(cursor);
             return std::make_pair(
-                detail::KeyValueLogicalCodec<KeyT>::decode(encoded_key),
-                detail::KeyValueLogicalCodec<ValueT>::decode(encoded_value));
+                KeyCodec::decode(encoded_key),
+                ValueCodec::decode(encoded_value));
         }
 
         LogicalApplyResult validate_payload(

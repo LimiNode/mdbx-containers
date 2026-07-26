@@ -87,10 +87,13 @@
   `register_logical_schema()` for committed logical schema marker setup.
   `KeyValueTableLogicalAdapter` is the first concrete logical adapter helper
   for explicit `LogicalTableRegistry::preflight_then_apply()` calls. Its
-  payload codec is separate from physical table storage and currently covers
-  `std::string`, `bool`, and fixed-width integer aliases up to 64 bits; do not
-  use plain character or platform-sized spellings such as `long` and `size_t`
-  as portable logical schema fields. Incoming logical apply suppresses local
+  payload codec is separate from physical table storage and is selected through
+  explicit key/value codec tags such as `KeyValueLogicalInt64Codec<long>` and
+  `KeyValueLogicalStringCodec<std::string>`. Codec tags are part of the
+  logical schema contract; changing them requires a new schema id, or an
+  explicit schema-marker migration. Changing `schema_version` under an already
+  registered schema id is rejected by the current immutable registry. Integer
+  payloads are encoded little-endian. Incoming logical apply suppresses local
   raw capture for the affected transaction. It is not wired into the automatic
   sync pipeline yet.
   `DirectSyncPeer` provides in-process sync for tests and examples,

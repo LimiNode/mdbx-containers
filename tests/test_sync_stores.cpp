@@ -770,6 +770,42 @@ void test_schema_registry_store() {
         }
     }
 
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord bumped = ordered;
+        bumped.schema_version = 2;
+        bool caught = false;
+        try {
+            store.register_or_verify(txn.handle(), "app.events.v1", bumped);
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        if (!caught) {
+            throw std::runtime_error(
+                "schema registry accepted version change under existing id");
+        }
+
+        store.register_or_verify(txn.handle(), "app.events.v2", bumped);
+        txn.commit();
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord v1;
+        LogicalSchemaRecord v2;
+        if (!store.get(txn.handle(), "app.events.v1", v1) ||
+            !store.get(txn.handle(), "app.events.v2", v2)) {
+            throw std::runtime_error(
+                "schema registry versioned ids were not preserved");
+        }
+        if (v1.schema_version != 1u || v2.schema_version != 2u) {
+            throw std::runtime_error(
+                "schema registry versioned id records mismatch");
+        }
+    }
+
     conn->disconnect();
     cleanup(p);
 }
