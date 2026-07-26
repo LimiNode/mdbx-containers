@@ -189,6 +189,21 @@ namespace sync {
         /// \brief Returns the conflict resolution policy.
         ConflictPolicy policy() const noexcept { return m_policy; }
 
+        /// \brief Registers or verifies a persistent logical table schema.
+        /// \details This is the normal lifecycle entry point for application
+        /// logical schema markers. It opens the sync system DBIs and commits
+        /// the schema registry update atomically. Direct
+        /// \c SchemaRegistryStore usage remains available for tests,
+        /// migrations, and repair utilities that already own a transaction.
+        void register_logical_schema(const std::string& schema_id,
+                                     const LogicalSchemaRecord& record) {
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            initialize_system_stores(txn.handle());
+            SchemaRegistryStore schemas(m_conn->env_handle());
+            schemas.register_or_verify(txn.handle(), schema_id, record);
+            txn.commit();
+        }
+
         /// \brief Applies a single \c ChangeBatch to local DBIs inside \p txn.
         /// \details See class-level docs for the seq / apply rules. The
         /// caller commits the transaction. User DBIs are opened lazily by

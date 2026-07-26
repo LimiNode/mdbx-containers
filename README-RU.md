@@ -107,8 +107,9 @@
   Caller-created raw read-only transactions остаются допустимыми для
   read/search snapshot operations. Любое исключение из capture recording или
   flush делает transaction rollback-only; повторный `commit()` отклоняется.
-- `SyncEngine` предоставляет pull/push/apply primitives, `DirectSyncPeer`
-  используется для in-process синхронизации в тестах и примерах,
+- `SyncEngine` предоставляет pull/push/apply primitives и
+  `register_logical_schema()` для committed setup logical schema markers.
+  `DirectSyncPeer` используется для in-process синхронизации в тестах и примерах,
   `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт
   binary message seam, а `SyncWorker` запускает фоновой polling.
   `mdbx_containers/sync/transport.hpp` - umbrella header транспортного слоя.
