@@ -23,10 +23,10 @@ All notable changes to this project will be documented in this file.
 - Added `ILogicalTableAdapter` and `LogicalTableRegistry` scaffolding for
   future two-phase logical table preflight/apply support. Apply exceptions are
   converted to failure results so the caller-owned transaction can be aborted.
-  `SyncEngine` still rejects unknown logical operations until a wire format and
-  registry integration are added.
+  `SyncEngine::apply_logical_changes()` now provides an explicit engine-owned
+  logical apply path; the transport pull/push wire format remains raw-DBI only.
 - Added `KeyValueTableLogicalAdapter` as the first concrete logical adapter
-  helper for explicit `LogicalTableRegistry::preflight_then_apply()` usage.
+  helper for explicit engine or registry logical apply usage.
   It covers typed upsert/delete/clear payloads for `KeyValueTable` with
   explicit key/value codec tags, including little-endian signed/unsigned
   integer wire codecs up to 64 bits, bool, and string codecs. Incoming logical

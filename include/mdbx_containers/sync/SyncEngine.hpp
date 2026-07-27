@@ -41,6 +41,7 @@
 #include "ChangeBatch.hpp"
 #include "ChangeBatchCodec.hpp"
 #include "ChangeOp.hpp"
+#include "LogicalTableAdapter.hpp"
 #include "protocol.hpp"
 #include "SyncCursor.hpp"
 #include "stores/AppliedStore.hpp"
@@ -219,6 +220,59 @@ namespace sync {
             schemas.migrate_or_verify(txn.handle(), schema_id,
                                       expected_existing, replacement);
             txn.commit();
+        }
+
+        /// \brief Registers a logical table adapter for engine-owned apply.
+        /// \details Registration is a lifecycle operation and is not
+        /// synchronized with concurrent \c apply_logical_changes() calls.
+        void register_logical_adapter(ILogicalTableAdapter& adapter) {
+            m_logical_registry.register_adapter(&adapter);
+        }
+
+        /// \brief Removes a logical table adapter by schema id.
+        bool unregister_logical_adapter(const std::string& schema_id) {
+            return m_logical_registry.unregister_adapter(schema_id);
+        }
+
+        /// \brief Returns the number of registered logical table adapters.
+        std::size_t logical_adapter_count() const {
+            return m_logical_registry.size();
+        }
+
+        /// \brief Applies logical table changes in an engine-owned write txn.
+        /// \details This is the first engine integration point for
+        /// \c LogicalTableRegistry. It does not change the transport wire
+        /// format and is not called by \c handle_push() yet. Unknown schemas
+        /// fail closed, all adapter preflights run before any apply, and any
+        /// failure rolls back the transaction.
+        LogicalApplyResult apply_logical_changes(
+                const std::vector<LogicalChange>& changes) {
+            if (changes.empty()) {
+                return LogicalApplyResult::success();
+            }
+
+            std::vector<std::string> affected_dbi_names;
+            collect_logical_affected_dbis(changes, affected_dbi_names);
+
+            Connection::SyncApplyNotification notification;
+            LogicalApplyResult result;
+            {
+                const Connection::SyncApplyWriteGuard sync_apply_guard =
+                    m_conn->sync_apply_write_guard();
+                auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+                result = m_logical_registry.preflight_then_apply(
+                    txn.handle(), changes);
+                if (!result.ok) {
+                    txn.rollback();
+                    return result;
+                }
+                txn.commit();
+                notification =
+                    m_conn->mark_sync_apply_committed(
+                        1u, changes.size(), affected_dbi_names);
+            }
+            m_conn->notify_sync_apply_observers(notification);
+            return result;
         }
 
         /// \brief Applies a single \c ChangeBatch to local DBIs inside \p txn.
@@ -619,6 +673,23 @@ namespace sync {
                 }
             }
             names.push_back(dbi_name);
+        }
+
+        void collect_logical_affected_dbis(
+                const std::vector<LogicalChange>& changes,
+                std::vector<std::string>& names) const {
+            for (std::size_t i = 0; i < changes.size(); ++i) {
+                ILogicalTableAdapter* adapter =
+                    m_logical_registry.find(changes[i].schema.schema_id);
+                if (adapter == nullptr) {
+                    continue;
+                }
+                const std::vector<std::string> dbis =
+                    adapter->affected_dbis();
+                for (std::size_t j = 0; j < dbis.size(); ++j) {
+                    add_unique_dbi_name(names, dbis[j]);
+                }
+            }
         }
 
         static std::uint32_t persistent_dbi_flags_mask() {
@@ -1164,6 +1235,7 @@ namespace sync {
 
         std::shared_ptr<Connection> m_conn;
         ConflictPolicy              m_policy;
+        LogicalTableRegistry        m_logical_registry;
     };
 
 } // namespace sync

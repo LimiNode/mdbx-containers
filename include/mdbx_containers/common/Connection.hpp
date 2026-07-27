@@ -231,8 +231,8 @@ namespace mdbxc {
         /// stored generation with this value and rebuild when it changes.
         std::uint64_t sync_apply_generation() const;
 
-        /// \brief Registers a non-owning remote apply observer.
-        /// \details The observer is called after successful remote sync apply
+        /// \brief Registers a non-owning sync apply observer.
+        /// \details The observer is called after successful sync apply
         /// commits that changed user data. The pointer is non-owning; the
         /// observer must outlive the registration. Observer callbacks run
         /// after the connection apply/write barrier is released, and observer
@@ -243,7 +243,7 @@ namespace mdbxc {
         std::uint64_t add_sync_apply_observer(
             sync::ISyncApplyObserver* observer);
 
-        /// \brief Removes a previously registered remote apply observer.
+        /// \brief Removes a previously registered sync apply observer.
         /// \details When this returns \c true, no callback for \p token is
         /// still running or will start later. If this is called from that
         /// observer's own callback, it waits for other in-flight callbacks for

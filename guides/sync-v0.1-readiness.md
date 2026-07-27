@@ -90,12 +90,12 @@ The logical sync scaffolding is preparatory only:
 - `_mdbxc_sync_schema` is a persistent compatibility marker, not an apply path.
 - `LogicalChange` payloads are opaque and are not serialized by the current
   `ChangeBatchCodec`.
-- `LogicalTableRegistry` defines the future two-phase preflight/apply contract,
-  including full schema tuple validation before adapter callbacks, but
-  `SyncEngine` still applies raw DBI operations only.
-- Future `SyncEngine` integration must own the MDBX write transaction around
-  logical apply and abort it if an adapter reports failure or throws after any
-  mutation.
+- `LogicalTableRegistry` defines the two-phase preflight/apply contract,
+  including full schema tuple validation before adapter callbacks.
+- `SyncEngine::apply_logical_changes()` owns the MDBX write transaction around
+  explicit logical apply and aborts it if an adapter reports failure or throws
+  after any mutation. The transport `handle_push()` path still applies raw DBI
+  operations only.
 
 Until a causal context or another conflict model is implemented, future logical
 table support should document either one authoritative writer for the affected
