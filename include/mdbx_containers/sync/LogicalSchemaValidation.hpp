@@ -48,13 +48,14 @@ namespace sync {
                 "Persistent logical schema marker does not match adapter");
         }
 
-        const std::vector<std::string> affected_dbis =
-            adapter.affected_dbis();
-        if (affected_dbis.size() != 1u) {
+        const std::string primary_dbi = adapter.primary_dbi();
+        if (primary_dbi.empty()) {
             return LogicalApplyResult::failure(
-                "Logical adapter multi-DBI primary contract is not supported");
+                "Logical adapter primary DBI is empty");
         }
 
+        const std::vector<std::string> affected_dbis =
+            adapter.affected_dbis();
         std::vector<std::string> adapter_dbis;
         std::vector<std::string> marker_dbis;
         if (!canonical_logical_dbi_names(affected_dbis, adapter_dbis) ||
@@ -66,8 +67,13 @@ namespace sync {
                 "Persistent logical schema marker DBI set does not match adapter");
         }
 
-        if (adapter_dbis.size() == 1u &&
-            record.dbi_name != adapter_dbis[0]) {
+        if (std::find(adapter_dbis.begin(), adapter_dbis.end(),
+                      primary_dbi) == adapter_dbis.end()) {
+            return LogicalApplyResult::failure(
+                "Logical adapter primary DBI is not listed in affected DBIs");
+        }
+
+        if (record.dbi_name != primary_dbi) {
             return LogicalApplyResult::failure(
                 "Persistent logical schema marker primary DBI does not match adapter");
         }

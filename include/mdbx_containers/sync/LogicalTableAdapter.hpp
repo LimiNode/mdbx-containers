@@ -51,6 +51,16 @@ namespace sync {
         /// \brief Returns physical DBI names that may be read or written.
         virtual std::vector<std::string> affected_dbis() const = 0;
 
+        /// \brief Returns the primary physical DBI name for this schema.
+        /// \details The returned name must be included in \c affected_dbis().
+        /// The default keeps existing single-DBI adapters source-compatible by
+        /// returning the only affected DBI. Multi-DBI adapters must override
+        /// this method explicitly; otherwise marker validation fails closed.
+        virtual std::string primary_dbi() const {
+            const std::vector<std::string> names = affected_dbis();
+            return names.size() == 1u ? names[0] : std::string();
+        }
+
         /// \brief Validates a logical change without mutating user tables.
         virtual LogicalApplyResult preflight(
                 MDBX_txn* txn,
