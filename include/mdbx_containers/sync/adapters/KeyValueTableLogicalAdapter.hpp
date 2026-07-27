@@ -359,6 +359,10 @@ namespace detail {
             return ref;
         }
 
+        std::string primary_dbi() const override {
+            return m_table.dbi_name();
+        }
+
         std::vector<std::string> affected_dbis() const override {
             std::vector<std::string> out;
             out.push_back(m_table.dbi_name());

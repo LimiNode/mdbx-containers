@@ -34,6 +34,10 @@ public:
         return ref;
     }
 
+    std::string primary_dbi() const override {
+        return "items";
+    }
+
     std::vector<std::string> affected_dbis() const override {
         std::vector<std::string> out;
         out.push_back("items");
@@ -94,6 +98,10 @@ public:
         std::vector<std::string> out;
         out.push_back(m_dbi_name);
         return out;
+    }
+
+    std::string primary_dbi() const override {
+        return m_dbi_name;
     }
 
     mdbxc::sync::LogicalApplyResult apply(

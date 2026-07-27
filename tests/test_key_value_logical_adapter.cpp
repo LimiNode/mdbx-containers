@@ -100,6 +100,10 @@ public:
         return ref;
     }
 
+    std::string primary_dbi() const override {
+        return m_table.dbi_name();
+    }
+
     std::vector<std::string> affected_dbis() const override {
         std::vector<std::string> out;
         out.push_back(m_table.dbi_name());
@@ -148,6 +152,10 @@ public:
         return ref;
     }
 
+    std::string primary_dbi() const override {
+        return m_table.dbi_name();
+    }
+
     std::vector<std::string> affected_dbis() const override {
         std::vector<std::string> out;
         out.push_back(m_table.dbi_name());
@@ -175,6 +183,124 @@ private:
     mdbxc::KeyValueTable<int, std::string>& m_table;
     std::string m_secondary_dbi_name;
     std::string m_schema_id;
+};
+
+class LegacySingleDbiLogicalAdapter
+        : public mdbxc::sync::ILogicalTableAdapter {
+public:
+    LegacySingleDbiLogicalAdapter(
+            mdbxc::KeyValueTable<int, std::string>& table,
+            const std::string& schema_id)
+        : m_table(table),
+          m_schema_id(schema_id) {}
+
+    mdbxc::sync::LogicalSchemaRef schema_ref() const override {
+        mdbxc::sync::LogicalSchemaRef ref;
+        ref.schema_id = m_schema_id;
+        ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+        ref.schema_version = 1;
+        return ref;
+    }
+
+    std::vector<std::string> affected_dbis() const override {
+        std::vector<std::string> out;
+        out.push_back(m_table.dbi_name());
+        return out;
+    }
+
+    mdbxc::sync::LogicalApplyResult preflight(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) const override {
+        (void)txn;
+        (void)change;
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+    mdbxc::sync::LogicalApplyResult apply(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) override {
+        (void)change;
+        m_table.insert_or_assign(32, "thirty-two", txn);
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+private:
+    mdbxc::KeyValueTable<int, std::string>& m_table;
+    std::string m_schema_id;
+};
+
+class LegacyMultiDbiLogicalAdapter : public LegacySingleDbiLogicalAdapter {
+public:
+    LegacyMultiDbiLogicalAdapter(
+            mdbxc::KeyValueTable<int, std::string>& table,
+            const std::string& secondary_dbi_name,
+            const std::string& schema_id)
+        : LegacySingleDbiLogicalAdapter(table, schema_id),
+          m_secondary_dbi_name(secondary_dbi_name),
+          m_table(table) {}
+
+    std::vector<std::string> affected_dbis() const override {
+        std::vector<std::string> out;
+        out.push_back(m_table.dbi_name());
+        out.push_back(m_secondary_dbi_name);
+        return out;
+    }
+
+private:
+    std::string m_secondary_dbi_name;
+    mdbxc::KeyValueTable<int, std::string>& m_table;
+};
+
+class ConfigurablePrimaryLogicalAdapter
+        : public mdbxc::sync::ILogicalTableAdapter {
+public:
+    ConfigurablePrimaryLogicalAdapter(
+            mdbxc::KeyValueTable<int, std::string>& table,
+            const std::string& schema_id,
+            const std::string& primary_dbi,
+            const std::vector<std::string>& affected_dbis)
+        : m_table(table),
+          m_schema_id(schema_id),
+          m_primary_dbi(primary_dbi),
+          m_affected_dbis(affected_dbis) {}
+
+    mdbxc::sync::LogicalSchemaRef schema_ref() const override {
+        mdbxc::sync::LogicalSchemaRef ref;
+        ref.schema_id = m_schema_id;
+        ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+        ref.schema_version = 1;
+        return ref;
+    }
+
+    std::vector<std::string> affected_dbis() const override {
+        return m_affected_dbis;
+    }
+
+    std::string primary_dbi() const override {
+        return m_primary_dbi;
+    }
+
+    mdbxc::sync::LogicalApplyResult preflight(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) const override {
+        (void)txn;
+        (void)change;
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+    mdbxc::sync::LogicalApplyResult apply(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) override {
+        (void)change;
+        m_table.insert_or_assign(33, "thirty-three", txn);
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+private:
+    mdbxc::KeyValueTable<int, std::string>& m_table;
+    std::string m_schema_id;
+    std::string m_primary_dbi;
+    std::vector<std::string> m_affected_dbis;
 };
 
 class ThrowingFlushSink : public mdbxc::sync::ISyncCaptureSink {
@@ -217,6 +343,7 @@ void test_key_value_logical_adapter_applies_basic_ops() {
 
     mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
     IntStringAdapter adapter(table, "app.logical_kv.v1");
+    MDBXC_TEST_ASSERT(adapter.primary_dbi() == dbi_name);
     MDBXC_TEST_ASSERT(adapter.affected_dbis().size() == 1u);
     MDBXC_TEST_ASSERT(adapter.affected_dbis()[0] == dbi_name);
     mdbxc::sync::LogicalTableRegistry registry;
@@ -452,7 +579,7 @@ void test_key_value_logical_engine_rejects_marker_dbi_mismatch() {
     cleanup(path);
 }
 
-void test_key_value_logical_engine_rejects_multi_dbi_adapter_until_primary_contract() {
+void test_key_value_logical_engine_accepts_multi_dbi_adapter_with_primary_contract() {
     const std::string path = "test_key_value_logical_adapter_multi_dbi.mdbx";
     const std::string dbi_name = "logical_key_value_multi_dbi";
     const std::string secondary_dbi_name = dbi_name + "_index";
@@ -483,13 +610,224 @@ void test_key_value_logical_engine_rejects_multi_dbi_adapter_until_primary_contr
     changes.push_back(change);
     const mdbxc::sync::LogicalApplyResult result =
         engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(result.ok);
+    const std::pair<bool, std::string> found = table.find_compat(31);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "thirty-one");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_engine_rejects_multi_dbi_primary_mismatch() {
+    const std::string path =
+        "test_key_value_logical_adapter_multi_dbi_primary.mdbx";
+    const std::string dbi_name = "logical_key_value_multi_dbi_primary";
+    const std::string secondary_dbi_name = dbi_name + "_index";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x1F), make_node(0xAF));
+    mdbxc::sync::LogicalSchemaRecord record = make_record(dbi_name);
+    record.dbi_name = secondary_dbi_name;
+    record.dbi_names.push_back(secondary_dbi_name);
+    engine.register_logical_schema(
+        "app.logical_kv_multi_dbi_primary.v1", record);
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    MultiDbiLogicalAdapter adapter(
+        table, secondary_dbi_name,
+        "app.logical_kv_multi_dbi_primary.v1");
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalChange change;
+    change.schema = adapter.schema_ref();
+    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(change);
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_changes(changes);
     MDBXC_TEST_ASSERT(!result.ok);
-    MDBXC_TEST_ASSERT(result.error.find("multi-DBI") !=
+    MDBXC_TEST_ASSERT(result.error.find("primary DBI") !=
                       std::string::npos);
     MDBXC_TEST_ASSERT(!table.contains(31));
 
     conn->disconnect();
     cleanup(path);
+}
+
+void test_key_value_logical_engine_accepts_legacy_single_dbi_default_primary() {
+    const std::string path =
+        "test_key_value_logical_adapter_legacy_single.mdbx";
+    const std::string dbi_name = "logical_key_value_legacy_single";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x20), make_node(0xB0));
+    engine.register_logical_schema("app.logical_kv_legacy_single.v1",
+                                   make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    LegacySingleDbiLogicalAdapter adapter(
+        table, "app.logical_kv_legacy_single.v1");
+    engine.register_logical_adapter(adapter);
+    MDBXC_TEST_ASSERT(adapter.primary_dbi() == dbi_name);
+
+    mdbxc::sync::LogicalChange change;
+    change.schema = adapter.schema_ref();
+    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(change);
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(result.ok);
+    const std::pair<bool, std::string> found = table.find_compat(32);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "thirty-two");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_engine_rejects_legacy_multi_dbi_without_primary() {
+    const std::string path =
+        "test_key_value_logical_adapter_legacy_multi.mdbx";
+    const std::string dbi_name = "logical_key_value_legacy_multi";
+    const std::string secondary_dbi_name = dbi_name + "_index";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x21), make_node(0xB1));
+    mdbxc::sync::LogicalSchemaRecord record = make_record(dbi_name);
+    record.dbi_names.push_back(secondary_dbi_name);
+    engine.register_logical_schema("app.logical_kv_legacy_multi.v1",
+                                   record);
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    LegacyMultiDbiLogicalAdapter adapter(
+        table, secondary_dbi_name, "app.logical_kv_legacy_multi.v1");
+    engine.register_logical_adapter(adapter);
+    MDBXC_TEST_ASSERT(adapter.primary_dbi().empty());
+
+    mdbxc::sync::LogicalChange change;
+    change.schema = adapter.schema_ref();
+    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(change);
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(!result.ok);
+    MDBXC_TEST_ASSERT(result.error.find("primary DBI") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(!table.contains(32));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void run_primary_contract_rejection(
+        const std::string& suffix,
+        const std::string& primary_dbi,
+        const std::vector<std::string>& affected_dbis,
+        const mdbxc::sync::LogicalSchemaRecord& record,
+        const std::string& expected_error) {
+    const std::string path =
+        "test_key_value_logical_adapter_primary_" + suffix + ".mdbx";
+    const std::string dbi_name =
+        "logical_key_value_primary_" + suffix;
+    const std::string schema_id =
+        "app.logical_kv_primary_" + suffix + ".v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x22), make_node(0xB2));
+    engine.register_logical_schema(schema_id, record);
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    ConfigurablePrimaryLogicalAdapter adapter(
+        table, schema_id, primary_dbi, affected_dbis);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalChange change;
+    change.schema = adapter.schema_ref();
+    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(change);
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(!result.ok);
+    MDBXC_TEST_ASSERT(result.error.find(expected_error) !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(!table.contains(33));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_engine_rejects_explicit_empty_primary() {
+    const std::string suffix = "empty_primary";
+    const std::string dbi_name =
+        "logical_key_value_primary_" + suffix;
+    std::vector<std::string> affected_dbis;
+    affected_dbis.push_back(dbi_name);
+    run_primary_contract_rejection(
+        suffix, std::string(), affected_dbis, make_record(dbi_name),
+        "primary DBI is empty");
+}
+
+void test_key_value_logical_engine_rejects_primary_missing_from_affected() {
+    const std::string suffix = "missing_primary";
+    const std::string dbi_name =
+        "logical_key_value_primary_" + suffix;
+    const std::string secondary_dbi_name = dbi_name + "_index";
+    std::vector<std::string> affected_dbis;
+    affected_dbis.push_back(dbi_name);
+    affected_dbis.push_back(secondary_dbi_name);
+    mdbxc::sync::LogicalSchemaRecord record = make_record(dbi_name);
+    record.dbi_names.push_back(secondary_dbi_name);
+    run_primary_contract_rejection(
+        suffix, dbi_name + "_missing", affected_dbis, record,
+        "not listed");
+}
+
+void test_key_value_logical_engine_rejects_duplicate_affected_dbis() {
+    const std::string suffix = "duplicate_affected";
+    const std::string dbi_name =
+        "logical_key_value_primary_" + suffix;
+    std::vector<std::string> affected_dbis;
+    affected_dbis.push_back(dbi_name);
+    affected_dbis.push_back(dbi_name);
+    run_primary_contract_rejection(
+        suffix, dbi_name, affected_dbis, make_record(dbi_name),
+        "DBI set");
 }
 
 void test_key_value_logical_engine_suppresses_generic_raw_capture() {
@@ -1168,7 +1506,13 @@ int main() {
     test_key_value_logical_engine_rejects_missing_schema_marker();
     test_key_value_logical_engine_rejects_stale_schema_marker();
     test_key_value_logical_engine_rejects_marker_dbi_mismatch();
-    test_key_value_logical_engine_rejects_multi_dbi_adapter_until_primary_contract();
+    test_key_value_logical_engine_accepts_multi_dbi_adapter_with_primary_contract();
+    test_key_value_logical_engine_rejects_multi_dbi_primary_mismatch();
+    test_key_value_logical_engine_accepts_legacy_single_dbi_default_primary();
+    test_key_value_logical_engine_rejects_legacy_multi_dbi_without_primary();
+    test_key_value_logical_engine_rejects_explicit_empty_primary();
+    test_key_value_logical_engine_rejects_primary_missing_from_affected();
+    test_key_value_logical_engine_rejects_duplicate_affected_dbis();
     test_key_value_logical_engine_suppresses_generic_raw_capture();
     test_key_value_logical_capture_session_commits_typed_local_writes();
     test_key_value_logical_capture_session_discards_rollback();

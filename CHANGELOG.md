@@ -24,7 +24,12 @@ All notable changes to this project will be documented in this file.
   future two-phase logical table preflight/apply support. Apply exceptions are
   converted to failure results so the caller-owned transaction can be aborted.
   `SyncEngine::apply_logical_changes()` now provides an explicit engine-owned
-  logical apply path; the transport pull/push wire format remains raw-DBI only.
+  logical apply path. Adapters expose an explicit `primary_dbi()` contract, and
+  engine logical apply validates both the primary DBI and the canonical owned
+  DBI set against the persistent schema marker before adapter preflight. The
+  default primary keeps existing single-DBI adapters source-compatible;
+  multi-DBI adapters must override it explicitly. The transport pull/push wire
+  format remains raw-DBI only.
 - Added `KeyValueTableLogicalAdapter` as the first concrete logical adapter
   helper for explicit engine or registry logical apply usage.
   It covers typed upsert/delete/clear payloads for `KeyValueTable` with

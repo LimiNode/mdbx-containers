@@ -506,6 +506,10 @@ and compatibility tests.
   mutating user tables.
 - `ILogicalTableAdapter::apply()` mutates user tables only after every logical
   change in the same apply transaction passed preflight.
+- `ILogicalTableAdapter::primary_dbi()` names the stable primary physical DBI
+  for the logical schema. It defaults to the only affected DBI for
+  source-compatible single-DBI adapters. Multi-DBI adapters must override it
+  explicitly, and the returned DBI must be included in `affected_dbis()`.
 - `LogicalTableRegistry` is a non-owning lifecycle registry keyed by
   `LogicalSchemaRef::schema_id`, but dispatch validates the full
   `(schema_id, kind, schema_version)` tuple and rejects non-zero reserved
@@ -549,14 +553,13 @@ written through public table methods is not re-published as a local raw
 
 `SyncEngine::apply_logical_changes()` owns the write transaction, routes the
 changes through its registered logical adapters, re-checks the persistent
-schema marker for each schema before adapter preflight, suppresses raw capture
-for the transaction, commits only after the two-phase registry preflight/apply
-succeeds, and emits the normal sync apply observer event after commit.
+schema marker for each schema before adapter preflight, validates that the
+marker primary DBI matches `adapter.primary_dbi()` and that the canonical owned
+DBI set matches `adapter.affected_dbis()`, suppresses raw capture for the
+transaction, commits only after the two-phase registry preflight/apply succeeds,
+and emits the normal sync apply observer event after commit.
 `SyncEngine::handle_push()` remains raw-DBI only. Unknown logical payloads and
 stale adapter/schema-marker combinations must not fall back to raw DBI apply.
-Until the adapter interface exposes an explicit primary DBI contract, generic
-logical apply accepts only single-DBI adapters and fails closed for multi-DBI
-adapters.
 
 Logical-table support therefore has a staged contract:
 
