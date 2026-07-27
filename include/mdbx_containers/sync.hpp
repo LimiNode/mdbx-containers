@@ -18,6 +18,7 @@
 #include "sync/LogicalSchema.hpp"
 #include "sync/ChangeOp.hpp"
 #include "sync/LogicalChange.hpp"
+#include "sync/LogicalChangeFrameCodec.hpp"
 #include "sync/LogicalTableAdapter.hpp"
 #include "sync/LogicalSchemaValidation.hpp"
 #include "sync/adapters/KeyValueTableLogicalAdapter.hpp"

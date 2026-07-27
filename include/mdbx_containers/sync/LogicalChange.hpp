@@ -63,6 +63,16 @@ namespace sync {
               payload(operation_payload) {}
     };
 
+    /// \brief Versioned logical change payload exchanged above raw DBI batches.
+    /// \details The transport pull/push DTOs remain raw-DBI only. This frame is
+    /// a payload container, not a delivery envelope: it does not carry
+    /// destination, origin, ordering, or replay identity. Callers that send
+    /// frames over retrying transports must provide those guarantees outside
+    /// this payload layer until a dedicated delivery envelope is used.
+    struct LogicalChangeFrame {
+        std::vector<LogicalChange> changes; ///< Ordered logical operations.
+    };
+
     /// \brief Returns true when \p ref names a concrete logical schema.
     inline bool is_logical_schema_ref_complete(const LogicalSchemaRef& ref) {
         return !ref.schema_id.empty() &&

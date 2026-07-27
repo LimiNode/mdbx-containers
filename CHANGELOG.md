@@ -14,6 +14,13 @@ All notable changes to this project will be documented in this file.
 - Added public `ChangeDomain`, `LogicalSchemaRef`, and `LogicalChange` model
   types for future logical table adapters. The current wire codec remains
   raw-DBI only.
+- Added `LogicalChangeFrame` and `LogicalChangeFrameCodec` as a strict
+  little-endian binary frame for explicit logical sync paths. The frame is a
+  payload container only: destination routing, origin ordering, and replay
+  protection remain the responsibility of an external delivery envelope or
+  caller-owned transport contract. Transport pull/push DTOs remain raw-DBI only
+  until a later capability-gated PR wires logical delivery into transport
+  exchange.
 - Added `ISyncCaptureSink::record_change_op(MDBX_txn*, const ChangeOp&)` as the
   preferred capture entry point. The previous raw-field callback remains the
   source-compatible abstract sink contract; new full-`ChangeOp` sinks can
