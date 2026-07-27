@@ -246,8 +246,8 @@ cmake -S . -B tmp/build-ws-example `
   `PullRequest`, `PullResponse`, `PushRequest` и `PushResponse` остаются
   raw-DBI only до появления negotiation для logical transport capabilities.
   `LogicalChangeFrame` является payload-контейнером, а не протоколом доставки:
-  retrying transports всё ещё требуют внешний контракт для destination routing,
-  ordering и replay protection.
+  retrying transports должны оборачивать его в `LogicalDeliveryEnvelope`, где
+  есть destination identity и persistent replay protection.
 - Чтение, поиск и range scans не запускают sync. Локальный commit также не
   обращается к другой ноде; `SyncWorker` или явный pull/push-код позже
   отправляет уже закоммиченные batches через `ISyncPeer`.

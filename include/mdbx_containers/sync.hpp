@@ -19,6 +19,7 @@
 #include "sync/ChangeOp.hpp"
 #include "sync/LogicalChange.hpp"
 #include "sync/LogicalChangeFrameCodec.hpp"
+#include "sync/LogicalDeliveryEnvelopeCodec.hpp"
 #include "sync/LogicalTableAdapter.hpp"
 #include "sync/LogicalSchemaValidation.hpp"
 #include "sync/adapters/KeyValueTableLogicalAdapter.hpp"
@@ -49,6 +50,7 @@
 #include "sync/stores/ChangeLogStore.hpp"
 #include "sync/stores/AppliedStore.hpp"
 #include "sync/stores/IdentityIndexStore.hpp"
+#include "sync/stores/LogicalDeliveryStore.hpp"
 #include "sync/stores/SchemaRegistryStore.hpp"
 #endif
 

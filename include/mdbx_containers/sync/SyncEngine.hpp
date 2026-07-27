@@ -41,6 +41,7 @@
 #include "ChangeBatch.hpp"
 #include "ChangeBatchCodec.hpp"
 #include "ChangeOp.hpp"
+#include "LogicalDeliveryEnvelopeCodec.hpp"
 #include "LogicalChangeFrameCodec.hpp"
 #include "LogicalTableAdapter.hpp"
 #include "LogicalSchemaValidation.hpp"
@@ -48,6 +49,7 @@
 #include "SyncCursor.hpp"
 #include "stores/AppliedStore.hpp"
 #include "stores/ChangeLogStore.hpp"
+#include "stores/LogicalDeliveryStore.hpp"
 #include "stores/MetaStore.hpp"
 #include "stores/OriginIndexStore.hpp"
 #include "stores/SchemaRegistryStore.hpp"
@@ -322,6 +324,130 @@ namespace sync {
             } catch (...) {
                 return LogicalApplyResult::failure(
                     "Logical change frame apply failed");
+            }
+        }
+
+        /// \brief Applies a logical delivery envelope with atomic replay dedup.
+        /// \details The envelope destination must match this engine's
+        /// \c db_uuid. Envelopes whose origin is this engine's local
+        /// \c node_id are treated as successful loopback no-ops before marker
+        /// insertion. The delivery marker is written in the same MDBX write
+        /// transaction as adapter mutations, so a failed apply rolls back both
+        /// data and replay identity. Re-delivery of an already committed
+        /// envelope is treated as a successful no-op.
+        LogicalApplyResult apply_logical_delivery_envelope(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) {
+            try {
+                validate_logical_delivery_envelope(envelope, bounds);
+            } catch (const std::exception& e) {
+                return LogicalApplyResult::failure(
+                    e.what());
+            } catch (...) {
+                return LogicalApplyResult::failure(
+                    "Logical delivery envelope validation failed");
+            }
+
+            const std::vector<LogicalChange>& changes =
+                envelope.frame.changes;
+            std::vector<std::string> affected_dbi_names;
+
+            Connection::SyncApplyNotification notification;
+            LogicalApplyResult result;
+            bool notify = false;
+            {
+                const Connection::SyncApplyWriteGuard sync_apply_guard =
+                    m_conn->sync_apply_write_guard();
+                auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+
+                MetaStore meta(m_conn->env_handle());
+                LogicalDeliveryStore delivery(m_conn->env_handle());
+                meta.open(txn.handle());
+                delivery.open(txn.handle());
+
+                const DbId local_db_uuid = meta.get_db_uuid(txn.handle());
+                const NodeId local_node_id = meta.get_node_id(txn.handle());
+                if (compare_node_id(local_db_uuid,
+                                    envelope.destination_db_uuid) != 0) {
+                    txn.rollback();
+                    return LogicalApplyResult::failure(
+                        "Logical delivery envelope destination db_uuid "
+                        "mismatch");
+                }
+                if (compare_node_id(local_node_id,
+                                    envelope.origin_node_id) == 0) {
+                    txn.rollback();
+                    return LogicalApplyResult::success();
+                }
+
+                if (!delivery.try_mark_applied(
+                        txn.handle(), envelope, bounds)) {
+                    txn.rollback();
+                    return LogicalApplyResult::success();
+                }
+
+                collect_logical_affected_dbis(
+                    changes, affected_dbi_names);
+
+                result = validate_logical_schema_markers(
+                    txn.handle(), changes);
+                if (result.ok) {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_conn, txn.handle());
+                    result = m_logical_registry.preflight_then_apply(
+                        txn.handle(), changes);
+                }
+                if (!result.ok) {
+                    txn.rollback();
+                    return result;
+                }
+
+                txn.commit();
+                if (!changes.empty()) {
+                    try {
+                        notification =
+                            m_conn->mark_sync_apply_committed(
+                                1u, changes.size(), affected_dbi_names);
+                        notify = true;
+                    } catch (...) {
+                        return result;
+                    }
+                }
+            }
+            if (notify) {
+                m_conn->notify_sync_apply_observers(notification);
+            }
+            return result;
+        }
+
+        /// \brief Decodes and applies a logical delivery envelope.
+        LogicalApplyResult apply_logical_delivery_envelope_bytes(
+                const std::vector<std::uint8_t>& encoded,
+                const CodecBounds* bounds = nullptr) {
+            LogicalDeliveryEnvelope envelope;
+            try {
+                envelope =
+                    LogicalDeliveryEnvelopeCodec::decode(encoded, bounds);
+            } catch (const std::exception& e) {
+                return LogicalApplyResult::failure(
+                    std::string(
+                        "Logical delivery envelope decode failed: ") +
+                    e.what());
+            } catch (...) {
+                return LogicalApplyResult::failure(
+                    "Logical delivery envelope decode failed");
+            }
+
+            try {
+                return apply_logical_delivery_envelope(envelope, bounds);
+            } catch (const std::exception& e) {
+                return LogicalApplyResult::failure(
+                    std::string(
+                        "Logical delivery envelope apply failed: ") +
+                    e.what());
+            } catch (...) {
+                return LogicalApplyResult::failure(
+                    "Logical delivery envelope apply failed");
             }
         }
 
@@ -658,10 +784,12 @@ namespace sync {
             ChangeLogStore change_log(m_conn->env_handle());
             AppliedStore applied(m_conn->env_handle());
             SchemaRegistryStore schemas(m_conn->env_handle());
+            LogicalDeliveryStore logical_delivery(m_conn->env_handle());
             meta.open(txn);
             change_log.open(txn);
             applied.open(txn);
             schemas.open(txn);
+            logical_delivery.open(txn);
         }
 
         static ApplyOutcome make_apply_outcome(ApplyResult result,

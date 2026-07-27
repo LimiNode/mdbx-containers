@@ -510,6 +510,38 @@ monotonic sequence, frame id, or replay marker. Retrying transports must provide
 delivery routing, ordering, and replay protection outside this payload layer
 until a dedicated logical delivery envelope is used.
 
+`LogicalDeliveryEnvelopeCodec.hpp` defines that outer retry-safe layer for
+explicit logical frame delivery. The envelope carries the destination database
+uuid, origin node id, origin sequence, stable frame id, and nested
+`LogicalChangeFrame`. `SyncEngine::apply_logical_delivery_envelope()` validates
+the destination against local sync metadata, inserts a persistent marker into
+`_mdbxc_logical_delivery` with `MDBX_NOOVERWRITE`, and applies adapter mutations
+in the same writable transaction. If the transaction rolls back, both user data
+and the replay marker roll back. If the same delivery key is seen again after a
+committed apply, the engine treats it as a successful no-op and does not invoke
+adapters again. Envelopes whose origin is the local node are also treated as
+successful no-ops before marker insertion, matching the raw sync self-origin
+guard.
+
+The marker key is fixed-size: origin node id, origin sequence, and a stable
+digest of `frame_id`. The marker value stores the full delivery identity,
+destination database id, and canonical encoded nested frame bytes; reusing the
+same delivery key with different frame content is an explicit identity conflict.
+When `apply_logical_delivery_envelope_bytes()` receives custom `CodecBounds`,
+the same bounds are used for decode and marker frame fingerprinting.
+
+This delivery envelope provides routing validation and replay deduplication, but
+not ordered delivery. The receiver currently accepts envelopes from the same
+origin out of sequence, and it treats different `frame_id` values with the same
+`origin_sequence` as different delivery identities. Applications or transports
+that require ordered effects must serialize delivery externally until a later
+per-origin watermark/gap contract is added.
+
+`_mdbxc_logical_delivery` retention is currently permanent and unbounded. A
+future lifecycle PR should add an acknowledgement horizon or per-origin
+watermark before old replay markers can be pruned safely; deleting markers by
+time alone would re-open the exact late-retry problem the store prevents.
+
 `LogicalTableAdapter.hpp` reserves the apply-side extension point:
 
 - `ILogicalTableAdapter::preflight()` validates one logical change without

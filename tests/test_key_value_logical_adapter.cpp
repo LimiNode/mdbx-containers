@@ -351,6 +351,130 @@ private:
     std::string m_schema_id;
 };
 
+class CountingDeliveryLogicalAdapter
+        : public mdbxc::sync::ILogicalTableAdapter {
+public:
+    CountingDeliveryLogicalAdapter(
+            mdbxc::KeyValueTable<int, std::string>& table,
+            const std::string& schema_id,
+            int& calls,
+            bool* preflight_should_fail = nullptr,
+            bool* affected_should_fail = nullptr,
+            int* affected_calls = nullptr)
+        : m_table(table),
+          m_schema_id(schema_id),
+          m_calls(calls),
+          m_preflight_should_fail(preflight_should_fail),
+          m_affected_should_fail(affected_should_fail),
+          m_affected_calls(affected_calls) {}
+
+    mdbxc::sync::LogicalSchemaRef schema_ref() const override {
+        mdbxc::sync::LogicalSchemaRef ref;
+        ref.schema_id = m_schema_id;
+        ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+        ref.schema_version = 1;
+        return ref;
+    }
+
+    std::string primary_dbi() const override {
+        return m_table.dbi_name();
+    }
+
+    std::vector<std::string> affected_dbis() const override {
+        if (m_affected_calls != nullptr) {
+            ++(*m_affected_calls);
+        }
+        if (m_affected_should_fail != nullptr &&
+                *m_affected_should_fail) {
+            throw std::runtime_error("forced logical delivery affected_dbis failure");
+        }
+        std::vector<std::string> out;
+        out.push_back(m_table.dbi_name());
+        return out;
+    }
+
+    mdbxc::sync::LogicalApplyResult preflight(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) const override {
+        (void)txn;
+        (void)change;
+        if (m_preflight_should_fail != nullptr &&
+                *m_preflight_should_fail) {
+            return mdbxc::sync::LogicalApplyResult::failure(
+                "forced logical delivery preflight failure");
+        }
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+    mdbxc::sync::LogicalApplyResult apply(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) override {
+        (void)change;
+        ++m_calls;
+        m_table.insert_or_assign(90, std::to_string(m_calls), txn);
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+private:
+    mdbxc::KeyValueTable<int, std::string>& m_table;
+    std::string m_schema_id;
+    int& m_calls;
+    bool* m_preflight_should_fail;
+    bool* m_affected_should_fail;
+    int* m_affected_calls;
+};
+
+class CountingOnlyDeliveryLogicalAdapter
+        : public mdbxc::sync::ILogicalTableAdapter {
+public:
+    CountingOnlyDeliveryLogicalAdapter(const std::string& dbi_name,
+                                       const std::string& schema_id,
+                                       int& calls)
+        : m_dbi_name(dbi_name),
+          m_schema_id(schema_id),
+          m_calls(calls) {}
+
+    mdbxc::sync::LogicalSchemaRef schema_ref() const override {
+        mdbxc::sync::LogicalSchemaRef ref;
+        ref.schema_id = m_schema_id;
+        ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+        ref.schema_version = 1;
+        return ref;
+    }
+
+    std::string primary_dbi() const override {
+        return m_dbi_name;
+    }
+
+    std::vector<std::string> affected_dbis() const override {
+        std::vector<std::string> out;
+        out.push_back(m_dbi_name);
+        return out;
+    }
+
+    mdbxc::sync::LogicalApplyResult preflight(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) const override {
+        (void)txn;
+        (void)change;
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+    mdbxc::sync::LogicalApplyResult apply(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) override {
+        (void)txn;
+        (void)change;
+        ++m_calls;
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+private:
+    std::string m_dbi_name;
+    std::string m_schema_id;
+    int& m_calls;
+};
+
 class ThrowingFlushSink : public mdbxc::sync::ISyncCaptureSink {
 public:
     void record_change(MDBX_txn* txn,
@@ -1179,6 +1303,521 @@ void test_key_value_logical_frame_reports_apply_stage_exception() {
     cleanup(path);
 }
 
+void test_key_value_logical_delivery_envelope_deduplicates_after_reopen() {
+    const std::string path =
+        "test_key_value_logical_delivery_dedup.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_dedup";
+    const std::string schema_id = "app.logical_kv_delivery_dedup.v1";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x36);
+    const mdbxc::sync::NodeId origin_node = make_node(0x37);
+    const mdbxc::sync::NodeId db_uuid = make_node(0xC6);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = origin_node;
+    envelope.origin_sequence = 1;
+    envelope.frame_id = "frame-0001";
+    {
+        mdbxc::sync::LogicalSchemaRef ref;
+        ref.schema_id = schema_id;
+        ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+        ref.schema_version = 1;
+        std::vector<std::uint8_t> payload;
+        envelope.frame.changes.push_back(
+            mdbxc::sync::LogicalChange(ref, 1u, 0u, payload));
+    }
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::LogicalDeliveryEnvelopeCodec::encode(envelope);
+
+    {
+        mdbxc::Config cfg;
+        cfg.pathname = path;
+        cfg.max_dbs = 16;
+        cfg.no_subdir = true;
+        std::shared_ptr<mdbxc::Connection> conn =
+            mdbxc::Connection::create(cfg);
+
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, db_uuid);
+        engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+        mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+        int apply_calls = 0;
+        CountingDeliveryLogicalAdapter adapter(
+            table, schema_id, apply_calls);
+        engine.register_logical_adapter(adapter);
+
+        const mdbxc::sync::LogicalApplyResult first =
+            engine.apply_logical_delivery_envelope_bytes(encoded);
+        MDBXC_TEST_ASSERT(first.ok);
+        MDBXC_TEST_ASSERT(apply_calls == 1);
+        const std::pair<bool, std::string> found = table.find_compat(90);
+        MDBXC_TEST_ASSERT(found.first);
+        MDBXC_TEST_ASSERT(found.second == "1");
+
+        conn->disconnect();
+    }
+
+    {
+        mdbxc::Config cfg;
+        cfg.pathname = path;
+        cfg.max_dbs = 16;
+        cfg.no_subdir = true;
+        std::shared_ptr<mdbxc::Connection> conn =
+            mdbxc::Connection::create(cfg);
+
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, db_uuid);
+        engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+        mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+        int apply_calls = 0;
+        bool affected_should_fail = true;
+        int affected_calls = 0;
+        CountingDeliveryLogicalAdapter adapter(
+            table, schema_id, apply_calls, nullptr,
+            &affected_should_fail, &affected_calls);
+        engine.register_logical_adapter(adapter);
+
+        const mdbxc::sync::LogicalApplyResult duplicate =
+            engine.apply_logical_delivery_envelope_bytes(encoded);
+        MDBXC_TEST_ASSERT(duplicate.ok);
+        MDBXC_TEST_ASSERT(apply_calls == 0);
+        MDBXC_TEST_ASSERT(affected_calls == 0);
+        const std::pair<bool, std::string> found = table.find_compat(90);
+        MDBXC_TEST_ASSERT(found.first);
+        MDBXC_TEST_ASSERT(found.second == "1");
+
+        conn->disconnect();
+    }
+
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_envelope_rejects_wrong_destination() {
+    const std::string path =
+        "test_key_value_logical_delivery_wrong_destination.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_wrong_dest";
+    const std::string schema_id = "app.logical_kv_delivery_wrong_dest.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId db_uuid = make_node(0xC7);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x38), db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    int apply_calls = 0;
+    bool affected_should_fail = true;
+    int affected_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(
+        table, schema_id, apply_calls, nullptr,
+        &affected_should_fail, &affected_calls);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = make_node(0xC8);
+    envelope.origin_node_id = make_node(0x39);
+    envelope.origin_sequence = 1;
+    envelope.frame_id = "wrong-destination";
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, std::vector<std::uint8_t>()));
+
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_delivery_envelope(envelope);
+    MDBXC_TEST_ASSERT(!result.ok);
+    MDBXC_TEST_ASSERT(result.error.find("destination") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(apply_calls == 0);
+    MDBXC_TEST_ASSERT(affected_calls == 0);
+    MDBXC_TEST_ASSERT(!table.contains(90));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_envelope_rejects_identity_collision() {
+    const std::string path =
+        "test_key_value_logical_delivery_identity_collision.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_collision";
+    const std::string schema_id = "app.logical_kv_delivery_collision.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId db_uuid = make_node(0xC9);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x3A), db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    int apply_calls = 0;
+    bool affected_should_fail = false;
+    int affected_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(
+        table, schema_id, apply_calls, nullptr,
+        &affected_should_fail, &affected_calls);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = make_node(0x3B);
+    envelope.origin_sequence = 7;
+    envelope.frame_id = "identity-collision";
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, std::vector<std::uint8_t>()));
+
+    const mdbxc::sync::LogicalApplyResult first =
+        engine.apply_logical_delivery_envelope_bytes(
+            mdbxc::sync::LogicalDeliveryEnvelopeCodec::encode(envelope));
+    MDBXC_TEST_ASSERT(first.ok);
+    MDBXC_TEST_ASSERT(apply_calls == 1);
+    std::pair<bool, std::string> found = table.find_compat(90);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "1");
+
+    mdbxc::sync::LogicalDeliveryEnvelope collision = envelope;
+    std::vector<std::uint8_t> payload;
+    payload.push_back(0x42u);
+    collision.frame.changes[0] = mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, payload);
+    affected_should_fail = true;
+
+    const mdbxc::sync::LogicalApplyResult second =
+        engine.apply_logical_delivery_envelope_bytes(
+            mdbxc::sync::LogicalDeliveryEnvelopeCodec::encode(collision));
+    MDBXC_TEST_ASSERT(!second.ok);
+    MDBXC_TEST_ASSERT(second.error.find("identity conflict") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(apply_calls == 1);
+    found = table.find_compat(90);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "1");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_marker_rolls_back_after_apply_failure() {
+    const std::string path =
+        "test_key_value_logical_delivery_marker_rollback.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_rollback";
+    const std::string schema_id = "app.logical_kv_delivery_rollback.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId db_uuid = make_node(0xCA);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x3C), db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    int apply_calls = 0;
+    bool fail_preflight = true;
+    CountingDeliveryLogicalAdapter adapter(
+        table, schema_id, apply_calls, &fail_preflight);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = make_node(0x3D);
+    envelope.origin_sequence = 8;
+    envelope.frame_id = "marker-rollback";
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, std::vector<std::uint8_t>()));
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::LogicalDeliveryEnvelopeCodec::encode(envelope);
+
+    const mdbxc::sync::LogicalApplyResult failed =
+        engine.apply_logical_delivery_envelope_bytes(encoded);
+    MDBXC_TEST_ASSERT(!failed.ok);
+    MDBXC_TEST_ASSERT(failed.error.find(
+                          "forced logical delivery preflight failure") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(apply_calls == 0);
+    MDBXC_TEST_ASSERT(!table.contains(90));
+
+    fail_preflight = false;
+    const mdbxc::sync::LogicalApplyResult retried =
+        engine.apply_logical_delivery_envelope_bytes(encoded);
+    MDBXC_TEST_ASSERT(retried.ok);
+    MDBXC_TEST_ASSERT(apply_calls == 1);
+    const std::pair<bool, std::string> found = table.find_compat(90);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "1");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_envelope_skips_self_origin() {
+    const std::string path =
+        "test_key_value_logical_delivery_self_origin.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_self_origin";
+    const std::string schema_id = "app.logical_kv_delivery_self_origin.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x3E);
+    const mdbxc::sync::NodeId db_uuid = make_node(0xCB);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    int apply_calls = 0;
+    bool affected_should_fail = true;
+    int affected_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(
+        table, schema_id, apply_calls, nullptr,
+        &affected_should_fail, &affected_calls);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = local_node;
+    envelope.origin_sequence = 9;
+    envelope.frame_id = "self-origin";
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, std::vector<std::uint8_t>()));
+
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_delivery_envelope_bytes(
+            mdbxc::sync::LogicalDeliveryEnvelopeCodec::encode(envelope));
+    MDBXC_TEST_ASSERT(result.ok);
+    MDBXC_TEST_ASSERT(apply_calls == 0);
+    MDBXC_TEST_ASSERT(affected_calls == 0);
+    MDBXC_TEST_ASSERT(!table.contains(90));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_envelope_accepts_long_frame_id() {
+    const std::string path =
+        "test_key_value_logical_delivery_long_frame_id.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_long_frame";
+    const std::string schema_id = "app.logical_kv_delivery_long_frame.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId db_uuid = make_node(0xCC);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x3F), db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    int apply_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(table, schema_id, apply_calls);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = make_node(0x40);
+    envelope.origin_sequence = 10;
+    envelope.frame_id = std::string(3000u, 'f');
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, std::vector<std::uint8_t>()));
+
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_delivery_envelope_bytes(
+            mdbxc::sync::LogicalDeliveryEnvelopeCodec::encode(envelope));
+    MDBXC_TEST_ASSERT(result.ok);
+    MDBXC_TEST_ASSERT(apply_calls == 1);
+    const std::pair<bool, std::string> found = table.find_compat(90);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "1");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_envelope_keeps_custom_bounds() {
+    const std::string path =
+        "test_key_value_logical_delivery_custom_bounds.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_bounds";
+    const std::string schema_id = "app.logical_kv_delivery_bounds.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId db_uuid = make_node(0xCD);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x41), db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    int apply_calls = 0;
+    CountingOnlyDeliveryLogicalAdapter adapter(
+        dbi_name, schema_id, apply_calls);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::CodecBounds bounds;
+    bounds.max_ops_per_batch = 10001u;
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = make_node(0x42);
+    envelope.origin_sequence = 11;
+    envelope.frame_id = "custom-bounds";
+    const mdbxc::sync::LogicalSchemaRef schema = adapter.schema_ref();
+    envelope.frame.changes.reserve(bounds.max_ops_per_batch);
+    for (std::uint32_t i = 0; i < bounds.max_ops_per_batch; ++i) {
+        (void)i;
+        envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+            schema, 1u, 0u, std::vector<std::uint8_t>()));
+    }
+
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::LogicalDeliveryEnvelopeCodec::encode(
+            envelope, &bounds);
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_delivery_envelope_bytes(encoded, &bounds);
+    MDBXC_TEST_ASSERT(result.ok);
+    MDBXC_TEST_ASSERT(apply_calls ==
+                      static_cast<int>(bounds.max_ops_per_batch));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_object_api_rejects_frame_id_bound() {
+    const std::string path =
+        "test_key_value_logical_delivery_object_bound.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_object_bound";
+    const std::string schema_id = "app.logical_kv_delivery_object_bound.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId db_uuid = make_node(0xCE);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x43), db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    int apply_calls = 0;
+    bool affected_should_fail = true;
+    int affected_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(
+        table, schema_id, apply_calls, nullptr,
+        &affected_should_fail, &affected_calls);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::CodecBounds bounds;
+    bounds.max_logical_delivery_frame_id_len = 8u;
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = make_node(0x44);
+    envelope.origin_sequence = 12;
+    envelope.frame_id = "123456789";
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, std::vector<std::uint8_t>()));
+
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_delivery_envelope(envelope, &bounds);
+    MDBXC_TEST_ASSERT(!result.ok);
+    MDBXC_TEST_ASSERT(result.error.find(
+                          "max_logical_delivery_frame_id_len") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(apply_calls == 0);
+    MDBXC_TEST_ASSERT(affected_calls == 0);
+    MDBXC_TEST_ASSERT(!table.contains(90));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_store_rejects_frame_id_bound() {
+    const std::string path =
+        "test_key_value_logical_delivery_store_bound.mdbx";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::CodecBounds bounds;
+    bounds.max_logical_delivery_frame_id_len = 8u;
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = make_node(0xCF);
+    envelope.origin_node_id = make_node(0x45);
+    envelope.origin_sequence = 13;
+    envelope.frame_id = "123456789";
+    mdbxc::sync::LogicalSchemaRef ref;
+    ref.schema_id = "app.logical_kv_delivery_store_bound.v1";
+    ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+    ref.schema_version = 1;
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        ref, 1u, 0u, std::vector<std::uint8_t>()));
+
+    bool threw = false;
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        mdbxc::sync::LogicalDeliveryStore store(conn->env_handle());
+        store.open(txn.handle());
+        try {
+            store.try_mark_applied(txn.handle(), envelope, &bounds);
+        } catch (const std::length_error& e) {
+            threw = std::string(e.what()).find(
+                        "max_logical_delivery_frame_id_len") !=
+                    std::string::npos;
+        }
+        txn.rollback();
+    }
+    MDBXC_TEST_ASSERT(threw);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_value_logical_capture_session_discards_rollback() {
     const std::string path = "test_key_value_logical_adapter_session_rollback.mdbx";
     const std::string dbi_name = "logical_key_value_session_rollback";
@@ -1720,6 +2359,15 @@ int main() {
     test_key_value_logical_frame_replicates_capture_session();
     test_key_value_logical_frame_rejects_malformed_bytes_before_apply();
     test_key_value_logical_frame_reports_apply_stage_exception();
+    test_key_value_logical_delivery_envelope_deduplicates_after_reopen();
+    test_key_value_logical_delivery_envelope_rejects_wrong_destination();
+    test_key_value_logical_delivery_envelope_rejects_identity_collision();
+    test_key_value_logical_delivery_marker_rolls_back_after_apply_failure();
+    test_key_value_logical_delivery_envelope_skips_self_origin();
+    test_key_value_logical_delivery_envelope_accepts_long_frame_id();
+    test_key_value_logical_delivery_envelope_keeps_custom_bounds();
+    test_key_value_logical_delivery_object_api_rejects_frame_id_bound();
+    test_key_value_logical_delivery_store_rejects_frame_id_bound();
     test_key_value_logical_capture_session_discards_rollback();
     test_key_value_logical_capture_session_requires_schema_marker();
     test_key_value_logical_capture_session_rejects_stale_marker();

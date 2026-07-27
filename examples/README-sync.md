@@ -246,8 +246,8 @@ cmake -S . -B tmp/build-ws-example `
   `PullResponse`, `PushRequest`, and `PushResponse` transport DTOs remain
   raw-DBI only until logical transport capability negotiation is added.
   `LogicalChangeFrame` is a payload container, not a delivery protocol: retrying
-  transports still need an outer contract for destination routing, ordering, and
-  replay protection.
+  transports should wrap it in `LogicalDeliveryEnvelope`, which adds destination
+  routing identity and persisted replay protection.
 - The minimal `SyncNodeSession` recipe uses `DirectSyncPeer` to stay
   dependency-free. A real HTTP node keeps the same session shape and replaces
   only the peer with a ready-made HTTP transport binding, for example
