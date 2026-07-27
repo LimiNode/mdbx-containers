@@ -464,6 +464,13 @@ or repair tools. Both paths ensure that an existing database was opened with
 the same logical table kind, application schema version, and owned physical DBI
 set.
 
+Schema marker evolution is explicit. `register_or_verify()` creates or checks
+an exact immutable marker; it does not update an existing record.
+`SchemaRegistryStore::migrate_or_verify()` and
+`SyncEngine::migrate_logical_schema()` replace a marker only when the current
+record first matches an expected old record exactly. This marker operation does
+not migrate user table contents or old changelog entries.
+
 `SyncEngine::initialize_local_identity()` creates this DBI together with the
 required sync metadata stores in a committed setup transaction. Standalone
 maintenance code may still use `SchemaRegistryStore` directly; public store
@@ -523,10 +530,10 @@ codec tags such as `KeyValueLogicalInt64Codec<long>` and
 source spelling, defines the logical wire type; for example, local `long` may
 be mapped to signed 64-bit wire integers and range-checked on decode. Codec
 tags are part of the logical schema contract, so changing them requires a new
-schema id, or an explicit schema-marker migration. The current registry is
-immutable: changing `schema_version` under an already registered schema id is
-detected as a mismatch. Integer logical payload bytes are little-endian,
-matching the project-wide payload integer rule above. Apply uses a
+schema id, or an explicit schema-marker migration. A plain registration call
+still detects `schema_version` changes under an already registered schema id as
+a mismatch. Integer logical payload bytes are little-endian, matching the
+project-wide payload integer rule above. Apply uses a
 transaction-scoped sync-capture suppression guard so an incoming logical change
 written through public table methods is not re-published as a local raw
 `ChangeOp`.
@@ -1203,10 +1210,8 @@ When HLC or similar lands in v0.2, it goes in as opaque bytes inside
 
 - `meta_schema_version()` currently returns 1; bump rule + migration
   procedure not defined.
-- Logical schema-marker migration API. The current `_mdbxc_sync_schema`
-  registry is immutable and only creates or verifies exact records; changing a
-  codec tag for an existing logical table requires a new schema id until an
-  explicit marker migration lifecycle is designed.
+- Logical data migration policy for existing logical table contents and
+  retained changelog entries after a schema-marker migration.
 - Public sync API stability after the first external transport adapter.
 - `PeerRegistry` for multi-peer fan-out — single peer per sync invocation
   in v0.1.

@@ -855,6 +855,85 @@ void test_schema_registry_open_after_aborted_create() {
     cleanup(p);
 }
 
+void test_schema_registry_migrates_marker_explicitly() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_schema_migration.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+
+    LogicalSchemaRecord v1;
+    v1.dbi_name = "items";
+    v1.kind = LogicalTableKind::KeyValue;
+    v1.schema_version = 1;
+    v1.dbi_names.push_back("items");
+
+    LogicalSchemaRecord v2 = v1;
+    v2.schema_version = 2;
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        store.register_or_verify(txn.handle(), "app.items", v1);
+        store.migrate_or_verify(txn.handle(), "app.items", v1, v2);
+        store.migrate_or_verify(txn.handle(), "app.items", v1, v2);
+        txn.commit();
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord out;
+        if (!store.get(txn.handle(), "app.items", out) ||
+            out.schema_version != 2u) {
+            throw std::runtime_error(
+                "schema registry migration did not persist replacement");
+        }
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        bool caught = false;
+        try {
+            store.migrate_or_verify(txn.handle(), "app.missing", v1, v2);
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        if (!caught) {
+            throw std::runtime_error(
+                "schema registry migration accepted missing source");
+        }
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord wrong_expected = v1;
+        wrong_expected.kind = LogicalTableKind::KeyMultiValue;
+        LogicalSchemaRecord v3 = v2;
+        v3.schema_version = 3;
+        bool caught = false;
+        try {
+            store.migrate_or_verify(txn.handle(), "app.items",
+                                    wrong_expected, v3);
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        if (!caught) {
+            throw std::runtime_error(
+                "schema registry migration accepted wrong expected marker");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 void test_schema_registry_created_by_sync_engine_init() {
     using namespace mdbxc::sync;
     const std::string p = "test_sync_stores_schema_engine_init.mdbx";
@@ -944,6 +1023,61 @@ void test_sync_engine_registers_logical_schema_marker() {
             throw std::runtime_error(
                 "mismatched logical schema marker rewrote existing record");
         }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_sync_engine_migrates_logical_schema_marker() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_schema_engine_migrate.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+
+    SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x14), make_node(0x25));
+
+    LogicalSchemaRecord v1;
+    v1.dbi_name = "items";
+    v1.kind = LogicalTableKind::KeyValue;
+    v1.schema_version = 1;
+    v1.dbi_names.push_back("items");
+
+    LogicalSchemaRecord v2 = v1;
+    v2.schema_version = 2;
+
+    engine.register_logical_schema("app.items", v1);
+    engine.migrate_logical_schema("app.items", v1, v2);
+    engine.migrate_logical_schema("app.items", v1, v2);
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord out;
+        if (!store.get(txn.handle(), "app.items", out) ||
+            out.schema_version != 2u) {
+            throw std::runtime_error(
+                "SyncEngine logical schema migration was not persisted");
+        }
+    }
+
+    LogicalSchemaRecord v3 = v2;
+    v3.schema_version = 3;
+    bool caught = false;
+    try {
+        engine.migrate_logical_schema("app.items", v1, v3);
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    if (!caught) {
+        throw std::runtime_error(
+            "SyncEngine accepted logical schema migration with stale expected marker");
     }
 
     conn->disconnect();
@@ -1209,9 +1343,11 @@ int main() {
     test_changelog_prune_does_not_touch_other_origin();
     test_identity_key_collision();
     test_schema_registry_store();
+    test_schema_registry_migrates_marker_explicitly();
     test_schema_registry_open_after_aborted_create();
     test_schema_registry_created_by_sync_engine_init();
     test_sync_engine_registers_logical_schema_marker();
+    test_sync_engine_migrates_logical_schema_marker();
     test_sync_engine_registers_logical_schema_without_identity_init();
     test_schema_registry_rejects_malformed_records();
     test_stores_require_open();

@@ -84,18 +84,20 @@
   flushing makes that transaction rollback-only; retrying `commit()` is
   rejected.
 - `SyncEngine` exposes pull/push/apply primitives and
-  `register_logical_schema()` for committed logical schema marker setup.
+  `register_logical_schema()` for committed logical schema marker setup, plus
+  `migrate_logical_schema()` for explicit marker replacement after exact
+  preflight.
   `KeyValueTableLogicalAdapter` is the first concrete logical adapter helper
   for explicit `LogicalTableRegistry::preflight_then_apply()` calls. Its
   payload codec is separate from physical table storage and is selected through
   explicit key/value codec tags such as `KeyValueLogicalInt64Codec<long>` and
   `KeyValueLogicalStringCodec<std::string>`. Codec tags are part of the
   logical schema contract; changing them requires a new schema id, or an
-  explicit schema-marker migration. Changing `schema_version` under an already
-  registered schema id is rejected by the current immutable registry. Integer
-  payloads are encoded little-endian. Incoming logical apply suppresses local
-  raw capture for the affected transaction. It is not wired into the automatic
-  sync pipeline yet.
+  explicit schema-marker migration. A plain `register_logical_schema()` call
+  still rejects a changed `schema_version` under an already registered schema
+  id. Integer payloads are encoded little-endian. Incoming logical apply
+  suppresses local raw capture for the affected transaction. It is not wired
+  into the automatic sync pipeline yet.
   `DirectSyncPeer` provides in-process sync for tests and examples,
   `HttpSyncPeer` defines an HTTP-shaped
   adapter seam, `WebSocketSyncPeer` defines a binary message seam, and

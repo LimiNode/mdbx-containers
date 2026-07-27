@@ -90,6 +90,50 @@ namespace sync {
                        "SchemaRegistryStore put failed");
         }
 
+        /// \brief Replaces an existing schema record after exact preflight.
+        /// \details This is a marker migration primitive, not a data
+        /// migration. The current record must equal \p expected_existing
+        /// exactly after canonicalization, unless it already equals
+        /// \p replacement. This makes retries idempotent while rejecting
+        /// silent overwrites of an unexpected marker.
+        /// \throws std::runtime_error when the current marker is missing or
+        /// differs from \p expected_existing and \p replacement.
+        void migrate_or_verify(MDBX_txn* txn,
+                               const std::string& schema_id,
+                               const LogicalSchemaRecord& expected_existing,
+                               const LogicalSchemaRecord& replacement) {
+            txn = checked_txn(txn, "SchemaRegistryStore::migrate_or_verify");
+            validate_record(schema_id, expected_existing);
+            validate_record(schema_id, replacement);
+            open(txn);
+
+            LogicalSchemaRecord existing;
+            if (!get(txn, schema_id, existing)) {
+                throw std::runtime_error(
+                    "Logical sync schema registry migration source missing");
+            }
+            if (records_equal(existing, replacement)) {
+                return;
+            }
+            if (!records_equal(existing, expected_existing)) {
+                throw std::runtime_error(
+                    "Logical sync schema registry migration preflight mismatch");
+            }
+
+            std::vector<std::uint8_t> value;
+            encode_record(schema_id, replacement, value);
+            MDBX_val key = {
+                const_cast<char*>(schema_id.data()),
+                schema_id.size()
+            };
+            MDBX_val val = {
+                value.empty() ? nullptr : &value[0],
+                value.size()
+            };
+            check_mdbx(mdbx_put(txn, m_dbi, &key, &val, MDBX_UPSERT),
+                       "SchemaRegistryStore migration put failed");
+        }
+
         /// \brief Reads a schema record.
         /// \return true when present, false when absent.
         bool get(MDBX_txn* txn,
