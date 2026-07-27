@@ -528,7 +528,9 @@ The adapter also exposes an opt-in `LogicalCaptureSession`. The session owns a
 writable transaction, suppresses raw capture for its typed writes, buffers
 logical changes privately, and copies them to the caller only from
 `commit(out)`. Rollback, destruction, or commit failure discards the pending
-logical changes.
+logical changes. Session construction validates the adapter against the
+persistent schema marker in the same writable transaction, before any local
+mutation can be performed.
 
 The adapter payload codec is not the table storage serializer. The initial
 codec surface is deliberately small and explicit: callers provide key/value

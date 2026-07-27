@@ -17,6 +17,7 @@
 
 #include "../../KeyValueTable.hpp"
 #include "../LogicalTableAdapter.hpp"
+#include "../LogicalSchemaValidation.hpp"
 #include "../common.hpp"
 
 namespace mdbxc {
@@ -394,6 +395,8 @@ namespace detail {
         /// \c commit(out), after the session has prepared the destination
         /// vector and before the native commit. If commit fails, the appended
         /// tail is erased and the destructor rolls back the transaction.
+        /// The adapter, table, and connection referenced by the adapter must
+        /// outlive the session.
         class LogicalCaptureSession {
         public:
             explicit LogicalCaptureSession(
@@ -401,7 +404,16 @@ namespace detail {
                 : m_adapter(adapter),
                   m_txn(adapter.m_table.connection()->transaction(
                       TransactionMode::WRITABLE)),
-                  m_active(true) {}
+                  m_active(true) {
+                const LogicalApplyResult marker_result =
+                    validate_logical_adapter_marker(
+                        m_txn.handle(),
+                        adapter.m_table.connection()->env_handle(),
+                        adapter);
+                if (!marker_result.ok) {
+                    throw std::runtime_error(marker_result.error);
+                }
+            }
 
             ~LogicalCaptureSession() noexcept {
                 rollback();

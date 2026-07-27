@@ -177,6 +177,28 @@ private:
     std::string m_schema_id;
 };
 
+class ThrowingFlushSink : public mdbxc::sync::ISyncCaptureSink {
+public:
+    void record_change(MDBX_txn* txn,
+                       const std::string& dbi_name,
+                       mdbxc::sync::ChangeOpType op_type,
+                       std::uint32_t dbi_flags,
+                       const std::vector<std::uint8_t>& storage_key,
+                       const std::vector<std::uint8_t>& value) override {
+        (void)txn;
+        (void)dbi_name;
+        (void)op_type;
+        (void)dbi_flags;
+        (void)storage_key;
+        (void)value;
+    }
+
+    void flush_in_txn(MDBX_txn* txn) override {
+        (void)txn;
+        throw std::runtime_error("forced logical capture commit failure");
+    }
+};
+
 void test_key_value_logical_adapter_applies_basic_ops() {
     const std::string path = "test_key_value_logical_adapter_basic.mdbx";
     const std::string dbi_name = "logical_key_value_items";
@@ -653,6 +675,208 @@ void test_key_value_logical_capture_session_discards_rollback() {
     cleanup(path);
 }
 
+void test_key_value_logical_capture_session_requires_schema_marker() {
+    const std::string path = "test_key_value_logical_adapter_session_marker.mdbx";
+    const std::string dbi_name = "logical_key_value_session_marker";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x21), make_node(0xB1));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, "app.logical_kv_session_marker.v1");
+
+    bool caught = false;
+    try {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    MDBXC_TEST_ASSERT(caught);
+    MDBXC_TEST_ASSERT(!table.contains(4));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_capture_session_rejects_stale_marker() {
+    const std::string path = "test_key_value_logical_adapter_session_stale.mdbx";
+    const std::string dbi_name = "logical_key_value_session_stale";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x22), make_node(0xB2));
+    engine.register_logical_schema("app.logical_kv_session_stale.v1",
+                                   make_record(dbi_name, 1));
+    engine.migrate_logical_schema("app.logical_kv_session_stale.v1",
+                                  make_record(dbi_name, 1),
+                                  make_record(dbi_name, 2));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter stale_adapter(
+        table, "app.logical_kv_session_stale.v1", 1);
+
+    bool caught = false;
+    try {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            stale_adapter.begin_capture_session();
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    MDBXC_TEST_ASSERT(caught);
+    MDBXC_TEST_ASSERT(!table.contains(5));
+
+    IntStringAdapter current_adapter(
+        table, "app.logical_kv_session_stale.v1", 2);
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            current_adapter.begin_capture_session();
+        session->insert_or_assign(5, "five");
+        session->commit(changes);
+    }
+    MDBXC_TEST_ASSERT(changes.size() == 1u);
+    const std::pair<bool, std::string> found = table.find_compat(5);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "five");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_capture_session_rejects_dbi_marker_mismatch() {
+    const std::string path = "test_key_value_logical_adapter_session_dbi.mdbx";
+    const std::string dbi_name = "logical_key_value_session_dbi";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x23), make_node(0xB3));
+    engine.register_logical_schema("app.logical_kv_session_dbi.v1",
+                                   make_record(dbi_name + "_other"));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, "app.logical_kv_session_dbi.v1");
+
+    bool caught = false;
+    try {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+    } catch (const std::runtime_error&) {
+        caught = true;
+    }
+    MDBXC_TEST_ASSERT(caught);
+    MDBXC_TEST_ASSERT(!table.contains(6));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_capture_session_erases_output_on_commit_failure() {
+    const std::string path = "test_key_value_logical_adapter_session_commit_fail.mdbx";
+    const std::string dbi_name = "logical_key_value_session_commit_fail";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x24), make_node(0xB4));
+    engine.register_logical_schema("app.logical_kv_session_commit_fail.v1",
+                                   make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, "app.logical_kv_session_commit_fail.v1");
+    ThrowingFlushSink sink;
+    conn->attach_sync_capture(&sink);
+
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(adapter.make_delete(99));
+    bool caught = false;
+    {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->insert_or_assign(7, "seven");
+        try {
+            session->commit(changes);
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+    }
+    conn->detach_sync_capture();
+
+    MDBXC_TEST_ASSERT(caught);
+    MDBXC_TEST_ASSERT(changes.size() == 1u);
+    MDBXC_TEST_ASSERT(!table.contains(7));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_capture_session_captures_clear() {
+    const std::string path = "test_key_value_logical_adapter_session_clear.mdbx";
+    const std::string dbi_name = "logical_key_value_session_clear";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x25), make_node(0xB5));
+    engine.register_logical_schema("app.logical_kv_session_clear.v1",
+                                   make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    table.insert_or_assign(1, "one");
+    table.insert_or_assign(2, "two");
+    IntStringAdapter adapter(table, "app.logical_kv_session_clear.v1");
+
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->clear();
+        session->commit(changes);
+    }
+
+    MDBXC_TEST_ASSERT(changes.size() == 1u);
+    MDBXC_TEST_ASSERT(changes[0].opcode ==
+                      mdbxc::sync::KeyValueLogicalClear);
+    MDBXC_TEST_ASSERT(table.count() == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_value_logical_capture_session_fails_before_mutation() {
     const std::string path = "test_key_value_logical_adapter_session_range.mdbx";
     const std::string dbi_name = "logical_key_value_session_range";
@@ -664,6 +888,11 @@ void test_key_value_logical_capture_session_fails_before_mutation() {
     cfg.no_subdir = true;
     std::shared_ptr<mdbxc::Connection> conn =
         mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x26), make_node(0xB6));
+    engine.register_logical_schema("app.logical_kv_session_range.v1",
+                                   make_record(dbi_name));
 
     mdbxc::KeyValueTable<long long, std::string> table(conn, dbi_name);
     LongLongInt32StringAdapter adapter(
@@ -943,6 +1172,11 @@ int main() {
     test_key_value_logical_engine_suppresses_generic_raw_capture();
     test_key_value_logical_capture_session_commits_typed_local_writes();
     test_key_value_logical_capture_session_discards_rollback();
+    test_key_value_logical_capture_session_requires_schema_marker();
+    test_key_value_logical_capture_session_rejects_stale_marker();
+    test_key_value_logical_capture_session_rejects_dbi_marker_mismatch();
+    test_key_value_logical_capture_session_erases_output_on_commit_failure();
+    test_key_value_logical_capture_session_captures_clear();
     test_key_value_logical_capture_session_fails_before_mutation();
     test_key_value_logical_adapter_rejects_malformed_payload();
     test_key_value_logical_adapter_uses_stable_payload();

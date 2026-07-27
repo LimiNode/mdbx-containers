@@ -32,8 +32,9 @@ All notable changes to this project will be documented in this file.
   integer wire codecs up to 64 bits, bool, and string codecs. Incoming logical
   apply suppresses local raw capture for the affected transaction. The adapter
   also provides an opt-in transaction-bound logical capture session that
-  buffers typed local changes and publishes them only after successful commit.
-  Transport pull/push remains raw-DBI only.
+  validates the persistent schema marker before local mutation, buffers typed
+  local changes, and publishes them only after successful commit. Transport
+  pull/push remains raw-DBI only.
 - Documented the staged logical sync contract: schema marker, logical wire
   frame, adapter preflight/apply, then capture. Deferred logical tables still
   require single-writer or application-serialized conflicting writes until a
