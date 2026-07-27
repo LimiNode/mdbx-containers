@@ -204,6 +204,23 @@ namespace sync {
             txn.commit();
         }
 
+        /// \brief Migrates an existing persistent logical table schema marker.
+        /// \details This is an explicit marker lifecycle operation. It does
+        /// not migrate user table contents or changelog data. The current
+        /// marker must match \p expected_existing exactly unless it already
+        /// equals \p replacement, making retries idempotent.
+        void migrate_logical_schema(
+                const std::string& schema_id,
+                const LogicalSchemaRecord& expected_existing,
+                const LogicalSchemaRecord& replacement) {
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            initialize_system_stores(txn.handle());
+            SchemaRegistryStore schemas(m_conn->env_handle());
+            schemas.migrate_or_verify(txn.handle(), schema_id,
+                                      expected_existing, replacement);
+            txn.commit();
+        }
+
         /// \brief Applies a single \c ChangeBatch to local DBIs inside \p txn.
         /// \details See class-level docs for the seq / apply rules. The
         /// caller commits the transaction. User DBIs are opened lazily by

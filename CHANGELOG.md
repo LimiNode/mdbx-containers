@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
   versions, and canonical sorted unique owned DBI names without enabling
   logical replication yet. `SyncEngine::register_logical_schema()` is the
   normal committed setup entry point for application schema markers.
+  `SyncEngine::migrate_logical_schema()` provides an explicit exact-preflight
+  marker replacement lifecycle without migrating user data or old changelog
+  entries.
 - Added public `ChangeDomain`, `LogicalSchemaRef`, and `LogicalChange` model
   types for future logical table adapters. The current wire codec remains
   raw-DBI only.

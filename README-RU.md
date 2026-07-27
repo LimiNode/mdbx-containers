@@ -107,19 +107,20 @@
   Caller-created raw read-only transactions остаются допустимыми для
   read/search snapshot operations. Любое исключение из capture recording или
   flush делает transaction rollback-only; повторный `commit()` отклоняется.
-- `SyncEngine` предоставляет pull/push/apply primitives и
-  `register_logical_schema()` для committed setup logical schema markers.
+- `SyncEngine` предоставляет pull/push/apply primitives,
+  `register_logical_schema()` для committed setup logical schema markers и
+  `migrate_logical_schema()` для явной замены marker после exact preflight.
   `KeyValueTableLogicalAdapter` - первый concrete logical adapter helper для
   явных вызовов `LogicalTableRegistry::preflight_then_apply()`. Его payload
   codec отделён от физического storage-формата таблицы и выбирается через
   явные key/value codec tags вроде `KeyValueLogicalInt64Codec<long>` и
   `KeyValueLogicalStringCodec<std::string>`. Codec tags являются частью
   logical schema contract; их смена требует нового schema id или явной
-  schema-marker migration. Смена `schema_version` под уже зарегистрированным
-  schema id отклоняется текущим immutable registry. Integer payloads
-  кодируются little-endian. Входящий logical apply подавляет локальный raw
-  capture для затронутой транзакции. Он ещё не подключён к automatic sync
-  pipeline.
+  schema-marker migration. Обычный вызов `register_logical_schema()` всё ещё
+  отклоняет смену `schema_version` под уже зарегистрированным schema id.
+  Integer payloads кодируются little-endian. Входящий logical apply подавляет
+  локальный raw capture для затронутой транзакции. Он ещё не подключён к
+  automatic sync pipeline.
   `DirectSyncPeer` используется для in-process синхронизации в тестах и примерах,
   `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт
   binary message seam, а `SyncWorker` запускает фоновой polling.
