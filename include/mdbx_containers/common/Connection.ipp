@@ -389,22 +389,38 @@ namespace mdbxc {
         std::size_t applied_ops,
         const std::vector<std::string>& affected_dbi_names) {
         SyncApplyNotification notification;
+        try {
+            notification.affected_dbi_names = affected_dbi_names;
+        } catch (...) {
+            notification.affected_dbi_names.clear();
+        }
         std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        try {
+            notification.callbacks.reserve(m_sync_apply_observers.size());
+        } catch (...) {
+            ++m_sync_apply_generation;
+            notification.generation = m_sync_apply_generation;
+            notification.applied_batches = applied_batches;
+            notification.applied_ops = applied_ops;
+            return notification;
+        }
         ++m_sync_apply_generation;
         notification.generation = m_sync_apply_generation;
         notification.applied_batches = applied_batches;
         notification.applied_ops = applied_ops;
-        notification.affected_dbi_names = affected_dbi_names;
-        notification.callbacks.reserve(m_sync_apply_observers.size());
         for (std::size_t i = 0; i < m_sync_apply_observers.size(); ++i) {
             const std::shared_ptr<SyncApplyObserverState>& state =
                 m_sync_apply_observers[i];
             if (!state->removed && state->observer != nullptr) {
-                ++state->in_flight;
                 SyncApplyObserverCallback callback;
                 callback.state = state;
                 callback.observer = state->observer;
-                notification.callbacks.push_back(callback);
+                try {
+                    notification.callbacks.push_back(callback);
+                    ++state->in_flight;
+                } catch (...) {
+                    break;
+                }
             }
         }
         return notification;

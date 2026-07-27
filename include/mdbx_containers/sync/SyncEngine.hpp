@@ -260,16 +260,26 @@ namespace sync {
                 const Connection::SyncApplyWriteGuard sync_apply_guard =
                     m_conn->sync_apply_write_guard();
                 auto txn = m_conn->transaction(TransactionMode::WRITABLE);
-                result = m_logical_registry.preflight_then_apply(
+                result = validate_logical_schema_markers(
                     txn.handle(), changes);
+                if (result.ok) {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_conn, txn.handle());
+                    result = m_logical_registry.preflight_then_apply(
+                        txn.handle(), changes);
+                }
                 if (!result.ok) {
                     txn.rollback();
                     return result;
                 }
                 txn.commit();
-                notification =
-                    m_conn->mark_sync_apply_committed(
-                        1u, changes.size(), affected_dbi_names);
+                try {
+                    notification =
+                        m_conn->mark_sync_apply_committed(
+                            1u, changes.size(), affected_dbi_names);
+                } catch (...) {
+                    return result;
+                }
             }
             m_conn->notify_sync_apply_observers(notification);
             return result;
@@ -690,6 +700,71 @@ namespace sync {
                     add_unique_dbi_name(names, dbis[j]);
                 }
             }
+        }
+
+        static std::vector<std::string> canonical_dbi_names(
+                const std::vector<std::string>& dbi_names) {
+            std::vector<std::string> out = dbi_names;
+            std::sort(out.begin(), out.end());
+            if (std::unique(out.begin(), out.end()) != out.end()) {
+                return std::vector<std::string>();
+            }
+            return out;
+        }
+
+        LogicalApplyResult validate_logical_schema_markers(
+                MDBX_txn* txn,
+                const std::vector<LogicalChange>& changes) const {
+            SchemaRegistryStore schemas(m_conn->env_handle());
+            std::vector<std::string> checked_schema_ids;
+
+            for (std::size_t i = 0; i < changes.size(); ++i) {
+                const std::string& schema_id = changes[i].schema.schema_id;
+                bool already_checked = false;
+                for (std::size_t j = 0; j < checked_schema_ids.size(); ++j) {
+                    if (checked_schema_ids[j] == schema_id) {
+                        already_checked = true;
+                        break;
+                    }
+                }
+                if (already_checked) {
+                    continue;
+                }
+
+                ILogicalTableAdapter* adapter =
+                    m_logical_registry.find(schema_id);
+                if (adapter == nullptr) {
+                    return LogicalApplyResult::failure(
+                        "No logical adapter registered for schema id");
+                }
+
+                LogicalSchemaRecord record;
+                if (!schemas.get(txn, schema_id, record)) {
+                    return LogicalApplyResult::failure(
+                        "Persistent logical schema marker is missing");
+                }
+
+                const LogicalSchemaRef ref = adapter->schema_ref();
+                if (record.kind != ref.kind ||
+                    record.schema_version != ref.schema_version) {
+                    return LogicalApplyResult::failure(
+                        "Persistent logical schema marker does not match adapter");
+                }
+
+                const std::vector<std::string> adapter_dbis =
+                    canonical_dbi_names(adapter->affected_dbis());
+                const std::vector<std::string> marker_dbis =
+                    canonical_dbi_names(record.dbi_names);
+                if (adapter_dbis.empty() || marker_dbis.empty() ||
+                    adapter_dbis != marker_dbis) {
+                    return LogicalApplyResult::failure(
+                        "Persistent logical schema marker DBI set does not match adapter");
+                }
+
+                checked_schema_ids.push_back(schema_id);
+            }
+
+            return LogicalApplyResult::success();
         }
 
         static std::uint32_t persistent_dbi_flags_mask() {

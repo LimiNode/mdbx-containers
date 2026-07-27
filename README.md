@@ -96,10 +96,12 @@
   logical schema contract; changing them requires a new schema id, or an
   explicit schema-marker migration. A plain `register_logical_schema()` call
   still rejects a changed `schema_version` under an already registered schema
-  id. Integer payloads are encoded little-endian. Incoming logical apply
-  suppresses local raw capture for the affected transaction. This is still an
-  explicit engine apply path; the transport pull/push pipeline remains
-  raw-DBI only.
+  id. `apply_logical_changes()` re-checks the persistent marker for each
+  schema before adapter preflight, so a stale in-memory adapter cannot apply
+  after marker migration. Integer payloads are encoded little-endian. Incoming
+  logical apply suppresses local raw capture for the affected transaction. This
+  is still an explicit engine apply path; the transport pull/push pipeline
+  remains raw-DBI only.
   `DirectSyncPeer` provides in-process sync for tests and examples,
   `HttpSyncPeer` defines an HTTP-shaped
   adapter seam, `WebSocketSyncPeer` defines a binary message seam, and

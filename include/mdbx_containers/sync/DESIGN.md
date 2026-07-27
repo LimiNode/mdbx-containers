@@ -541,10 +541,12 @@ written through public table methods is not re-published as a local raw
 `ChangeOp`.
 
 `SyncEngine::apply_logical_changes()` owns the write transaction, routes the
-changes through its registered logical adapters, commits only after the
-two-phase registry preflight/apply succeeds, and emits the normal sync apply
-observer event after commit. `SyncEngine::handle_push()` remains raw-DBI only.
-Unknown logical payloads must not fall back to raw DBI apply.
+changes through its registered logical adapters, re-checks the persistent
+schema marker for each schema before adapter preflight, suppresses raw capture
+for the transaction, commits only after the two-phase registry preflight/apply
+succeeds, and emits the normal sync apply observer event after commit.
+`SyncEngine::handle_push()` remains raw-DBI only. Unknown logical payloads and
+stale adapter/schema-marker combinations must not fall back to raw DBI apply.
 
 Logical-table support therefore has a staged contract:
 

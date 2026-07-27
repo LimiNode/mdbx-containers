@@ -119,9 +119,12 @@
   logical schema contract; их смена требует нового schema id или явной
   schema-marker migration. Обычный вызов `register_logical_schema()` всё ещё
   отклоняет смену `schema_version` под уже зарегистрированным schema id.
-  Integer payloads кодируются little-endian. Входящий logical apply подавляет
-  локальный raw capture для затронутой транзакции. Это пока явный engine apply
-  path; transport pull/push pipeline остаётся raw-DBI only.
+  `apply_logical_changes()` перепроверяет persistent marker для каждой schema
+  до adapter preflight, поэтому stale in-memory adapter не может применять
+  changes после schema-marker migration. Integer payloads кодируются
+  little-endian. Входящий logical apply подавляет локальный raw capture для
+  затронутой транзакции. Это пока явный engine apply path; transport pull/push
+  pipeline остаётся raw-DBI only.
   `DirectSyncPeer` используется для in-process синхронизации в тестах и примерах,
   `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт
   binary message seam, а `SyncWorker` запускает фоновой polling.
