@@ -108,24 +108,26 @@ be non-empty and contain only ASCII letters, digits, `_`, and `-`; unsupported
 characters are rejected before internal DBI names are built. This prevents
 different logical collections from collapsing to the same physical DBI names.
 
-`Connection::sync_apply_generation()` is a coarse invalidation marker for
-remote sync apply. `SyncEngine::handle_push()` increments it after a successful
-commit that applied at least one incoming operation. `VectorStore` stores the
-last seen generation and rebuilds its in-memory index before index-dependent
-operations when the value changes. Applications and future cached wrappers may
-also register `ISyncApplyObserver` instances on the connection. Observers are
-called after the remote apply transaction commits and after the generation
-increments. The connection apply/write barrier is released before callbacks run,
-so observers may use table and cache-backed APIs on the same connection for
-invalidation. Observer exceptions are swallowed because the database state has
-already changed. Registrations are non-owning lifecycle hooks. A successful
+`Connection::sync_apply_generation()` is a coarse invalidation marker for sync
+apply commits. `SyncEngine::handle_push()` increments it after a successful
+commit that applied at least one incoming raw operation, and
+`SyncEngine::apply_logical_changes()` increments it after committed logical
+changes. `VectorStore` stores the last seen generation and rebuilds its
+in-memory index before index-dependent operations when the value changes.
+Applications and future cached wrappers may also register
+`ISyncApplyObserver` instances on the connection. Observers are called after
+the apply transaction commits and after the generation increments. The
+connection apply/write barrier is released before callbacks run, so observers
+may use table and cache-backed APIs on the same connection for invalidation.
+Observer exceptions are swallowed because the database state has already
+changed. Registrations are non-owning lifecycle hooks. A successful
 `remove_sync_apply_observer()` call is a callback drain barrier for that token,
 so the observer can be destroyed after removal returns. Apply events also carry
 the unique DBI names touched by applied operations in first-seen order. The
 names are local physical DBI names for invalidation; they are not transport
 identity, auth metadata, or a substitute for table-specific sync semantics.
 
-A connection-level apply/read barrier serializes remote apply commits with
+A connection-level apply/read barrier serializes sync apply commits with
 cache-backed `VectorStore` operations. C++17 builds use `std::shared_mutex` so
 different cache-backed readers can share the connection read side. Each
 `VectorStore` instance still serializes its own public operations with an
@@ -518,10 +520,10 @@ and compatibility tests.
 `adapters/KeyValueTableLogicalAdapter.hpp` provides the first concrete adapter
 helper. It translates typed `KeyValueTable` upsert/delete/clear operations into
 adapter-owned logical payloads and applies them through
+`SyncEngine::apply_logical_changes()` or
 `LogicalTableRegistry::preflight_then_apply()` inside a caller-owned write
-transaction. It is intentionally standalone: it proves the adapter contract and
-payload shape for a simple table, but it is not yet connected to the automatic
-pull/push wire pipeline.
+transaction. It proves the adapter contract and payload shape for a simple
+table, but it is not yet connected to the automatic pull/push wire pipeline.
 
 The adapter payload codec is not the table storage serializer. The initial
 codec surface is deliberately small and explicit: callers provide key/value
@@ -538,8 +540,16 @@ transaction-scoped sync-capture suppression guard so an incoming logical change
 written through public table methods is not re-published as a local raw
 `ChangeOp`.
 
-The current `SyncEngine` does not call this registry yet. Unknown logical
-payloads must not fall back to raw DBI apply.
+`SyncEngine::apply_logical_changes()` owns the write transaction, routes the
+changes through its registered logical adapters, re-checks the persistent
+schema marker for each schema before adapter preflight, suppresses raw capture
+for the transaction, commits only after the two-phase registry preflight/apply
+succeeds, and emits the normal sync apply observer event after commit.
+`SyncEngine::handle_push()` remains raw-DBI only. Unknown logical payloads and
+stale adapter/schema-marker combinations must not fall back to raw DBI apply.
+Until the adapter interface exposes an explicit primary DBI contract, generic
+logical apply accepts only single-DBI adapters and fails closed for multi-DBI
+adapters.
 
 Logical-table support therefore has a staged contract:
 

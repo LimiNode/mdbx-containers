@@ -389,50 +389,77 @@ namespace mdbxc {
         std::size_t applied_ops,
         const std::vector<std::string>& affected_dbi_names) {
         SyncApplyNotification notification;
+        try {
+            notification.affected_dbi_names = affected_dbi_names;
+        } catch (...) {
+            notification.affected_dbi_names.clear();
+        }
         std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        try {
+            notification.callbacks.reserve(m_sync_apply_observers.size());
+        } catch (...) {
+            ++m_sync_apply_generation;
+            notification.generation = m_sync_apply_generation;
+            notification.applied_batches = applied_batches;
+            notification.applied_ops = applied_ops;
+            return notification;
+        }
         ++m_sync_apply_generation;
         notification.generation = m_sync_apply_generation;
         notification.applied_batches = applied_batches;
         notification.applied_ops = applied_ops;
-        notification.affected_dbi_names = affected_dbi_names;
-        notification.callbacks.reserve(m_sync_apply_observers.size());
         for (std::size_t i = 0; i < m_sync_apply_observers.size(); ++i) {
             const std::shared_ptr<SyncApplyObserverState>& state =
                 m_sync_apply_observers[i];
             if (!state->removed && state->observer != nullptr) {
-                ++state->in_flight;
                 SyncApplyObserverCallback callback;
                 callback.state = state;
                 callback.observer = state->observer;
-                notification.callbacks.push_back(callback);
+                try {
+                    notification.callbacks.push_back(callback);
+                    ++state->in_flight;
+                } catch (...) {
+                    break;
+                }
             }
         }
         return notification;
     }
 
     inline void Connection::notify_sync_apply_observers(
-        const SyncApplyNotification& notification) {
-        if (notification.callbacks.empty()) {
-            return;
-        }
-        sync::SyncApplyEvent event;
-        event.generation = notification.generation;
-        event.applied_batches = notification.applied_batches;
-        event.applied_ops = notification.applied_ops;
-        event.affected_dbi_names = notification.affected_dbi_names;
-        for (std::size_t i = 0; i < notification.callbacks.size(); ++i) {
-            try {
-                begin_sync_apply_observer_callback(
-                    notification.callbacks[i].state);
-                if (notification.callbacks[i].observer != nullptr) {
-                    notification.callbacks[i].observer
-                        ->on_sync_apply_committed(event);
-                }
-            } catch (...) {
-                // Remote apply has already committed; observers are best-effort.
+        const SyncApplyNotification& notification) noexcept {
+        try {
+            if (notification.callbacks.empty()) {
+                return;
             }
-            finish_sync_apply_observer_callback(
-                notification.callbacks[i].state);
+            sync::SyncApplyEvent event;
+            event.generation = notification.generation;
+            event.applied_batches = notification.applied_batches;
+            event.applied_ops = notification.applied_ops;
+            try {
+                event.affected_dbi_names = notification.affected_dbi_names;
+            } catch (...) {
+                event.affected_dbi_names.clear();
+            }
+            for (std::size_t i = 0; i < notification.callbacks.size(); ++i) {
+                try {
+                    begin_sync_apply_observer_callback(
+                        notification.callbacks[i].state);
+                    if (notification.callbacks[i].observer != nullptr) {
+                        notification.callbacks[i].observer
+                            ->on_sync_apply_committed(event);
+                    }
+                } catch (...) {
+                    // Sync apply has already committed; observers are best-effort.
+                }
+                try {
+                    finish_sync_apply_observer_callback(
+                        notification.callbacks[i].state);
+                } catch (...) {
+                }
+            }
+        } catch (...) {
+            // Sync apply has already committed; notification is best-effort.
         }
     }
 

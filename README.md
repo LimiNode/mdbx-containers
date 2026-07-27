@@ -88,16 +88,20 @@
   `migrate_logical_schema()` for explicit marker replacement after exact
   preflight.
   `KeyValueTableLogicalAdapter` is the first concrete logical adapter helper
-  for explicit `LogicalTableRegistry::preflight_then_apply()` calls. Its
+  for explicit `SyncEngine::apply_logical_changes()` or lower-level
+  `LogicalTableRegistry::preflight_then_apply()` calls. Its
   payload codec is separate from physical table storage and is selected through
   explicit key/value codec tags such as `KeyValueLogicalInt64Codec<long>` and
   `KeyValueLogicalStringCodec<std::string>`. Codec tags are part of the
   logical schema contract; changing them requires a new schema id, or an
   explicit schema-marker migration. A plain `register_logical_schema()` call
   still rejects a changed `schema_version` under an already registered schema
-  id. Integer payloads are encoded little-endian. Incoming logical apply
-  suppresses local raw capture for the affected transaction. It is not wired
-  into the automatic sync pipeline yet.
+  id. `apply_logical_changes()` re-checks the persistent marker for each
+  schema before adapter preflight, so a stale in-memory adapter cannot apply
+  after marker migration. Integer payloads are encoded little-endian. Incoming
+  logical apply suppresses local raw capture for the affected transaction. This
+  is still an explicit engine apply path; the transport pull/push pipeline
+  remains raw-DBI only.
   `DirectSyncPeer` provides in-process sync for tests and examples,
   `HttpSyncPeer` defines an HTTP-shaped
   adapter seam, `WebSocketSyncPeer` defines a binary message seam, and
