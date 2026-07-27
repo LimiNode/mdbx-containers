@@ -211,11 +211,19 @@ namespace sync {
             if (record.dbi_name.empty()) {
                 throw std::invalid_argument("Logical schema DBI name must not be empty");
             }
+            bool primary_dbi_listed = false;
             for (std::size_t i = 0; i < record.dbi_names.size(); ++i) {
                 if (record.dbi_names[i].empty()) {
                     throw std::invalid_argument(
                         "Logical schema owned DBI name must not be empty");
                 }
+                if (record.dbi_names[i] == record.dbi_name) {
+                    primary_dbi_listed = true;
+                }
+            }
+            if (!primary_dbi_listed) {
+                throw std::invalid_argument(
+                    "Logical schema primary DBI must be listed in owned DBIs");
             }
             if (!is_known_logical_table_kind(record.kind)) {
                 throw std::invalid_argument("Logical schema kind must be known");

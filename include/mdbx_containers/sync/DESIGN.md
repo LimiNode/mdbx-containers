@@ -452,7 +452,7 @@ Real removal is explicit via `erase()`.
 | | |
 |---|---|
 | Key | application-defined logical schema id string |
-| Value | `schema_id` repeated in the versioned value envelope, followed by `LogicalSchemaRecord { kind, schema_version, flags, dbi_name, dbi_names[] }`; owned `dbi_names[]` are stored as a sorted unique set |
+| Value | `schema_id` repeated in the versioned value envelope, followed by `LogicalSchemaRecord { kind, schema_version, flags, dbi_name, dbi_names[] }`; owned `dbi_names[]` are stored as a sorted unique set and must include the primary `dbi_name` |
 
 This store is a persistent compatibility marker for future logical table
 adapters. It does not enable logical sync by itself. Normal application setup

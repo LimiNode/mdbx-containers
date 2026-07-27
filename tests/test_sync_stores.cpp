@@ -700,6 +700,7 @@ void test_schema_registry_store() {
     vector_like.dbi_name = "vectors";
     vector_like.kind = LogicalTableKind::HashedKeyValue;
     vector_like.schema_version = 3;
+    vector_like.dbi_names.push_back("vectors");
     vector_like.dbi_names.push_back("vectors.ids");
     vector_like.dbi_names.push_back("vectors.payload");
 
@@ -751,6 +752,23 @@ void test_schema_registry_store() {
         }
         if (!caught) {
             throw std::runtime_error("duplicate owned DBI was accepted");
+        }
+    }
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        SchemaRegistryStore store(conn->env_handle());
+        LogicalSchemaRecord missing_primary = ordered;
+        missing_primary.dbi_name = "events_primary";
+        bool caught = false;
+        try {
+            store.register_or_verify(
+                txn.handle(), "app.missing_primary.v1", missing_primary);
+        } catch (const std::invalid_argument&) {
+            caught = true;
+        }
+        if (!caught) {
+            throw std::runtime_error("missing primary owned DBI was accepted");
         }
     }
 
