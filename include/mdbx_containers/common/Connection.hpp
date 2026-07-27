@@ -345,7 +345,7 @@ namespace mdbxc {
             std::size_t applied_ops,
             const std::vector<std::string>& affected_dbi_names);
         void notify_sync_apply_observers(
-            const SyncApplyNotification& notification);
+            const SyncApplyNotification& notification) noexcept;
         void begin_sync_apply_observer_callback(
             const std::shared_ptr<SyncApplyObserverState>& state);
         void finish_sync_apply_observer_callback(

@@ -42,6 +42,7 @@
 #include "ChangeBatchCodec.hpp"
 #include "ChangeOp.hpp"
 #include "LogicalTableAdapter.hpp"
+#include "LogicalSchemaValidation.hpp"
 #include "protocol.hpp"
 #include "SyncCursor.hpp"
 #include "stores/AppliedStore.hpp"
@@ -702,20 +703,9 @@ namespace sync {
             }
         }
 
-        static std::vector<std::string> canonical_dbi_names(
-                const std::vector<std::string>& dbi_names) {
-            std::vector<std::string> out = dbi_names;
-            std::sort(out.begin(), out.end());
-            if (std::unique(out.begin(), out.end()) != out.end()) {
-                return std::vector<std::string>();
-            }
-            return out;
-        }
-
         LogicalApplyResult validate_logical_schema_markers(
                 MDBX_txn* txn,
                 const std::vector<LogicalChange>& changes) const {
-            SchemaRegistryStore schemas(m_conn->env_handle());
             std::vector<std::string> checked_schema_ids;
 
             for (std::size_t i = 0; i < changes.size(); ++i) {
@@ -738,28 +728,10 @@ namespace sync {
                         "No logical adapter registered for schema id");
                 }
 
-                LogicalSchemaRecord record;
-                if (!schemas.get(txn, schema_id, record)) {
-                    return LogicalApplyResult::failure(
-                        "Persistent logical schema marker is missing");
-                }
-
-                const LogicalSchemaRef ref = adapter->schema_ref();
-                if (record.kind != ref.kind ||
-                    record.schema_version != ref.schema_version) {
-                    return LogicalApplyResult::failure(
-                        "Persistent logical schema marker does not match adapter");
-                }
-
-                const std::vector<std::string> adapter_dbis =
-                    canonical_dbi_names(adapter->affected_dbis());
-                const std::vector<std::string> marker_dbis =
-                    canonical_dbi_names(record.dbi_names);
-                if (adapter_dbis.empty() || marker_dbis.empty() ||
-                    adapter_dbis != marker_dbis) {
-                    return LogicalApplyResult::failure(
-                        "Persistent logical schema marker DBI set does not match adapter");
-                }
+                const LogicalApplyResult marker_result =
+                    validate_logical_adapter_marker(
+                        txn, m_conn->env_handle(), *adapter);
+                if (!marker_result.ok) return marker_result;
 
                 checked_schema_ids.push_back(schema_id);
             }
