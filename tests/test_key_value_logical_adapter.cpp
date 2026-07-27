@@ -124,6 +124,53 @@ private:
     std::string m_schema_id;
 };
 
+class MultiDbiLogicalAdapter : public mdbxc::sync::ILogicalTableAdapter {
+public:
+    MultiDbiLogicalAdapter(
+            mdbxc::KeyValueTable<int, std::string>& table,
+            const std::string& secondary_dbi_name,
+            const std::string& schema_id)
+        : m_table(table),
+          m_secondary_dbi_name(secondary_dbi_name),
+          m_schema_id(schema_id) {}
+
+    mdbxc::sync::LogicalSchemaRef schema_ref() const override {
+        mdbxc::sync::LogicalSchemaRef ref;
+        ref.schema_id = m_schema_id;
+        ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+        ref.schema_version = 1;
+        return ref;
+    }
+
+    std::vector<std::string> affected_dbis() const override {
+        std::vector<std::string> out;
+        out.push_back(m_table.dbi_name());
+        out.push_back(m_secondary_dbi_name);
+        return out;
+    }
+
+    mdbxc::sync::LogicalApplyResult preflight(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) const override {
+        (void)txn;
+        (void)change;
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+    mdbxc::sync::LogicalApplyResult apply(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) override {
+        (void)change;
+        m_table.insert_or_assign(31, "thirty-one", txn);
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+private:
+    mdbxc::KeyValueTable<int, std::string>& m_table;
+    std::string m_secondary_dbi_name;
+    std::string m_schema_id;
+};
+
 void test_key_value_logical_adapter_applies_basic_ops() {
     const std::string path = "test_key_value_logical_adapter_basic.mdbx";
     const std::string dbi_name = "logical_key_value_items";
@@ -372,6 +419,46 @@ void test_key_value_logical_engine_rejects_marker_dbi_mismatch() {
     MDBXC_TEST_ASSERT(result.error.find("DBI set") !=
                       std::string::npos);
     MDBXC_TEST_ASSERT(!table.contains(8));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_engine_rejects_multi_dbi_adapter_until_primary_contract() {
+    const std::string path = "test_key_value_logical_adapter_multi_dbi.mdbx";
+    const std::string dbi_name = "logical_key_value_multi_dbi";
+    const std::string secondary_dbi_name = dbi_name + "_index";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x1E), make_node(0xAE));
+    mdbxc::sync::LogicalSchemaRecord record = make_record(dbi_name);
+    record.dbi_names.push_back(secondary_dbi_name);
+    engine.register_logical_schema("app.logical_kv_multi_dbi.v1", record);
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    MultiDbiLogicalAdapter adapter(
+        table, secondary_dbi_name, "app.logical_kv_multi_dbi.v1");
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalChange change;
+    change.schema = adapter.schema_ref();
+    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(change);
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(!result.ok);
+    MDBXC_TEST_ASSERT(result.error.find("multi-DBI") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(!table.contains(31));
 
     conn->disconnect();
     cleanup(path);
@@ -677,6 +764,7 @@ int main() {
     test_key_value_logical_engine_rejects_missing_schema_marker();
     test_key_value_logical_engine_rejects_stale_schema_marker();
     test_key_value_logical_engine_rejects_marker_dbi_mismatch();
+    test_key_value_logical_engine_rejects_multi_dbi_adapter_until_primary_contract();
     test_key_value_logical_engine_suppresses_generic_raw_capture();
     test_key_value_logical_adapter_rejects_malformed_payload();
     test_key_value_logical_adapter_uses_stable_payload();

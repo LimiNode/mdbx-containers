@@ -1,3 +1,4 @@
+#pragma once
 #ifndef MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_SCHEMA_VALIDATION_HPP_INCLUDED
 #define MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_SCHEMA_VALIDATION_HPP_INCLUDED
 
@@ -47,10 +48,16 @@ namespace sync {
                 "Persistent logical schema marker does not match adapter");
         }
 
+        const std::vector<std::string> affected_dbis =
+            adapter.affected_dbis();
+        if (affected_dbis.size() != 1u) {
+            return LogicalApplyResult::failure(
+                "Logical adapter multi-DBI primary contract is not supported");
+        }
+
         std::vector<std::string> adapter_dbis;
         std::vector<std::string> marker_dbis;
-        if (!canonical_logical_dbi_names(adapter.affected_dbis(),
-                                         adapter_dbis) ||
+        if (!canonical_logical_dbi_names(affected_dbis, adapter_dbis) ||
             !canonical_logical_dbi_names(record.dbi_names, marker_dbis) ||
             adapter_dbis.empty() ||
             marker_dbis.empty() ||

@@ -547,6 +547,9 @@ for the transaction, commits only after the two-phase registry preflight/apply
 succeeds, and emits the normal sync apply observer event after commit.
 `SyncEngine::handle_push()` remains raw-DBI only. Unknown logical payloads and
 stale adapter/schema-marker combinations must not fall back to raw DBI apply.
+Until the adapter interface exposes an explicit primary DBI contract, generic
+logical apply accepts only single-DBI adapters and fails closed for multi-DBI
+adapters.
 
 Logical-table support therefore has a staged contract:
 
