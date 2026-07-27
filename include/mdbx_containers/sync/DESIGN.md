@@ -524,6 +524,13 @@ adapter-owned logical payloads and applies them through
 `LogicalTableRegistry::preflight_then_apply()` inside a caller-owned write
 transaction. It proves the adapter contract and payload shape for a simple
 table, but it is not yet connected to the automatic pull/push wire pipeline.
+The adapter also exposes an opt-in `LogicalCaptureSession`. The session owns a
+writable transaction, suppresses raw capture for its typed writes, buffers
+logical changes privately, and copies them to the caller only from
+`commit(out)`. Rollback, destruction, or commit failure discards the pending
+logical changes. Session construction validates the adapter against the
+persistent schema marker in the same writable transaction, before any local
+mutation can be performed.
 
 The adapter payload codec is not the table storage serializer. The initial
 codec surface is deliberately small and explicit: callers provide key/value
@@ -560,6 +567,10 @@ Logical-table support therefore has a staged contract:
    incoming transaction before applying any of them.
 4. Enable capture only after every mutating public method maps to a tested
    logical operation.
+
+The current `KeyValueTableLogicalAdapter` capture session is intentionally
+manual and opt-in; it does not replace the normal `KeyValueTable` API or claim
+automatic coverage for every mutating table method.
 
 Until a later causal-context PR defines dependency cursors, Lamport/HLC order,
 or another conflict-resolution model, logical table adapters may claim only

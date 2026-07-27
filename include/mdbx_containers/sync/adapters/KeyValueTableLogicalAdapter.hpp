@@ -5,8 +5,10 @@
 /// \file KeyValueTableLogicalAdapter.hpp
 /// \brief Minimal logical adapter for \c KeyValueTable.
 
+#include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -15,6 +17,7 @@
 
 #include "../../KeyValueTable.hpp"
 #include "../LogicalTableAdapter.hpp"
+#include "../LogicalSchemaValidation.hpp"
 #include "../common.hpp"
 
 namespace mdbxc {
@@ -385,6 +388,143 @@ namespace detail {
             return change;
         }
 
+        /// \brief Transaction-bound typed logical capture session.
+        /// \details The session owns a writable transaction. Local writes are
+        /// buffered as logical changes and raw capture is suppressed for the
+        /// transaction. Pending changes are copied to the caller only by
+        /// \c commit(out), after the session has prepared the destination
+        /// vector and before the native commit. If commit fails, the appended
+        /// tail is erased and the destructor rolls back the transaction.
+        /// The adapter, table, and connection referenced by the adapter must
+        /// outlive the session.
+        class LogicalCaptureSession {
+        public:
+            explicit LogicalCaptureSession(
+                    const KeyValueTableLogicalAdapter& adapter)
+                : m_adapter(adapter),
+                  m_txn(adapter.m_table.connection()->transaction(
+                      TransactionMode::WRITABLE)),
+                  m_active(true) {
+                const LogicalApplyResult marker_result =
+                    validate_logical_adapter_marker(
+                        m_txn.handle(),
+                        adapter.m_table.connection()->env_handle(),
+                        adapter);
+                if (!marker_result.ok) {
+                    throw std::runtime_error(marker_result.error);
+                }
+            }
+
+            ~LogicalCaptureSession() noexcept {
+                rollback();
+            }
+
+            LogicalCaptureSession(const LogicalCaptureSession&) = delete;
+            LogicalCaptureSession& operator=(
+                    const LogicalCaptureSession&) = delete;
+
+            void insert_or_assign(const KeyT& key, const ValueT& value) {
+                ensure_active();
+                LogicalChange change = m_adapter.make_upsert(key, value);
+                const std::size_t previous_size = m_pending.size();
+                m_pending.push_back(change);
+                try {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_adapter.m_table.connection(), m_txn.handle());
+                    m_adapter.m_table.insert_or_assign(
+                        key, value, m_txn.handle());
+                } catch (...) {
+                    m_pending.resize(previous_size);
+                    throw;
+                }
+            }
+
+            bool erase(const KeyT& key) {
+                ensure_active();
+                LogicalChange change = m_adapter.make_delete(key);
+                const std::size_t previous_size = m_pending.size();
+                m_pending.push_back(change);
+                try {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_adapter.m_table.connection(), m_txn.handle());
+                    const bool removed =
+                        m_adapter.m_table.erase(key, m_txn.handle());
+                    if (!removed) {
+                        m_pending.resize(previous_size);
+                    }
+                    return removed;
+                } catch (...) {
+                    m_pending.resize(previous_size);
+                    throw;
+                }
+            }
+
+            void clear() {
+                ensure_active();
+                LogicalChange change = m_adapter.make_clear();
+                const std::size_t previous_size = m_pending.size();
+                m_pending.push_back(change);
+                try {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_adapter.m_table.connection(), m_txn.handle());
+                    m_adapter.m_table.clear(m_txn.handle());
+                } catch (...) {
+                    m_pending.resize(previous_size);
+                    throw;
+                }
+            }
+
+            void commit(std::vector<LogicalChange>& out) {
+                ensure_active();
+                const std::size_t old_size = out.size();
+                out.insert(out.end(), m_pending.begin(), m_pending.end());
+                try {
+                    m_txn.commit();
+                } catch (...) {
+                    out.erase(out.begin() +
+                              static_cast<std::ptrdiff_t>(old_size),
+                              out.end());
+                    throw;
+                }
+                m_pending.clear();
+                m_active = false;
+            }
+
+            void rollback() noexcept {
+                if (!m_active) {
+                    return;
+                }
+                try {
+                    m_pending.clear();
+                    m_txn.rollback();
+                } catch (...) {
+                }
+                m_active = false;
+            }
+
+            std::size_t pending_size() const {
+                return m_pending.size();
+            }
+
+        private:
+            void ensure_active() const {
+                if (!m_active) {
+                    throw std::logic_error(
+                        "KeyValue logical capture session is not active");
+                }
+            }
+
+            const KeyValueTableLogicalAdapter& m_adapter;
+            Transaction m_txn;
+            std::vector<LogicalChange> m_pending;
+            bool m_active;
+        };
+
+        std::unique_ptr<LogicalCaptureSession> begin_capture_session() const {
+            return std::unique_ptr<LogicalCaptureSession>(
+                new LogicalCaptureSession(*this));
+        }
+
         LogicalApplyResult preflight(
                 MDBX_txn* txn,
                 const LogicalChange& change) const override {
@@ -496,6 +636,12 @@ namespace detail {
             const std::vector<std::uint8_t> encoded_key =
                 KeyCodec::encode(key);
             append_blob(out, encoded_key);
+        }
+
+        MDBX_txn* checked_adapter_txn(MDBX_txn* txn,
+                                      const char* context) const {
+            return checked_txn_env(txn, m_table.connection()->env_handle(),
+                                   context);
         }
 
         static void encode_upsert(const KeyT& key,
