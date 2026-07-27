@@ -209,6 +209,7 @@ cmake -S . -B tmp/build-ws-example `
 | `sync_20_observability.cpp` | Логи worker/transport observer-ов с trace IDs, progress и retry hints. | Продвинутый |
 | `sync_21_worker_guard_apply_hooks.cpp` | Жизненный цикл через `SyncNodeSession` и remote apply observer hooks. | Средний |
 | `sync_22_node_session_minimal.cpp` | Минимальный application-facing recipe для `SyncNodeSession`. | Начальный |
+| `sync_23_key_value_logical_frame.cpp` | Явный путь `KeyValueTable`: logical capture -> frame codec -> apply на реплике. | Продвинутый |
 
 ## Общие правила
 
@@ -238,6 +239,15 @@ cmake -S . -B tmp/build-ws-example `
   реплицируются как один локальный batch. Независимые вызовы без явной
   транзакции остаются независимыми локальными транзакциями и независимыми sync
   batches.
+- Logical capture через `KeyValueTableLogicalAdapter` сейчас является явным
+  opt-in путём. `LogicalChangeFrameCodec` может переносить такие typed logical
+  changes между компонентами приложения, а получатель применяет их через
+  `SyncEngine::apply_logical_frame_bytes()`. Обычные transport DTO
+  `PullRequest`, `PullResponse`, `PushRequest` и `PushResponse` остаются
+  raw-DBI only до появления negotiation для logical transport capabilities.
+  `LogicalChangeFrame` является payload-контейнером, а не протоколом доставки:
+  retrying transports всё ещё требуют внешний контракт для destination routing,
+  ordering и replay protection.
 - Чтение, поиск и range scans не запускают sync. Локальный commit также не
   обращается к другой ноде; `SyncWorker` или явный pull/push-код позже
   отправляет уже закоммиченные batches через `ISyncPeer`.

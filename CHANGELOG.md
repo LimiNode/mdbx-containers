@@ -30,6 +30,9 @@ All notable changes to this project will be documented in this file.
   adapter path. Malformed frame bytes return a failure result before adapter
   preflight or mutation, while apply-stage exceptions are reported separately
   from decode failures.
+- Added `sync_23_key_value_logical_frame.cpp` to demonstrate the explicit
+  `KeyValueTable` logical capture-session -> logical frame codec -> replica
+  apply workflow.
 - Added `ISyncCaptureSink::record_change_op(MDBX_txn*, const ChangeOp&)` as the
   preferred capture entry point. The previous raw-field callback remains the
   source-compatible abstract sink contract; new full-`ChangeOp` sinks can

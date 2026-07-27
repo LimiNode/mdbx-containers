@@ -207,6 +207,7 @@ cmake -S . -B tmp/build-ws-example `
 | `sync_20_observability.cpp` | Worker and transport observer logs with trace IDs, progress, and retry hints. | Advanced |
 | `sync_21_worker_guard_apply_hooks.cpp` | `SyncNodeSession` lifecycle plus remote apply observer hooks. | Intermediate |
 | `sync_22_node_session_minimal.cpp` | Minimal application-facing `SyncNodeSession` recipe. | Beginner |
+| `sync_23_key_value_logical_frame.cpp` | Explicit `KeyValueTable` logical capture -> frame codec -> replica apply path. | Advanced |
 
 ## Common Rules
 
@@ -238,6 +239,15 @@ cmake -S . -B tmp/build-ws-example `
 - Sync is not triggered by reads, searches, or range scans. It also does not
   contact another node during the local commit; a `SyncWorker` or explicit
   pull/push code sends already committed batches later through an `ISyncPeer`.
+- `KeyValueTableLogicalAdapter` logical capture is currently an explicit opt-in
+  path. `LogicalChangeFrameCodec` can carry those typed logical changes between
+  application components, and the receiver applies them with
+  `SyncEngine::apply_logical_frame_bytes()`. The normal `PullRequest`,
+  `PullResponse`, `PushRequest`, and `PushResponse` transport DTOs remain
+  raw-DBI only until logical transport capability negotiation is added.
+  `LogicalChangeFrame` is a payload container, not a delivery protocol: retrying
+  transports still need an outer contract for destination routing, ordering, and
+  replay protection.
 - The minimal `SyncNodeSession` recipe uses `DirectSyncPeer` to stay
   dependency-free. A real HTTP node keeps the same session shape and replaces
   only the peer with a ready-made HTTP transport binding, for example
