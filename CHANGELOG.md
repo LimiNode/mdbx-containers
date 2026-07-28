@@ -20,7 +20,10 @@ All notable changes to this project will be documented in this file.
   protection remain the responsibility of an external delivery envelope or
   caller-owned transport contract. Transport pull/push DTOs remain raw-DBI only
   until a later capability-gated PR wires logical delivery into transport
-  exchange.
+  exchange. The decoder fails closed for unsupported versions, mandatory flags,
+  reserved change flags, malformed schema refs, oversized counts, trailing
+  bytes, and configured schema or payload bounds. Codec tests also cover
+  encode-side bounds and a literal whole-frame golden vector.
 - Added `ISyncCaptureSink::record_change_op(MDBX_txn*, const ChangeOp&)` as the
   preferred capture entry point. The previous raw-field callback remains the
   source-compatible abstract sink contract; new full-`ChangeOp` sinks can
