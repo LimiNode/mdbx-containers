@@ -818,6 +818,78 @@ void test_key_table_logical_capture_session_commits_typed_local_writes() {
     cleanup(path);
 }
 
+void test_key_table_logical_frame_replicates_capture_session() {
+    const std::string source_path =
+        "test_key_table_logical_frame_source.mdbx";
+    const std::string replica_path =
+        "test_key_table_logical_frame_replica.mdbx";
+    const std::string dbi_name = "logical_key_table_frame";
+    const std::string schema_id = "app.logical_key_table_frame.v1";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    mdbxc::Config source_cfg;
+    source_cfg.pathname = source_path;
+    source_cfg.max_dbs = 16;
+    source_cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> source =
+        mdbxc::Connection::create(source_cfg);
+
+    mdbxc::Config replica_cfg;
+    replica_cfg.pathname = replica_path;
+    replica_cfg.max_dbs = 16;
+    replica_cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> replica =
+        mdbxc::Connection::create(replica_cfg);
+
+    mdbxc::sync::SyncEngine source_engine(source);
+    source_engine.initialize_local_identity(make_node(0x4B),
+                                            make_node(0xD4));
+    source_engine.register_logical_schema(
+        schema_id, make_key_table_record(dbi_name));
+
+    mdbxc::sync::SyncEngine replica_engine(replica);
+    replica_engine.initialize_local_identity(make_node(0x4C),
+                                             make_node(0xD4));
+    replica_engine.register_logical_schema(
+        schema_id, make_key_table_record(dbi_name));
+
+    mdbxc::KeyTable<int> source_table(source, dbi_name);
+    mdbxc::KeyTable<int> replica_table(replica, dbi_name);
+    IntKeyTableAdapter source_adapter(source_table, schema_id);
+    IntKeyTableAdapter replica_adapter(replica_table, schema_id);
+    replica_engine.register_logical_adapter(replica_adapter);
+
+    std::vector<mdbxc::sync::LogicalChange> captured;
+    {
+        std::unique_ptr<IntKeyTableAdapter::LogicalCaptureSession> session =
+            source_adapter.begin_capture_session();
+        MDBXC_TEST_ASSERT(session->insert(41));
+        MDBXC_TEST_ASSERT(session->insert(42));
+        MDBXC_TEST_ASSERT(session->erase(42));
+        session->commit(captured);
+    }
+
+    MDBXC_TEST_ASSERT(captured.size() == 3u);
+    MDBXC_TEST_ASSERT(source_table.contains(41));
+    MDBXC_TEST_ASSERT(!source_table.contains(42));
+
+    mdbxc::sync::LogicalChangeFrame frame;
+    frame.changes = captured;
+    const std::vector<std::uint8_t> wire =
+        mdbxc::sync::LogicalChangeFrameCodec::encode(frame);
+    const mdbxc::sync::LogicalApplyResult result =
+        replica_engine.apply_logical_frame_bytes(wire);
+    MDBXC_TEST_ASSERT(result.ok);
+    MDBXC_TEST_ASSERT(replica_table.contains(41));
+    MDBXC_TEST_ASSERT(!replica_table.contains(42));
+
+    source->disconnect();
+    replica->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
 void test_key_value_logical_adapter_engine_rejects_unknown_schema() {
     const std::string path = "test_key_value_logical_adapter_unknown.mdbx";
     const std::string dbi_name = "logical_key_value_unknown";
@@ -2761,6 +2833,7 @@ int main() {
     test_key_table_logical_adapter_applies_through_sync_engine();
     test_key_table_logical_adapter_rejects_malformed_payload();
     test_key_table_logical_capture_session_commits_typed_local_writes();
+    test_key_table_logical_frame_replicates_capture_session();
     test_key_value_logical_adapter_engine_rejects_unknown_schema();
     test_key_value_logical_engine_rejects_missing_schema_marker();
     test_key_value_logical_engine_rejects_stale_schema_marker();
