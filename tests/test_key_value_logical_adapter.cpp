@@ -53,6 +53,53 @@ mdbxc::sync::NodeId make_node(std::uint8_t seed) {
     return n;
 }
 
+enum BadLogicalDeliveryMarkerKeyCase {
+    BadLogicalDeliveryMarkerKeySize,
+    BadLogicalDeliveryMarkerKeyVersion,
+    BadLogicalDeliveryMarkerKeyOrigin,
+    BadLogicalDeliveryMarkerKeySequence,
+    BadLogicalDeliveryMarkerKeyDigest
+};
+
+void copy_first_logical_delivery_marker(
+        MDBX_txn* txn,
+        mdbxc::sync::LogicalDeliveryStore& store,
+        std::vector<std::uint8_t>& key,
+        std::vector<std::uint8_t>& value) {
+    MDBX_cursor* cursor = nullptr;
+    MDBXC_TEST_ASSERT(
+        mdbx_cursor_open(txn, store.handle(txn), &cursor) == MDBX_SUCCESS);
+    MDBX_val raw_key;
+    MDBX_val raw_value;
+    const int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value, MDBX_FIRST);
+    MDBXC_TEST_ASSERT(rc == MDBX_SUCCESS);
+    const std::uint8_t* key_begin =
+        static_cast<const std::uint8_t*>(raw_key.iov_base);
+    const std::uint8_t* value_begin =
+        static_cast<const std::uint8_t*>(raw_value.iov_base);
+    key.assign(key_begin, key_begin + raw_key.iov_len);
+    value.assign(value_begin, value_begin + raw_value.iov_len);
+    mdbx_cursor_close(cursor);
+}
+
+void put_raw_logical_delivery_marker(
+        MDBX_txn* txn,
+        mdbxc::sync::LogicalDeliveryStore& store,
+        const std::vector<std::uint8_t>& key,
+        const std::vector<std::uint8_t>& value) {
+    MDBX_val raw_key = {
+        const_cast<std::uint8_t*>(key.empty() ? nullptr : &key[0]),
+        key.size()
+    };
+    MDBX_val raw_value = {
+        const_cast<std::uint8_t*>(value.empty() ? nullptr : &value[0]),
+        value.size()
+    };
+    MDBXC_TEST_ASSERT(
+        mdbx_put(txn, store.handle(txn), &raw_key, &raw_value,
+                 MDBX_NOOVERWRITE) == MDBX_SUCCESS);
+}
+
 mdbxc::sync::LogicalSchemaRecord make_record(const std::string& dbi_name,
                                              std::uint32_t version = 1) {
     mdbxc::sync::LogicalSchemaRecord record;
@@ -1818,6 +1865,187 @@ void test_key_value_logical_delivery_store_rejects_frame_id_bound() {
     cleanup(path);
 }
 
+void test_key_value_logical_delivery_store_lists_markers() {
+    const std::string path =
+        "test_key_value_logical_delivery_store_list.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_store_list";
+    const std::string schema_id = "app.logical_kv_delivery_store_list.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId db_uuid = make_node(0xD0);
+    const mdbxc::sync::NodeId origin = make_node(0x46);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x47), db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    int apply_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(table, schema_id, apply_calls);
+    engine.register_logical_adapter(adapter);
+
+    for (int i = 0; i < 2; ++i) {
+        mdbxc::sync::LogicalDeliveryEnvelope envelope;
+        envelope.destination_db_uuid = db_uuid;
+        envelope.origin_node_id = origin;
+        envelope.origin_sequence = static_cast<std::uint64_t>(30 + i);
+        envelope.frame_id = i == 0 ? "inspect-a" : "inspect-b";
+        envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+            adapter.schema_ref(), 1u, 0u, std::vector<std::uint8_t>()));
+        const mdbxc::sync::LogicalApplyResult result =
+            engine.apply_logical_delivery_envelope(envelope);
+        MDBXC_TEST_ASSERT(result.ok);
+    }
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::LogicalDeliveryStore store(conn->env_handle());
+        store.open(txn.handle());
+        MDBXC_TEST_ASSERT(store.count(txn.handle()) == 2u);
+        const std::vector<mdbxc::sync::LogicalDeliveryMarkerInfo> one =
+            store.list_markers(txn.handle(), 1u);
+        MDBXC_TEST_ASSERT(one.size() == 1u);
+
+        const std::vector<mdbxc::sync::LogicalDeliveryMarkerInfo> all =
+            store.list_markers(txn.handle());
+        MDBXC_TEST_ASSERT(all.size() == 2u);
+        bool saw_a = false;
+        bool saw_b = false;
+        for (std::size_t i = 0; i < all.size(); ++i) {
+            MDBXC_TEST_ASSERT(
+                mdbxc::sync::compare_node_id(
+                    all[i].destination_db_uuid, db_uuid) == 0);
+            MDBXC_TEST_ASSERT(
+                mdbxc::sync::compare_node_id(
+                    all[i].origin_node_id, origin) == 0);
+            MDBXC_TEST_ASSERT(
+                all[i].frame_codec_version ==
+                mdbxc::sync::LogicalChangeFrameCodec::codec_version());
+            MDBXC_TEST_ASSERT(all[i].frame_bytes_size > 0u);
+            if (all[i].frame_id == "inspect-a") {
+                saw_a = all[i].origin_sequence == 30u;
+            } else if (all[i].frame_id == "inspect-b") {
+                saw_b = all[i].origin_sequence == 31u;
+            }
+        }
+        MDBXC_TEST_ASSERT(saw_a);
+        MDBXC_TEST_ASSERT(saw_b);
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void run_logical_delivery_store_bad_marker_key_case(
+        BadLogicalDeliveryMarkerKeyCase marker_case,
+        const std::string& suffix) {
+    const std::string path =
+        "test_key_value_logical_delivery_bad_marker_" + suffix + ".mdbx";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::LogicalSchemaRef ref;
+    ref.schema_id = "app.logical_kv_delivery_bad_marker.v1";
+    ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+    ref.schema_version = 1;
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = make_node(0xD3);
+    envelope.origin_node_id = make_node(0x4A);
+    envelope.origin_sequence = 40;
+    envelope.frame_id = "bad-marker-key";
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        ref, 1u, 0u, std::vector<std::uint8_t>()));
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        mdbxc::sync::LogicalDeliveryStore store(conn->env_handle());
+        store.open(txn.handle());
+        MDBXC_TEST_ASSERT(
+            store.try_mark_applied(txn.handle(), envelope));
+
+        std::vector<std::uint8_t> key;
+        std::vector<std::uint8_t> value;
+        copy_first_logical_delivery_marker(
+            txn.handle(), store, key, value);
+        MDBXC_TEST_ASSERT(key.size() > 40u);
+
+        switch (marker_case) {
+            case BadLogicalDeliveryMarkerKeySize:
+                key.pop_back();
+                break;
+            case BadLogicalDeliveryMarkerKeyVersion:
+                key[0] ^= 0x80u;
+                break;
+            case BadLogicalDeliveryMarkerKeyOrigin:
+                key[2] ^= 0x80u;
+                break;
+            case BadLogicalDeliveryMarkerKeySequence:
+                key[18] ^= 0x01u;
+                break;
+            case BadLogicalDeliveryMarkerKeyDigest:
+                key[key.size() - 1u] ^= 0x01u;
+                break;
+        }
+        put_raw_logical_delivery_marker(
+            txn.handle(), store, key, value);
+        txn.commit();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::LogicalDeliveryStore store(conn->env_handle());
+        store.open(txn.handle());
+        bool count_threw = false;
+        try {
+            (void)store.count(txn.handle());
+        } catch (const std::runtime_error&) {
+            count_threw = true;
+        }
+        MDBXC_TEST_ASSERT(count_threw);
+
+        bool list_threw = false;
+        try {
+            (void)store.list_markers(txn.handle());
+        } catch (const std::runtime_error&) {
+            list_threw = true;
+        }
+        MDBXC_TEST_ASSERT(list_threw);
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_delivery_store_rejects_bad_marker_keys() {
+    run_logical_delivery_store_bad_marker_key_case(
+        BadLogicalDeliveryMarkerKeySize, "size");
+    run_logical_delivery_store_bad_marker_key_case(
+        BadLogicalDeliveryMarkerKeyVersion, "version");
+    run_logical_delivery_store_bad_marker_key_case(
+        BadLogicalDeliveryMarkerKeyOrigin, "origin");
+    run_logical_delivery_store_bad_marker_key_case(
+        BadLogicalDeliveryMarkerKeySequence, "sequence");
+    run_logical_delivery_store_bad_marker_key_case(
+        BadLogicalDeliveryMarkerKeyDigest, "digest");
+}
+
 void test_key_value_logical_capture_session_discards_rollback() {
     const std::string path = "test_key_value_logical_adapter_session_rollback.mdbx";
     const std::string dbi_name = "logical_key_value_session_rollback";
@@ -2368,6 +2596,8 @@ int main() {
     test_key_value_logical_delivery_envelope_keeps_custom_bounds();
     test_key_value_logical_delivery_object_api_rejects_frame_id_bound();
     test_key_value_logical_delivery_store_rejects_frame_id_bound();
+    test_key_value_logical_delivery_store_lists_markers();
+    test_key_value_logical_delivery_store_rejects_bad_marker_keys();
     test_key_value_logical_capture_session_discards_rollback();
     test_key_value_logical_capture_session_requires_schema_marker();
     test_key_value_logical_capture_session_rejects_stale_marker();

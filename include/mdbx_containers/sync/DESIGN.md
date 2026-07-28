@@ -541,6 +541,11 @@ per-origin watermark/gap contract is added.
 future lifecycle PR should add an acknowledgement horizon or per-origin
 watermark before old replay markers can be pruned safely; deleting markers by
 time alone would re-open the exact late-retry problem the store prevents.
+`LogicalDeliveryStore::count()` and `list_markers()` are read-only inspection
+helpers for diagnostics, repair tooling, and future lifecycle work. They expose
+delivery identity and stored frame metadata after validating that the persisted
+marker key matches the marker value identity and `frame_id` digest. They do not
+define a retention policy and must not be used as a standalone pruning signal.
 
 `LogicalTableAdapter.hpp` reserves the apply-side extension point:
 
