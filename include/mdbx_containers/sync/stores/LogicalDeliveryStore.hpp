@@ -6,6 +6,7 @@
 /// \brief Persistent replay marker store for logical delivery envelopes.
 
 #include <cstdint>
+#include <cstddef>
 #include <cstring>
 #include <limits>
 #include <stdexcept>
@@ -22,6 +23,19 @@
 
 namespace mdbxc {
 namespace sync {
+
+    /// \brief Read-only metadata decoded from an applied delivery marker.
+    /// \details The inspection record intentionally exposes only delivery
+    /// identity and stored frame metadata. It is not a pruning contract and
+    /// does not expose or decode the nested logical frame payload.
+    struct LogicalDeliveryMarkerInfo {
+        DbId destination_db_uuid{};        ///< Destination database id.
+        NodeId origin_node_id{};           ///< Delivery origin node.
+        std::uint64_t origin_sequence = 0; ///< Origin delivery sequence.
+        std::string frame_id;              ///< Stable sender frame id.
+        std::uint16_t frame_codec_version = 0; ///< Nested frame codec version.
+        std::uint32_t frame_bytes_size = 0;    ///< Stored nested frame bytes.
+    };
 
     /// \brief Tracks applied logical delivery envelopes.
     /// \details Key = fixed-size origin node id + origin sequence + frame id
@@ -58,6 +72,67 @@ namespace sync {
             if (!m_open) {
                 throw std::logic_error("LogicalDeliveryStore is not open");
             }
+        }
+
+        /// \brief Counts persisted logical delivery markers.
+        std::size_t count(MDBX_txn* txn) const {
+            txn = checked_txn(txn, "LogicalDeliveryStore::count");
+            open_const(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalDeliveryStore cursor open failed");
+            std::size_t out = 0;
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    (void)decode_and_validate_marker(key, value);
+                    ++out;
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc, "LogicalDeliveryStore cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return out;
+        }
+
+        /// \brief Lists persisted logical delivery marker identities.
+        /// \param limit Maximum number of markers to return, or zero for all.
+        std::vector<LogicalDeliveryMarkerInfo> list_markers(
+                MDBX_txn* txn,
+                std::size_t limit = 0) const {
+            txn = checked_txn(txn, "LogicalDeliveryStore::list_markers");
+            open_const(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalDeliveryStore cursor open failed");
+            std::vector<LogicalDeliveryMarkerInfo> out;
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    out.push_back(decode_and_validate_marker(key, value));
+                    if (limit != 0 && out.size() >= limit) {
+                        break;
+                    }
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND && (limit == 0 || out.size() < limit)) {
+                    check_mdbx(rc, "LogicalDeliveryStore cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return out;
         }
 
         /// \brief Returns true when \p envelope already has an applied marker.
@@ -244,6 +319,153 @@ namespace sync {
         static std::uint16_t marker_key_version() { return 1; }
 
         static std::uint16_t marker_value_version() { return 1; }
+
+        struct ValueCursor {
+            const std::uint8_t* data;
+            std::size_t size;
+            std::size_t pos;
+        };
+
+        struct MarkerKeyInfo {
+            NodeId origin_node_id{};
+            std::uint64_t origin_sequence = 0;
+            std::vector<std::uint8_t> frame_id_digest;
+        };
+
+        static void require_bytes(ValueCursor& cur,
+                                  std::size_t n,
+                                  const char* context) {
+            if (n > cur.size || cur.pos > cur.size - n) {
+                throw std::runtime_error(context);
+            }
+        }
+
+        static std::uint16_t read_marker_u16(ValueCursor& cur) {
+            require_bytes(cur, 2u,
+                          "LogicalDeliveryStore marker value underrun");
+            const std::uint16_t out = detail::read_u16_le(cur.data + cur.pos);
+            cur.pos += 2u;
+            return out;
+        }
+
+        static std::uint32_t read_marker_u32(ValueCursor& cur) {
+            require_bytes(cur, 4u,
+                          "LogicalDeliveryStore marker value underrun");
+            const std::uint32_t out = detail::read_u32_le(cur.data + cur.pos);
+            cur.pos += 4u;
+            return out;
+        }
+
+        static std::uint64_t read_marker_u64(ValueCursor& cur) {
+            require_bytes(cur, 8u,
+                          "LogicalDeliveryStore marker value underrun");
+            const std::uint64_t out = detail::read_u64_le(cur.data + cur.pos);
+            cur.pos += 8u;
+            return out;
+        }
+
+        static void read_marker_id(ValueCursor& cur, NodeId& out) {
+            require_bytes(cur, out.size(),
+                          "LogicalDeliveryStore marker value underrun");
+            for (std::size_t i = 0; i < out.size(); ++i) {
+                out[i] = cur.data[cur.pos + i];
+            }
+            cur.pos += out.size();
+        }
+
+        static std::string read_marker_string(ValueCursor& cur,
+                                              std::uint32_t len) {
+            require_bytes(cur, len,
+                          "LogicalDeliveryStore marker value underrun");
+            const char* begin =
+                reinterpret_cast<const char*>(cur.data + cur.pos);
+            cur.pos += len;
+            return std::string(begin, begin + len);
+        }
+
+        static LogicalDeliveryMarkerInfo decode_marker_value(
+                const MDBX_val& value) {
+            ValueCursor cur = {
+                static_cast<const std::uint8_t*>(value.iov_base),
+                value.iov_len,
+                0u
+            };
+            LogicalDeliveryMarkerInfo out;
+            const std::uint16_t version = read_marker_u16(cur);
+            if (version != marker_value_version()) {
+                throw std::runtime_error(
+                    "Unsupported LogicalDeliveryStore marker value version");
+            }
+            read_marker_id(cur, out.destination_db_uuid);
+            read_marker_id(cur, out.origin_node_id);
+            out.origin_sequence = read_marker_u64(cur);
+            const std::uint32_t frame_id_len = read_marker_u32(cur);
+            out.frame_id = read_marker_string(cur, frame_id_len);
+            out.frame_codec_version = read_marker_u16(cur);
+            out.frame_bytes_size = read_marker_u32(cur);
+            require_bytes(cur, out.frame_bytes_size,
+                          "LogicalDeliveryStore marker value underrun");
+            cur.pos += out.frame_bytes_size;
+            if (cur.pos != cur.size) {
+                throw std::runtime_error(
+                    "Trailing bytes after LogicalDeliveryStore marker value");
+            }
+            return out;
+        }
+
+        static MarkerKeyInfo decode_marker_key(const MDBX_val& key) {
+            ValueCursor cur = {
+                static_cast<const std::uint8_t*>(key.iov_base),
+                key.iov_len,
+                0u
+            };
+            const std::size_t digest_size = 16u;
+            const std::size_t expected_size =
+                2u + NodeId().size() + 8u + digest_size;
+            if (cur.size != expected_size) {
+                throw std::runtime_error(
+                    "LogicalDeliveryStore marker key has unexpected size");
+            }
+            const std::uint16_t version = read_marker_u16(cur);
+            if (version != marker_key_version()) {
+                throw std::runtime_error(
+                    "Unsupported LogicalDeliveryStore marker key version");
+            }
+            MarkerKeyInfo out;
+            read_marker_id(cur, out.origin_node_id);
+            out.origin_sequence = read_marker_u64(cur);
+            require_bytes(cur, digest_size,
+                          "LogicalDeliveryStore marker key underrun");
+            out.frame_id_digest.assign(cur.data + cur.pos,
+                                       cur.data + cur.pos + digest_size);
+            cur.pos += digest_size;
+            if (cur.pos != cur.size) {
+                throw std::runtime_error(
+                    "Trailing bytes after LogicalDeliveryStore marker key");
+            }
+            return out;
+        }
+
+        static LogicalDeliveryMarkerInfo decode_and_validate_marker(
+                const MDBX_val& key,
+                const MDBX_val& value) {
+            const MarkerKeyInfo key_info = decode_marker_key(key);
+            const LogicalDeliveryMarkerInfo info =
+                decode_marker_value(value);
+            if (compare_node_id(key_info.origin_node_id,
+                                info.origin_node_id) != 0 ||
+                key_info.origin_sequence != info.origin_sequence) {
+                throw std::runtime_error(
+                    "LogicalDeliveryStore marker key/value identity mismatch");
+            }
+            const std::vector<std::uint8_t> expected_digest =
+                make_frame_id_digest(info.frame_id);
+            if (key_info.frame_id_digest != expected_digest) {
+                throw std::runtime_error(
+                    "LogicalDeliveryStore marker key/value frame id mismatch");
+            }
+            return info;
+        }
 
         MDBX_env*   m_env;
         std::string m_dbi_name;
