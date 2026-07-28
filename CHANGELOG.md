@@ -33,6 +33,15 @@ All notable changes to this project will be documented in this file.
 - Added `sync_23_key_value_logical_frame.cpp` to demonstrate the explicit
   `KeyValueTable` logical capture-session -> logical frame codec -> replica
   apply workflow.
+- Added `LogicalDeliveryEnvelope`, `LogicalDeliveryEnvelopeCodec`, and the
+  `_mdbxc_logical_delivery` replay marker store. `SyncEngine` can now apply a
+  delivery envelope with destination db uuid validation and atomic persisted
+  deduplication in the same transaction as logical adapter mutations. Replay
+  markers use fixed-size MDBX keys, bind the full delivery identity to
+  canonical nested frame bytes, reject identity collisions with different
+  payloads, preserve caller codec bounds during marker creation, and skip
+  self-origin loopback envelopes as successful no-ops. Ordering and marker
+  retention remain external/future lifecycle contracts.
 - Added `ISyncCaptureSink::record_change_op(MDBX_txn*, const ChangeOp&)` as the
   preferred capture entry point. The previous raw-field callback remains the
   source-compatible abstract sink contract; new full-`ChangeOp` sinks can

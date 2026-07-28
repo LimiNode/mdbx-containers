@@ -26,6 +26,8 @@ namespace sync {
         std::uint32_t max_batches_per_message  = 10000;               ///< Max batches in one pull/push transport message.
         std::uint32_t max_error_len            = 16u * 1024u;         ///< Max transport error string bytes.
         std::uint32_t max_logical_schema_id_len = 16u * 1024u;        ///< Max logical frame schema id bytes.
+        std::uint32_t max_logical_delivery_frame_id_len =
+            16u * 1024u; ///< Max logical delivery frame id bytes.
         std::uint32_t max_transport_message_bytes =
             128u * 1024u * 1024u; ///< Max encoded transport message bytes.
     };
