@@ -1,0 +1,39 @@
+name: Archcheck
+
+on:
+  pull_request:
+    branches: [ main, stable ]
+  workflow_dispatch:
+    inputs:
+      revspec:
+        description: "Two-dot diff range for manual runs, for example origin/main..HEAD."
+        required: true
+        default: "origin/main..HEAD"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  archcheck:
+    name: Archcheck advisory
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Run archcheck diff advisory
+        uses: blurman-ai/archcheck-action@55d36f4a884912b747bbdb9809ace08baea26fcc
+        with:
+          version: "0.1.5"
+          path: "."
+          revspec: ${{ github.event_name == 'workflow_dispatch' && inputs.revspec || '' }}
+          sticky-comment: "false"
+          fail-on-gate: "false"
