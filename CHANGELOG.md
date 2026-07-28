@@ -46,8 +46,10 @@ All notable changes to this project will be documented in this file.
   self-origin loopback envelopes as successful no-ops. Read-only marker
   inspection helpers expose marker counts and delivery identity metadata for
   diagnostics and future lifecycle work after validating persisted marker
-  key/value consistency. Ordering and marker retention remain external/future
-  lifecycle contracts.
+  key/value consistency. A stateless delivery order helper can classify an
+  envelope sequence against a caller-owned expected next sequence, but it does
+  not identify duplicates. Persisted ordering and marker retention remain
+  external/future lifecycle contracts.
 - Added `ISyncCaptureSink::record_change_op(MDBX_txn*, const ChangeOp&)` as the
   preferred capture entry point. The previous raw-field callback remains the
   source-compatible abstract sink contract; new full-`ChangeOp` sinks can
