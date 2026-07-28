@@ -18,6 +18,7 @@ namespace sync {
         AnyValue             = 3, ///< Dynamically typed value table.
         HashedKeyValue       = 4, ///< Hashed key-value store.
         KeyValue             = 5, ///< One value per key table.
+        KeyTable             = 6, ///< Key-only set table.
     };
 
     /// \brief Returns true when \p kind is a supported logical table kind.
@@ -28,6 +29,7 @@ namespace sync {
             case LogicalTableKind::AnyValue:
             case LogicalTableKind::HashedKeyValue:
             case LogicalTableKind::KeyValue:
+            case LogicalTableKind::KeyTable:
                 return true;
             case LogicalTableKind::Unknown:
                 return false;

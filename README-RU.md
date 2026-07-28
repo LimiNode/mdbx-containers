@@ -110,11 +110,12 @@
 - `SyncEngine` предоставляет pull/push/apply primitives,
   `register_logical_schema()` для committed setup logical schema markers и
   `migrate_logical_schema()` для явной замены marker после exact preflight.
-  `KeyValueTableLogicalAdapter` - первый concrete logical adapter helper для
-  явных вызовов `SyncEngine::apply_logical_changes()` или более низкоуровневого
-  `LogicalTableRegistry::preflight_then_apply()`. Его payload
-  codec отделён от физического storage-формата таблицы и выбирается через
-  явные key/value codec tags вроде `KeyValueLogicalInt64Codec<long>` и
+  `KeyValueTableLogicalAdapter` и `KeyTableLogicalAdapter` - первые concrete
+  logical adapter helpers для явных вызовов
+  `SyncEngine::apply_logical_changes()` или более низкоуровневого
+  `LogicalTableRegistry::preflight_then_apply()`. Их payload codecs отделены
+  от физического storage-формата таблиц и выбираются через явные codec tags
+  вроде `KeyValueLogicalInt64Codec<long>` и
   `KeyValueLogicalStringCodec<std::string>`. Codec tags являются частью
   logical schema contract; их смена требует нового schema id или явной
   schema-marker migration. Обычный вызов `register_logical_schema()` всё ещё

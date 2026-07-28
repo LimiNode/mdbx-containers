@@ -325,6 +325,9 @@ namespace sync {
                         LogicalTableKind::KeyValue):
                     return LogicalTableKind::KeyValue;
                 case static_cast<std::uint16_t>(
+                        LogicalTableKind::KeyTable):
+                    return LogicalTableKind::KeyTable;
+                case static_cast<std::uint16_t>(
                         LogicalTableKind::KeyMultiValue):
                     return LogicalTableKind::KeyMultiValue;
                 case static_cast<std::uint16_t>(

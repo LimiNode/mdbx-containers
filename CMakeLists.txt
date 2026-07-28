@@ -446,6 +446,7 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/sync/LogicalTableAdapter.hpp
         mdbx_containers/sync/LogicalSchemaValidation.hpp
         mdbx_containers/sync/adapters/KeyValueTableLogicalAdapter.hpp
+        mdbx_containers/sync/adapters/KeyTableLogicalAdapter.hpp
         mdbx_containers/sync/ChangeBatch.hpp
         mdbx_containers/sync/ChangeBatchCodec.hpp
         mdbx_containers/sync/SyncApplyObserver.hpp

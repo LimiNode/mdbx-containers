@@ -76,6 +76,11 @@ All notable changes to this project will be documented in this file.
   validates the persistent schema marker before local mutation, buffers typed
   local changes, and publishes them only after successful commit. Transport
   pull/push remains raw-DBI only.
+- Added `KeyTableLogicalAdapter` for explicit apply-side logical
+  insert/delete/clear operations on `KeyTable`. It reuses the existing explicit
+  key codec tags and validates the persistent single-DBI schema marker through
+  the normal engine logical apply path. Typed local capture for key-only tables
+  remains future work.
 - Documented the staged logical sync contract: schema marker, logical wire
   frame, adapter preflight/apply, then capture. Deferred logical tables still
   require single-writer or application-serialized conflicting writes until a

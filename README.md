@@ -87,11 +87,12 @@
   `register_logical_schema()` for committed logical schema marker setup, plus
   `migrate_logical_schema()` for explicit marker replacement after exact
   preflight.
-  `KeyValueTableLogicalAdapter` is the first concrete logical adapter helper
-  for explicit `SyncEngine::apply_logical_changes()` or lower-level
-  `LogicalTableRegistry::preflight_then_apply()` calls. Its
-  payload codec is separate from physical table storage and is selected through
-  explicit key/value codec tags such as `KeyValueLogicalInt64Codec<long>` and
+  `KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are the first
+  concrete logical adapter helpers for explicit
+  `SyncEngine::apply_logical_changes()` or lower-level
+  `LogicalTableRegistry::preflight_then_apply()` calls. Their
+  payload codecs are separate from physical table storage and are selected
+  through explicit codec tags such as `KeyValueLogicalInt64Codec<long>` and
   `KeyValueLogicalStringCodec<std::string>`. Codec tags are part of the
   logical schema contract; changing them requires a new schema id, or an
   explicit schema-marker migration. A plain `register_logical_schema()` call

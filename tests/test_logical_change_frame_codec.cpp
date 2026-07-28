@@ -153,6 +153,27 @@ void test_logical_frame_roundtrip() {
     MDBXC_TEST_ASSERT(decoded.changes[1].payload == second_payload);
 }
 
+void test_logical_frame_accepts_key_table_kind() {
+    mdbxc::sync::LogicalChangeFrame frame;
+    std::vector<std::uint8_t> payload;
+    payload.push_back(7);
+    frame.changes.push_back(make_change(
+        "app.logical.keys.v1",
+        mdbxc::sync::LogicalTableKind::KeyTable,
+        1,
+        1,
+        payload));
+
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::LogicalChangeFrameCodec::encode(frame);
+    const mdbxc::sync::LogicalChangeFrame decoded =
+        mdbxc::sync::LogicalChangeFrameCodec::decode(encoded);
+    MDBXC_TEST_ASSERT(decoded.changes.size() == 1u);
+    MDBXC_TEST_ASSERT(decoded.changes[0].schema.kind ==
+                      mdbxc::sync::LogicalTableKind::KeyTable);
+    MDBXC_TEST_ASSERT(decoded.changes[0].payload == payload);
+}
+
 void test_logical_frame_matches_golden_vector() {
     mdbxc::sync::LogicalChangeFrame frame;
     std::vector<std::uint8_t> payload;
@@ -405,6 +426,7 @@ void test_logical_frame_decode_rejects_payload_length_overflow() {
 
 int main() {
     test_logical_frame_roundtrip();
+    test_logical_frame_accepts_key_table_kind();
     test_logical_frame_matches_golden_vector();
     test_empty_logical_frame_roundtrip();
     test_logical_frame_encode_rejects_too_many_changes();
