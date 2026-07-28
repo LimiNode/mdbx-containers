@@ -99,6 +99,10 @@ The logical sync scaffolding is preparatory only:
 - `KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are explicit
   apply helpers with opt-in typed capture sessions. Neither is connected to
   the transport pull/push path yet; callers own logical frame delivery.
+- Logical delivery replay markers can be pruned through a persisted per-origin
+  watermark. Callers must advance it only from an external delivery/acknowledge
+  protocol that rules out later unseen frames at or below the boundary; the
+  engine does not supply ordering, buffering, or acknowledgements itself.
 
 Until a causal context or another conflict model is implemented, future logical
 table support should document either one authoritative writer for the affected

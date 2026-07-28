@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added explicit logical-delivery replay-marker pruning with persistent
+  per-origin watermarks. `SyncEngine::prune_logical_delivery_markers()` removes
+  acknowledged markers atomically and turns later replay at or below the saved
+  boundary into a stale no-op; callers remain responsible for deriving a safe
+  boundary from their own delivery/acknowledgement protocol.
 - Added an opt-in typed `LogicalCaptureSession` to
   `KeyTableLogicalAdapter`. It owns one writable transaction, suppresses raw
   capture, emits logical insert/delete changes only for successful local
