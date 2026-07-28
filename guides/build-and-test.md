@@ -178,6 +178,10 @@ sync_tick_hub_benchmark \
 - CI uses CMake with Ninja and runs `ctest --output-on-failure`.
 - A separate Linux C++17 smoke job builds and runs `sync_tick_hub_benchmark`
   with `MDBXC_BUILD_BENCHMARKS=ON`.
+- The separate `Archcheck` workflow runs `archcheck --diff` as an advisory
+  architecture check on pull requests and manual dispatch. The action uses
+  `fail-on-gate: false`, so architecture findings are visible without blocking
+  merges, while configuration or tool execution failures still fail the job.
 - The separate `Stress` workflow runs `ctest -L stress` on Linux C++17 when
   manually dispatched or triggered by its schedule.
 
