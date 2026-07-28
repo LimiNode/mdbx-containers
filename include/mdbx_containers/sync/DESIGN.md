@@ -500,6 +500,16 @@ The v0.1 `ChangeBatchCodec` still serializes raw DBI operations only. Adding
 the logical domain to the wire format requires an explicit codec version bump
 and compatibility tests.
 
+`LogicalChangeFrameCodec.hpp` defines the separate explicit logical frame
+boundary. It is a strict little-endian codec for ordered `LogicalChange`
+payloads, with its own magic/version/mandatory-flags header. This frame is not
+embedded into `TransportMessageCodec` yet; receivers must opt into logical
+apply explicitly and raw pull/push transports remain raw-DBI only. The frame is
+not a delivery envelope: it carries no destination database id, origin node id,
+monotonic sequence, frame id, or replay marker. Retrying transports must provide
+delivery routing, ordering, and replay protection outside this payload layer
+until a dedicated logical delivery envelope is used.
+
 `LogicalTableAdapter.hpp` reserves the apply-side extension point:
 
 - `ILogicalTableAdapter::preflight()` validates one logical change without
