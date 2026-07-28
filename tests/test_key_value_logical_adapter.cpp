@@ -757,6 +757,67 @@ void test_key_table_logical_adapter_rejects_malformed_payload() {
     cleanup(path);
 }
 
+void test_key_table_logical_capture_session_commits_typed_local_writes() {
+    const std::string path =
+        "test_key_table_logical_adapter_session.mdbx";
+    const std::string dbi_name = "logical_key_table_session";
+    const std::string schema_id = "app.logical_key_table_session.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId node = make_node(0x4A);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(node, make_node(0xD3));
+    engine.register_logical_schema(
+        schema_id, make_key_table_record(dbi_name));
+
+    mdbxc::KeyTable<int> table(conn, dbi_name);
+    IntKeyTableAdapter adapter(table, schema_id);
+    mdbxc::sync::ThreadLocalChangeAccumulator raw_capture(conn);
+    conn->attach_sync_capture(&raw_capture);
+
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    {
+        std::unique_ptr<IntKeyTableAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        MDBXC_TEST_ASSERT(session->insert(1));
+        MDBXC_TEST_ASSERT(!session->insert(1));
+        MDBXC_TEST_ASSERT(session->insert(2));
+        MDBXC_TEST_ASSERT(session->erase(1));
+        MDBXC_TEST_ASSERT(!session->erase(9));
+        MDBXC_TEST_ASSERT(session->pending_size() == 3u);
+        session->commit(changes);
+    }
+    conn->detach_sync_capture();
+
+    MDBXC_TEST_ASSERT(changes.size() == 3u);
+    MDBXC_TEST_ASSERT(changes[0].opcode ==
+                      mdbxc::sync::KeyTableLogicalInsert);
+    MDBXC_TEST_ASSERT(changes[1].opcode ==
+                      mdbxc::sync::KeyTableLogicalInsert);
+    MDBXC_TEST_ASSERT(changes[2].opcode ==
+                      mdbxc::sync::KeyTableLogicalDelete);
+    MDBXC_TEST_ASSERT(!table.contains(1));
+    MDBXC_TEST_ASSERT(table.contains(2));
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::ChangeLogStore changelog(conn->env_handle());
+        changelog.open(txn.handle());
+        MDBXC_TEST_ASSERT(!changelog.contains(txn.handle(), node, 1));
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_value_logical_adapter_engine_rejects_unknown_schema() {
     const std::string path = "test_key_value_logical_adapter_unknown.mdbx";
     const std::string dbi_name = "logical_key_value_unknown";
@@ -2699,6 +2760,7 @@ int main() {
     test_key_value_logical_adapter_applies_through_sync_engine();
     test_key_table_logical_adapter_applies_through_sync_engine();
     test_key_table_logical_adapter_rejects_malformed_payload();
+    test_key_table_logical_capture_session_commits_typed_local_writes();
     test_key_value_logical_adapter_engine_rejects_unknown_schema();
     test_key_value_logical_engine_rejects_missing_schema_marker();
     test_key_value_logical_engine_rejects_stale_schema_marker();

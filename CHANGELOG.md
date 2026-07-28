@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added an opt-in typed `LogicalCaptureSession` to
+  `KeyTableLogicalAdapter`. It owns one writable transaction, suppresses raw
+  capture, emits logical insert/delete changes only for successful local
+  membership mutations, records explicit clear requests, and publishes pending
+  changes only after commit.
 - Added a non-blocking `Archcheck` GitHub Actions workflow that runs
   `archcheck --diff` through a pinned official action as an advisory
   architecture signal on pull requests, including stacked PRs, and manual

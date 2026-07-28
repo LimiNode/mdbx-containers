@@ -51,9 +51,8 @@ has three separate pieces that must not be treated as support by themselves:
   the full schema tuple plus reserved flags before invoking adapters.
 
 `KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are the current
-explicit logical apply helpers. They are not connected to the transport
-pull/push path, and `KeyTableLogicalAdapter` does not yet provide a typed local
-capture session.
+explicit logical apply helpers with opt-in typed capture sessions. They are not
+connected to the transport pull/push path; callers own logical frame delivery.
 
 Until a wrapper has a codec extension, a registered adapter, capture tests, and
 round-trip tests, it must remain in the deferred rows below and must not emit

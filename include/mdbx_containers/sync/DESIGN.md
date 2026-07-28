@@ -583,16 +583,17 @@ payloads and apply them through
 transaction. These helpers prove the adapter contract and payload shape for
 simple tables, but they are not yet connected to the automatic pull/push wire
 pipeline.
-`KeyValueTableLogicalAdapter` supports upsert/delete/clear and exposes an
-opt-in `LogicalCaptureSession`. The session owns a writable transaction,
-suppresses raw capture for its typed writes, buffers logical changes privately,
-and copies them to the caller only from `commit(out)`. Rollback, destruction,
-or commit failure discards the pending logical changes. Session construction
-validates the adapter against the persistent schema marker in the same writable
-transaction, before any local mutation can be performed.
-`KeyTableLogicalAdapter` currently supports apply-side insert/delete/clear
-only; a typed local capture session for key-only tables is deferred until the
-logical capture API is generalized beyond `KeyValueTable`.
+`KeyValueTableLogicalAdapter` supports upsert/delete/clear and
+`KeyTableLogicalAdapter` supports insert/delete/clear. Both expose an opt-in
+`LogicalCaptureSession`. The session owns a writable transaction, suppresses
+raw capture for its typed writes, buffers logical changes privately, and copies
+them to the caller only from `commit(out)`. Rollback, destruction, or commit
+failure discards the pending logical changes. Session construction validates
+the adapter against the persistent schema marker in the same writable
+transaction, before any local mutation can be performed. For `KeyTable`, only
+successful membership changes are captured: inserting an existing key or
+erasing an absent key leaves the pending logical frame unchanged; an explicit
+clear request is captured even when the table is already empty.
 
 The adapter payload codec is not the table storage serializer. The initial
 codec surface is deliberately small and explicit: callers provide key/value
