@@ -303,6 +303,54 @@ private:
     std::vector<std::string> m_affected_dbis;
 };
 
+class ThrowingPreflightLogicalAdapter
+        : public mdbxc::sync::ILogicalTableAdapter {
+public:
+    ThrowingPreflightLogicalAdapter(
+            mdbxc::KeyValueTable<int, std::string>& table,
+            const std::string& schema_id)
+        : m_table(table),
+          m_schema_id(schema_id) {}
+
+    mdbxc::sync::LogicalSchemaRef schema_ref() const override {
+        mdbxc::sync::LogicalSchemaRef ref;
+        ref.schema_id = m_schema_id;
+        ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+        ref.schema_version = 1;
+        return ref;
+    }
+
+    std::string primary_dbi() const override {
+        return m_table.dbi_name();
+    }
+
+    std::vector<std::string> affected_dbis() const override {
+        std::vector<std::string> out;
+        out.push_back(m_table.dbi_name());
+        return out;
+    }
+
+    mdbxc::sync::LogicalApplyResult preflight(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) const override {
+        (void)txn;
+        (void)change;
+        throw std::runtime_error("forced logical preflight failure");
+    }
+
+    mdbxc::sync::LogicalApplyResult apply(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) override {
+        (void)change;
+        m_table.insert_or_assign(88, "should-not-apply", txn);
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+private:
+    mdbxc::KeyValueTable<int, std::string>& m_table;
+    std::string m_schema_id;
+};
+
 class ThrowingFlushSink : public mdbxc::sync::ISyncCaptureSink {
 public:
     void record_change(MDBX_txn* txn,
@@ -977,6 +1025,160 @@ void test_key_value_logical_capture_session_commits_typed_local_writes() {
     cleanup(replica_path);
 }
 
+void test_key_value_logical_frame_replicates_capture_session() {
+    const std::string source_path =
+        "test_key_value_logical_frame_source.mdbx";
+    const std::string replica_path =
+        "test_key_value_logical_frame_replica.mdbx";
+    const std::string dbi_name = "logical_key_value_frame";
+    const std::string schema_id = "app.logical_kv_frame.v1";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    mdbxc::Config source_cfg;
+    source_cfg.pathname = source_path;
+    source_cfg.max_dbs = 16;
+    source_cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> source =
+        mdbxc::Connection::create(source_cfg);
+
+    mdbxc::Config replica_cfg;
+    replica_cfg.pathname = replica_path;
+    replica_cfg.max_dbs = 16;
+    replica_cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> replica =
+        mdbxc::Connection::create(replica_cfg);
+
+    mdbxc::sync::SyncEngine source_engine(source);
+    source_engine.initialize_local_identity(make_node(0x32),
+                                            make_node(0xC2));
+    source_engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::sync::SyncEngine replica_engine(replica);
+    replica_engine.initialize_local_identity(make_node(0x33),
+                                             make_node(0xC2));
+    replica_engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> source_table(source, dbi_name);
+    mdbxc::KeyValueTable<int, std::string> replica_table(replica, dbi_name);
+    IntStringAdapter source_adapter(source_table, schema_id);
+    IntStringAdapter replica_adapter(replica_table, schema_id);
+    replica_engine.register_logical_adapter(replica_adapter);
+
+    std::vector<mdbxc::sync::LogicalChange> captured;
+    {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            source_adapter.begin_capture_session();
+        session->insert_or_assign(41, "forty-one");
+        session->insert_or_assign(42, "forty-two");
+        MDBXC_TEST_ASSERT(session->erase(42));
+        session->commit(captured);
+    }
+
+    MDBXC_TEST_ASSERT(captured.size() == 3u);
+    MDBXC_TEST_ASSERT(source_table.contains(41));
+    MDBXC_TEST_ASSERT(!source_table.contains(42));
+
+    mdbxc::sync::LogicalChangeFrame frame;
+    frame.changes = captured;
+    const std::vector<std::uint8_t> wire =
+        mdbxc::sync::LogicalChangeFrameCodec::encode(frame);
+    const mdbxc::sync::LogicalApplyResult result =
+        replica_engine.apply_logical_frame_bytes(wire);
+    MDBXC_TEST_ASSERT(result.ok);
+
+    const std::pair<bool, std::string> found =
+        replica_table.find_compat(41);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "forty-one");
+    MDBXC_TEST_ASSERT(!replica_table.contains(42));
+
+    source->disconnect();
+    replica->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
+void test_key_value_logical_frame_rejects_malformed_bytes_before_apply() {
+    const std::string path =
+        "test_key_value_logical_frame_malformed.mdbx";
+    const std::string dbi_name = "logical_key_value_frame_malformed";
+    const std::string schema_id = "app.logical_kv_frame_malformed.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x34), make_node(0xC4));
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    std::vector<std::uint8_t> malformed;
+    malformed.push_back(0);
+    malformed.push_back(1);
+    malformed.push_back(2);
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_frame_bytes(malformed);
+    MDBXC_TEST_ASSERT(!result.ok);
+    MDBXC_TEST_ASSERT(result.error.find("decode failed") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(table.count() == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_value_logical_frame_reports_apply_stage_exception() {
+    const std::string path =
+        "test_key_value_logical_frame_apply_exception.mdbx";
+    const std::string dbi_name = "logical_key_value_frame_apply_exception";
+    const std::string schema_id =
+        "app.logical_kv_frame_apply_exception.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x35), make_node(0xC5));
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    ThrowingPreflightLogicalAdapter adapter(table, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalChangeFrame frame;
+    std::vector<std::uint8_t> payload;
+    frame.changes.push_back(mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, payload));
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::LogicalChangeFrameCodec::encode(frame);
+
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_frame_bytes(encoded);
+    MDBXC_TEST_ASSERT(!result.ok);
+    MDBXC_TEST_ASSERT(result.error.find("apply failed") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(result.error.find("decode failed") ==
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(!table.contains(88));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_value_logical_capture_session_discards_rollback() {
     const std::string path = "test_key_value_logical_adapter_session_rollback.mdbx";
     const std::string dbi_name = "logical_key_value_session_rollback";
@@ -1515,6 +1717,9 @@ int main() {
     test_key_value_logical_engine_rejects_duplicate_affected_dbis();
     test_key_value_logical_engine_suppresses_generic_raw_capture();
     test_key_value_logical_capture_session_commits_typed_local_writes();
+    test_key_value_logical_frame_replicates_capture_session();
+    test_key_value_logical_frame_rejects_malformed_bytes_before_apply();
+    test_key_value_logical_frame_reports_apply_stage_exception();
     test_key_value_logical_capture_session_discards_rollback();
     test_key_value_logical_capture_session_requires_schema_marker();
     test_key_value_logical_capture_session_rejects_stale_marker();

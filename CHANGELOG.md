@@ -24,6 +24,12 @@ All notable changes to this project will be documented in this file.
   reserved change flags, malformed schema refs, oversized counts, trailing
   bytes, and configured schema or payload bounds. Codec tests also cover
   encode-side bounds and a literal whole-frame golden vector.
+- Added explicit `SyncEngine::apply_logical_frame()` and
+  `SyncEngine::apply_logical_frame_bytes()` helpers so decoded or encoded
+  logical frames can be applied through the existing engine-owned logical
+  adapter path. Malformed frame bytes return a failure result before adapter
+  preflight or mutation, while apply-stage exceptions are reported separately
+  from decode failures.
 - Added `ISyncCaptureSink::record_change_op(MDBX_txn*, const ChangeOp&)` as the
   preferred capture entry point. The previous raw-field callback remains the
   source-compatible abstract sink contract; new full-`ChangeOp` sinks can

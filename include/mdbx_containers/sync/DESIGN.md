@@ -570,6 +570,10 @@ transaction, commits only after the two-phase registry preflight/apply succeeds,
 and emits the normal sync apply observer event after commit.
 `SyncEngine::handle_push()` remains raw-DBI only. Unknown logical payloads and
 stale adapter/schema-marker combinations must not fall back to raw DBI apply.
+`SyncEngine::apply_logical_frame()` and `apply_logical_frame_bytes()` are the
+explicit frame-level apply helpers for callers that have already opted into
+logical sync. Malformed frame bytes are converted to a failure result before
+adapter preflight or physical mutation.
 
 Logical-table support therefore has a staged contract:
 

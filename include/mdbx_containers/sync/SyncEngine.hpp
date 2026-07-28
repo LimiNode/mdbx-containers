@@ -41,6 +41,7 @@
 #include "ChangeBatch.hpp"
 #include "ChangeBatchCodec.hpp"
 #include "ChangeOp.hpp"
+#include "LogicalChangeFrameCodec.hpp"
 #include "LogicalTableAdapter.hpp"
 #include "LogicalSchemaValidation.hpp"
 #include "protocol.hpp"
@@ -284,6 +285,44 @@ namespace sync {
             }
             m_conn->notify_sync_apply_observers(notification);
             return result;
+        }
+
+        /// \brief Applies a decoded logical change frame.
+        /// \details This helper is an explicit logical sync path. Raw
+        /// pull/push transport DTOs remain raw-DBI only.
+        LogicalApplyResult apply_logical_frame(
+                const LogicalChangeFrame& frame) {
+            return apply_logical_changes(frame.changes);
+        }
+
+        /// \brief Decodes and applies a logical change frame.
+        /// \details Malformed frame bytes fail closed as a logical apply
+        /// failure before any adapter preflight or physical mutation.
+        LogicalApplyResult apply_logical_frame_bytes(
+                const std::vector<std::uint8_t>& encoded,
+                const CodecBounds* bounds = nullptr) {
+            LogicalChangeFrame frame;
+            try {
+                frame = LogicalChangeFrameCodec::decode(encoded, bounds);
+            } catch (const std::exception& e) {
+                return LogicalApplyResult::failure(
+                    std::string("Logical change frame decode failed: ") +
+                    e.what());
+            } catch (...) {
+                return LogicalApplyResult::failure(
+                    "Logical change frame decode failed");
+            }
+
+            try {
+                return apply_logical_frame(frame);
+            } catch (const std::exception& e) {
+                return LogicalApplyResult::failure(
+                    std::string("Logical change frame apply failed: ") +
+                    e.what());
+            } catch (...) {
+                return LogicalApplyResult::failure(
+                    "Logical change frame apply failed");
+            }
         }
 
         /// \brief Applies a single \c ChangeBatch to local DBIs inside \p txn.
