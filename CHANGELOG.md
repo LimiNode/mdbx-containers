@@ -5,7 +5,8 @@ All notable changes to this project will be documented in this file.
 ## Unreleased
 - Added a non-blocking `Archcheck` GitHub Actions workflow that runs
   `archcheck --diff` through a pinned official action as an advisory
-  architecture signal on pull requests and manual dispatch.
+  architecture signal on pull requests, including stacked PRs, and manual
+  dispatch.
 - Added a persistent sync schema registry store for future logical table
   adapters. The registry records logical schema ids, table kinds, schema
   versions, and canonical sorted unique owned DBI names without enabling

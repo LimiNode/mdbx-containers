@@ -2,7 +2,6 @@ name: Archcheck
 
 on:
   pull_request:
-    branches: [ main, stable ]
   workflow_dispatch:
     inputs:
       revspec:
