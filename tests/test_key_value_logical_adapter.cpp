@@ -21,6 +21,8 @@ typedef mdbxc::sync::KeyValueTableLogicalAdapter<
     std::string,
     mdbxc::sync::KeyValueLogicalInt32Codec<long long>,
     StringValueCodec> LongLongInt32StringAdapter;
+typedef mdbxc::sync::KeyTableLogicalAdapter<int, IntKeyCodec>
+    IntKeyTableAdapter;
 
 static_assert(mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
                   std::int32_t>::value,
@@ -105,6 +107,17 @@ mdbxc::sync::LogicalSchemaRecord make_record(const std::string& dbi_name,
     mdbxc::sync::LogicalSchemaRecord record;
     record.dbi_name = dbi_name;
     record.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+    record.schema_version = version;
+    record.dbi_names.push_back(dbi_name);
+    return record;
+}
+
+mdbxc::sync::LogicalSchemaRecord make_key_table_record(
+        const std::string& dbi_name,
+        std::uint32_t version = 1) {
+    mdbxc::sync::LogicalSchemaRecord record;
+    record.dbi_name = dbi_name;
+    record.kind = mdbxc::sync::LogicalTableKind::KeyTable;
     record.schema_version = version;
     record.dbi_names.push_back(dbi_name);
     return record;
@@ -658,6 +671,87 @@ void test_key_value_logical_adapter_applies_through_sync_engine() {
     MDBXC_TEST_ASSERT(engine.unregister_logical_adapter(
         "app.logical_kv_engine.v1"));
     MDBXC_TEST_ASSERT(engine.logical_adapter_count() == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_table_logical_adapter_applies_through_sync_engine() {
+    const std::string path = "test_key_table_logical_adapter_engine.mdbx";
+    const std::string dbi_name = "logical_key_table_engine";
+    const std::string schema_id = "app.logical_key_table_engine.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x48), make_node(0xD1));
+    engine.register_logical_schema(
+        schema_id, make_key_table_record(dbi_name));
+
+    mdbxc::KeyTable<int> table(conn, dbi_name);
+    IntKeyTableAdapter adapter(table, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(adapter.make_insert(11));
+    changes.push_back(adapter.make_insert(12));
+    changes.push_back(adapter.make_delete(11));
+
+    mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(result.ok);
+    MDBXC_TEST_ASSERT(!table.contains(11));
+    MDBXC_TEST_ASSERT(table.contains(12));
+    MDBXC_TEST_ASSERT(table.count() == 1u);
+
+    changes.clear();
+    changes.push_back(adapter.make_clear());
+    result = engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(result.ok);
+    MDBXC_TEST_ASSERT(table.count() == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_table_logical_adapter_rejects_malformed_payload() {
+    const std::string path = "test_key_table_logical_adapter_malformed.mdbx";
+    const std::string dbi_name = "logical_key_table_malformed";
+    const std::string schema_id = "app.logical_key_table_malformed.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x49), make_node(0xD2));
+    engine.register_logical_schema(
+        schema_id, make_key_table_record(dbi_name));
+
+    mdbxc::KeyTable<int> table(conn, dbi_name);
+    IntKeyTableAdapter adapter(table, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalChange malformed = adapter.make_insert(5);
+    malformed.payload.push_back(0xffu);
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(malformed);
+
+    const mdbxc::sync::LogicalApplyResult result =
+        engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(!result.ok);
+    MDBXC_TEST_ASSERT(result.error.find("payload") != std::string::npos);
+    MDBXC_TEST_ASSERT(!table.contains(5));
 
     conn->disconnect();
     cleanup(path);
@@ -2603,6 +2697,8 @@ void test_key_value_logical_apply_does_not_recapture_incoming_change() {
 int main() {
     test_key_value_logical_adapter_applies_basic_ops();
     test_key_value_logical_adapter_applies_through_sync_engine();
+    test_key_table_logical_adapter_applies_through_sync_engine();
+    test_key_table_logical_adapter_rejects_malformed_payload();
     test_key_value_logical_adapter_engine_rejects_unknown_schema();
     test_key_value_logical_engine_rejects_missing_schema_marker();
     test_key_value_logical_engine_rejects_stale_schema_marker();

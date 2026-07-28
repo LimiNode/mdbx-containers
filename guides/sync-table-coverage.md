@@ -50,6 +50,11 @@ has three separate pieces that must not be treated as support by themselves:
 - `LogicalTableRegistry` reserves a two-phase preflight/apply path and validates
   the full schema tuple plus reserved flags before invoking adapters.
 
+`KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are the current
+explicit logical apply helpers. They are not connected to the transport
+pull/push path, and `KeyTableLogicalAdapter` does not yet provide a typed local
+capture session.
+
 Until a wrapper has a codec extension, a registered adapter, capture tests, and
 round-trip tests, it must remain in the deferred rows below and must not emit
 logical or raw `ChangeOp` records.

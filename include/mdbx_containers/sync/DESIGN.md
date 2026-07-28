@@ -574,20 +574,25 @@ define a retention policy and must not be used as a standalone pruning signal.
   must abort that transaction; the registry cannot roll back a transaction it
   does not own.
 
-`adapters/KeyValueTableLogicalAdapter.hpp` provides the first concrete adapter
-helper. It translates typed `KeyValueTable` upsert/delete/clear operations into
-adapter-owned logical payloads and applies them through
+`adapters/KeyValueTableLogicalAdapter.hpp` and
+`adapters/KeyTableLogicalAdapter.hpp` provide the first concrete adapter
+helpers. They translate typed table operations into adapter-owned logical
+payloads and apply them through
 `SyncEngine::apply_logical_changes()` or
 `LogicalTableRegistry::preflight_then_apply()` inside a caller-owned write
-transaction. It proves the adapter contract and payload shape for a simple
-table, but it is not yet connected to the automatic pull/push wire pipeline.
-The adapter also exposes an opt-in `LogicalCaptureSession`. The session owns a
-writable transaction, suppresses raw capture for its typed writes, buffers
-logical changes privately, and copies them to the caller only from
-`commit(out)`. Rollback, destruction, or commit failure discards the pending
-logical changes. Session construction validates the adapter against the
-persistent schema marker in the same writable transaction, before any local
-mutation can be performed.
+transaction. These helpers prove the adapter contract and payload shape for
+simple tables, but they are not yet connected to the automatic pull/push wire
+pipeline.
+`KeyValueTableLogicalAdapter` supports upsert/delete/clear and exposes an
+opt-in `LogicalCaptureSession`. The session owns a writable transaction,
+suppresses raw capture for its typed writes, buffers logical changes privately,
+and copies them to the caller only from `commit(out)`. Rollback, destruction,
+or commit failure discards the pending logical changes. Session construction
+validates the adapter against the persistent schema marker in the same writable
+transaction, before any local mutation can be performed.
+`KeyTableLogicalAdapter` currently supports apply-side insert/delete/clear
+only; a typed local capture session for key-only tables is deferred until the
+logical capture API is generalized beyond `KeyValueTable`.
 
 The adapter payload codec is not the table storage serializer. The initial
 codec surface is deliberately small and explicit: callers provide key/value
