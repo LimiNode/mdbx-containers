@@ -534,8 +534,14 @@ This delivery envelope provides routing validation and replay deduplication, but
 not ordered delivery. The receiver currently accepts envelopes from the same
 origin out of sequence, and it treats different `frame_id` values with the same
 `origin_sequence` as different delivery identities. Applications or transports
-that require ordered effects must serialize delivery externally until a later
-per-origin watermark/gap contract is added.
+that require ordered effects must serialize delivery externally.
+`check_logical_delivery_order()` provides a stateless helper for classifying an
+envelope against a caller-owned expected next sequence as in-order,
+behind the caller's watermark, or ahead with a sequence gap. It only classifies
+the numeric `origin_sequence`: it does not decide whether an envelope is an
+exact duplicate delivery identity, persist a watermark, buffer missing frames,
+or change `SyncEngine::apply_logical_delivery_envelope()` semantics. A future
+per-origin lifecycle PR should add persisted watermarks and pruning rules.
 
 `_mdbxc_logical_delivery` retention is currently permanent and unbounded. A
 future lifecycle PR should add an acknowledgement horizon or per-origin

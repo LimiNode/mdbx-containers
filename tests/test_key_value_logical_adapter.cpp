@@ -2046,6 +2046,38 @@ void test_key_value_logical_delivery_store_rejects_bad_marker_keys() {
         BadLogicalDeliveryMarkerKeyDigest, "digest");
 }
 
+void test_logical_delivery_order_status_helper() {
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.origin_sequence = 5;
+    envelope.frame_id = "frame-a";
+
+    mdbxc::sync::LogicalDeliveryOrderResult result =
+        mdbxc::sync::check_logical_delivery_order(envelope, 5);
+    MDBXC_TEST_ASSERT(
+        result.status == mdbxc::sync::LogicalDeliveryOrderStatus::InOrder);
+    MDBXC_TEST_ASSERT(result.expected_sequence == 5u);
+    MDBXC_TEST_ASSERT(result.observed_sequence == 5u);
+    MDBXC_TEST_ASSERT(result.can_apply_without_buffering());
+
+    result = mdbxc::sync::check_logical_delivery_order(envelope, 6);
+    MDBXC_TEST_ASSERT(
+        result.status ==
+        mdbxc::sync::LogicalDeliveryOrderStatus::SequenceBehindWatermark);
+    MDBXC_TEST_ASSERT(!result.can_apply_without_buffering());
+
+    envelope.frame_id = "frame-b";
+    result = mdbxc::sync::check_logical_delivery_order(envelope, 6);
+    MDBXC_TEST_ASSERT(
+        result.status ==
+        mdbxc::sync::LogicalDeliveryOrderStatus::SequenceBehindWatermark);
+    MDBXC_TEST_ASSERT(!result.can_apply_without_buffering());
+
+    result = mdbxc::sync::check_logical_delivery_order(envelope, 4);
+    MDBXC_TEST_ASSERT(
+        result.status == mdbxc::sync::LogicalDeliveryOrderStatus::SequenceGap);
+    MDBXC_TEST_ASSERT(!result.can_apply_without_buffering());
+}
+
 void test_key_value_logical_capture_session_discards_rollback() {
     const std::string path = "test_key_value_logical_adapter_session_rollback.mdbx";
     const std::string dbi_name = "logical_key_value_session_rollback";
@@ -2598,6 +2630,7 @@ int main() {
     test_key_value_logical_delivery_store_rejects_frame_id_bound();
     test_key_value_logical_delivery_store_lists_markers();
     test_key_value_logical_delivery_store_rejects_bad_marker_keys();
+    test_logical_delivery_order_status_helper();
     test_key_value_logical_capture_session_discards_rollback();
     test_key_value_logical_capture_session_requires_schema_marker();
     test_key_value_logical_capture_session_rejects_stale_marker();

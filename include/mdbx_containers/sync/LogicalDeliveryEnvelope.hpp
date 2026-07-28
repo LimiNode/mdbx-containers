@@ -28,6 +28,45 @@ namespace sync {
         LogicalChangeFrame frame;         ///< Logical payload.
     };
 
+    /// \brief Result of an external per-origin delivery ordering check.
+    enum class LogicalDeliveryOrderStatus {
+        InOrder, ///< Observed sequence equals expected next sequence.
+        SequenceBehindWatermark, ///< Observed sequence is below the watermark.
+        SequenceGap ///< Observed sequence is above expected next sequence.
+    };
+
+    /// \brief External ordering check outcome for one delivery envelope.
+    /// \details This helper is intentionally stateless. It does not persist a
+    /// watermark, buffer gaps, or affect engine apply semantics.
+    struct LogicalDeliveryOrderResult {
+        LogicalDeliveryOrderStatus status =
+            LogicalDeliveryOrderStatus::SequenceGap;
+        std::uint64_t expected_sequence = 0;
+        std::uint64_t observed_sequence = 0;
+
+        bool can_apply_without_buffering() const {
+            return status == LogicalDeliveryOrderStatus::InOrder;
+        }
+    };
+
+    /// \brief Classifies \p envelope against a caller-owned next sequence.
+    inline LogicalDeliveryOrderResult check_logical_delivery_order(
+            const LogicalDeliveryEnvelope& envelope,
+            std::uint64_t expected_next_sequence) {
+        LogicalDeliveryOrderResult out;
+        out.expected_sequence = expected_next_sequence;
+        out.observed_sequence = envelope.origin_sequence;
+        if (envelope.origin_sequence == expected_next_sequence) {
+            out.status = LogicalDeliveryOrderStatus::InOrder;
+        } else if (envelope.origin_sequence < expected_next_sequence) {
+            out.status =
+                LogicalDeliveryOrderStatus::SequenceBehindWatermark;
+        } else {
+            out.status = LogicalDeliveryOrderStatus::SequenceGap;
+        }
+        return out;
+    }
+
     /// \brief Returns true when \p id is all zeros.
     inline bool is_zero_sync_id(const NodeId& id) {
         const NodeId zero{};
