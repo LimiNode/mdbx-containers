@@ -53,6 +53,61 @@ namespace sync {
         std::string error;
     };
 
+    /// \brief Validates the structural acknowledgement wire contract.
+    inline void validate_logical_delivery_acknowledgement(
+            const LogicalDeliveryAcknowledgement& acknowledgement,
+            const CodecBounds* bounds = nullptr) {
+        if (is_zero_sync_id(acknowledgement.destination_db_uuid) ||
+            is_zero_sync_id(acknowledgement.origin_node_id)) {
+            throw std::runtime_error(
+                "Logical delivery acknowledgement identity is incomplete");
+        }
+        const CodecBounds& effective =
+            logical_delivery_effective_bounds(bounds);
+        if (acknowledgement.error.size() > effective.max_error_len) {
+            throw std::length_error(
+                "logical delivery acknowledgement error exceeds max_error_len");
+        }
+        if (acknowledgement.ok &&
+            (acknowledgement.retryable || !acknowledgement.error.empty())) {
+            throw std::runtime_error(
+                "Successful logical delivery acknowledgement is inconsistent");
+        }
+    }
+
+    /// \brief Validates an acknowledgement against the delivery it answers.
+    /// \details A successful response acknowledges exactly the delivered
+    /// sequence. A failed response may acknowledge only an earlier prefix.
+    inline void validate_logical_delivery_acknowledgement_for_delivery(
+            const LogicalDeliveryAcknowledgement& acknowledgement,
+            const LogicalDeliveryEnvelope& delivery,
+            const CodecBounds* bounds = nullptr) {
+        validate_logical_delivery_acknowledgement(acknowledgement, bounds);
+        if (compare_node_id(acknowledgement.destination_db_uuid,
+                            delivery.destination_db_uuid) != 0 ||
+            compare_node_id(acknowledgement.origin_node_id,
+                            delivery.origin_node_id) != 0) {
+            throw std::runtime_error(
+                "Logical delivery acknowledgement identity does not match delivery");
+        }
+        if (acknowledgement.acknowledged_through >
+            delivery.origin_sequence) {
+            throw std::runtime_error(
+                "Logical delivery acknowledgement exceeds delivered sequence");
+        }
+        if (acknowledgement.ok) {
+            if (acknowledgement.acknowledged_through !=
+                delivery.origin_sequence) {
+                throw std::runtime_error(
+                    "Successful logical delivery acknowledgement is incomplete");
+            }
+        } else if (acknowledgement.acknowledged_through >=
+                   delivery.origin_sequence) {
+            throw std::runtime_error(
+                "Failed logical delivery acknowledgement includes delivery");
+        }
+    }
+
     /// \brief Returns the only capabilities this protocol version understands.
     inline std::uint64_t logical_delivery_supported_capability_flags() {
         return static_cast<std::uint64_t>(
@@ -146,7 +201,7 @@ namespace sync {
         static std::vector<std::uint8_t> encode_acknowledgement(
                 const LogicalDeliveryAcknowledgement& acknowledgement,
                 const CodecBounds* bounds = nullptr) {
-            validate_acknowledgement(acknowledgement, bounds);
+            validate_logical_delivery_acknowledgement(acknowledgement, bounds);
             std::vector<std::uint8_t> out =
                 make_header(MessageType::Acknowledgement);
             append_id(out, acknowledgement.destination_db_uuid, bounds);
@@ -171,7 +226,7 @@ namespace sync {
             out.ok = read_bool(cur);
             out.retryable = read_bool(cur);
             out.error = read_string(cur, bounds);
-            validate_acknowledgement(out, bounds);
+            validate_logical_delivery_acknowledgement(out, bounds);
             check_consumed(cur);
             return out;
         }
@@ -220,27 +275,6 @@ namespace sync {
                 is_zero_sync_id(hello.db_uuid)) {
                 throw std::runtime_error(
                     "Logical delivery hello identity is incomplete");
-            }
-        }
-
-        static void validate_acknowledgement(
-                const LogicalDeliveryAcknowledgement& acknowledgement,
-                const CodecBounds* bounds) {
-            if (is_zero_sync_id(acknowledgement.destination_db_uuid) ||
-                is_zero_sync_id(acknowledgement.origin_node_id)) {
-                throw std::runtime_error(
-                    "Logical delivery acknowledgement identity is incomplete");
-            }
-            const CodecBounds& effective =
-                logical_delivery_effective_bounds(bounds);
-            if (acknowledgement.error.size() > effective.max_error_len) {
-                throw std::length_error(
-                    "logical delivery acknowledgement error exceeds max_error_len");
-            }
-            if (acknowledgement.ok &&
-                (acknowledgement.retryable || !acknowledgement.error.empty())) {
-                throw std::runtime_error(
-                    "Successful logical delivery acknowledgement is inconsistent");
             }
         }
 

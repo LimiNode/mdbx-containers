@@ -133,11 +133,34 @@ void test_protocol_rejects_invalid_header_and_acknowledgement() {
     }));
 }
 
+void test_acknowledgement_matches_its_delivery() {
+    const mdbxc::sync::LogicalDeliveryEnvelope envelope = make_envelope();
+    mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
+    acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+    acknowledgement.origin_node_id = envelope.origin_node_id;
+    acknowledgement.acknowledged_through = envelope.origin_sequence;
+    mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
+        acknowledgement, envelope);
+
+    acknowledgement.ok = false;
+    acknowledgement.retryable = true;
+    acknowledgement.error = "retry";
+    MDBXC_TEST_ASSERT(throws_runtime_error([&acknowledgement, &envelope]() {
+        mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
+            acknowledgement, envelope);
+    }));
+
+    acknowledgement.acknowledged_through = envelope.origin_sequence - 1u;
+    mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
+        acknowledgement, envelope);
+}
+
 } // namespace
 
 int main() {
     test_hello_round_trip_and_capability_negotiation();
     test_delivery_and_acknowledgement_round_trip();
     test_protocol_rejects_invalid_header_and_acknowledgement();
+    test_acknowledgement_matches_its_delivery();
     return 0;
 }
