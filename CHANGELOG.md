@@ -3,6 +3,12 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added persisted receiver-side ordering for the `OrderedDelivery` capability.
+  `SyncEngine::apply_ordered_logical_delivery_envelope()` accepts only the next
+  contiguous sequence per remote origin, returns a cumulative acknowledgement,
+  treats duplicates as no-ops, and reports gaps as retryable without adapter
+  mutation. `_mdbxc_logical_delivery_order` is created as a committed sync
+  system store; it requires one additional `Config::max_dbs` slot.
 - Added the versioned `LogicalDeliveryProtocol` wire contract with capability
   hello, nested delivery, and cumulative acknowledgement messages. The first
   optional capability is `OrderedDelivery`; unknown capability bits are not
