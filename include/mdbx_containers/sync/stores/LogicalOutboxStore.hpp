@@ -173,6 +173,22 @@ namespace sync {
             return read_metadata(txn, destination).acknowledged_through;
         }
 
+        /// \brief Returns the highest sequence durably allocated locally.
+        /// \details This is the sender's persisted known-tail bound. A peer
+        /// acknowledgement must never advance beyond it, including after the
+        /// sender restarts and redelivers an earlier pending entry.
+        std::uint64_t known_tail(MDBX_txn* txn,
+                                 const DbId& destination) const {
+            txn = checked_txn(txn, "LogicalOutboxStore::known_tail");
+            if (is_zero_sync_id(destination)) {
+                throw std::invalid_argument(
+                    "LogicalOutboxStore destination is zero");
+            }
+            open_existing(txn);
+            const Metadata metadata = read_metadata(txn, destination);
+            return metadata.next_sequence - 1u;
+        }
+
         /// \brief Advances one destination's cumulative acknowledgement.
         /// \return Number of deleted pending entries.
         std::size_t acknowledge_through(MDBX_txn* txn,
@@ -203,6 +219,10 @@ namespace sync {
             std::vector<std::uint8_t> first_key = prefix;
             detail::append_u64_be(first_key,
                                   metadata.acknowledged_through + 1u);
+            validate_acknowledgement_prefix(
+                txn, prefix, first_key, metadata.acknowledged_through + 1u,
+                sequence);
+
             MDBX_cursor* cursor = nullptr;
             check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
                        "LogicalOutboxStore acknowledgement cursor open failed");
@@ -224,6 +244,11 @@ namespace sync {
                 if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
                     check_mdbx(rc,
                                "LogicalOutboxStore acknowledgement cursor read failed");
+                }
+                if (removed != static_cast<std::size_t>(
+                        sequence - metadata.acknowledged_through)) {
+                    throw std::runtime_error(
+                        "LogicalOutboxStore acknowledgement delete count is invalid");
                 }
             } catch (...) {
                 mdbx_cursor_close(cursor);
@@ -340,6 +365,43 @@ namespace sync {
                     "LogicalOutboxStore entry key has invalid prefix");
             }
             return detail::read_u64_be(bytes + entry_prefix_size());
+        }
+
+        void validate_acknowledgement_prefix(
+                MDBX_txn* txn,
+                const std::vector<std::uint8_t>& prefix,
+                const std::vector<std::uint8_t>& first_key,
+                std::uint64_t first_sequence,
+                std::uint64_t last_sequence) const {
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalOutboxStore acknowledgement validation cursor open failed");
+            try {
+                std::uint64_t expected = first_sequence;
+                MDBX_val key = make_val(first_key);
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_SET_RANGE);
+                while (expected <= last_sequence) {
+                    if (rc != MDBX_SUCCESS || !has_entry_prefix(key, prefix) ||
+                        decode_entry_sequence(key) != expected) {
+                        throw std::runtime_error(
+                            "LogicalOutboxStore acknowledgement prefix is not contiguous");
+                    }
+                    if (expected == last_sequence) {
+                        break;
+                    }
+                    ++expected;
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalOutboxStore acknowledgement validation cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
         }
 
         Metadata read_metadata(MDBX_txn* txn,

@@ -3281,6 +3281,8 @@ void test_logical_outbox_persists_ordered_destination_streams() {
         MDBXC_TEST_ASSERT(pending_a[1].origin_sequence == 2u);
         MDBXC_TEST_ASSERT(pending_b.size() == 1u);
         MDBXC_TEST_ASSERT(pending_b[0].origin_sequence == 1u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_a) == 2u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_b) == 1u);
 
         bool origin_mismatch_caught = false;
         {
@@ -3303,6 +3305,7 @@ void test_logical_outbox_persists_ordered_destination_streams() {
             engine.acknowledge_logical_deliveries(destination_a, 1u) == 1u);
         MDBXC_TEST_ASSERT(
             engine.logical_delivery_acknowledged_through(destination_a) == 1u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_a) == 2u);
         MDBXC_TEST_ASSERT(
             engine.acknowledge_logical_deliveries(destination_a, 1u) == 0u);
         const std::vector<mdbxc::sync::LogicalDeliveryEnvelope> after_ack =
@@ -3328,10 +3331,12 @@ void test_logical_outbox_persists_ordered_destination_streams() {
         MDBXC_TEST_ASSERT(pending[0].origin_sequence == 2u);
         MDBXC_TEST_ASSERT(
             engine.logical_delivery_acknowledged_through(destination_a) == 1u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_a) == 2u);
         const mdbxc::sync::LogicalDeliveryEnvelope next =
             engine.enqueue_logical_delivery(
                 destination_a, make_outbox_test_frame("app.outbox.a", 5u));
         MDBXC_TEST_ASSERT(next.origin_sequence == 3u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_a) == 3u);
         MDBXC_TEST_ASSERT(
             engine.acknowledge_logical_deliveries(destination_a, 3u) == 2u);
         MDBXC_TEST_ASSERT(
@@ -3342,6 +3347,73 @@ void test_logical_outbox_persists_ordered_destination_streams() {
         conn->disconnect();
     }
 
+    cleanup(path);
+}
+
+void test_logical_outbox_acknowledgement_gap_preserves_caller_transaction() {
+    const std::string path = "test_logical_outbox_acknowledgement_gap.mdbx";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    const mdbxc::sync::NodeId local_node = make_node(0xD1);
+    const mdbxc::sync::DbId local_db = make_node(0xE1);
+    const mdbxc::sync::DbId destination = make_node(0xF1);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+    engine.enqueue_logical_delivery(
+        destination, make_outbox_test_frame("app.outbox.gap", 1u));
+    engine.enqueue_logical_delivery(
+        destination, make_outbox_test_frame("app.outbox.gap", 2u));
+    engine.enqueue_logical_delivery(
+        destination, make_outbox_test_frame("app.outbox.gap", 3u));
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        mdbxc::sync::LogicalOutboxStore outbox(conn->env_handle());
+        const MDBX_dbi dbi = outbox.handle(txn.handle());
+        std::vector<std::uint8_t> key;
+        key.reserve(2u + destination.size() + 8u);
+        key.push_back(1u);
+        key.push_back(1u);
+        key.insert(key.end(), destination.begin(), destination.end());
+        mdbxc::sync::detail::append_u64_be(key, 2u);
+        MDBX_val raw_key = {
+            key.empty() ? nullptr : &key[0],
+            key.size()
+        };
+        MDBXC_TEST_ASSERT(mdbx_del(txn.handle(), dbi, &raw_key, nullptr) ==
+                          MDBX_SUCCESS);
+        txn.commit();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        mdbxc::sync::LogicalOutboxStore outbox(conn->env_handle());
+        bool rejected = false;
+        try {
+            outbox.acknowledge_through(txn.handle(), destination, 3u);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        MDBXC_TEST_ASSERT(rejected);
+        txn.commit();
+    }
+
+    MDBXC_TEST_ASSERT(
+        engine.logical_delivery_acknowledged_through(destination) == 0u);
+    const std::vector<mdbxc::sync::LogicalDeliveryEnvelope> pending =
+        engine.pending_logical_deliveries(destination);
+    MDBXC_TEST_ASSERT(pending.size() == 2u);
+    MDBXC_TEST_ASSERT(pending[0].origin_sequence == 1u);
+    MDBXC_TEST_ASSERT(pending[1].origin_sequence == 3u);
+
+    conn->disconnect();
     cleanup(path);
 }
 
@@ -3681,6 +3753,7 @@ int main() {
     test_key_value_logical_adapter_decodes_literal_little_endian_payload();
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     test_logical_outbox_persists_ordered_destination_streams();
+    test_logical_outbox_acknowledgement_gap_preserves_caller_transaction();
     test_ordered_logical_delivery_enforces_receiver_frontier();
     test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers();
     test_ordered_logical_delivery_loopback_cleans_outbox();
