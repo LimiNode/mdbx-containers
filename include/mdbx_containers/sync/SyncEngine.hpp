@@ -704,8 +704,9 @@ namespace sync {
         }
 
         /// \brief Delivers a pending ordered outbox prefix to one capable peer.
-        /// \details A valid cumulative acknowledgement first advances the local
-        /// outbox frontier, even when the peer reports a later retryable gap.
+        /// \details A validated cumulative acknowledgement first advances the
+        /// local outbox frontier. A failed acknowledgement can advance only an
+        /// earlier prefix; it can never acknowledge the delivery that failed.
         /// Existing raw sync peers do not implement \c ILogicalDeliveryPeer and
         /// therefore cannot be passed to this opt-in API.
         LogicalDeliveryDispatchResult deliver_pending_logical_deliveries(
@@ -735,17 +736,12 @@ namespace sync {
                 for (std::size_t i = 0; i < pending.size(); ++i) {
                     const LogicalDeliveryAcknowledgement acknowledgement =
                         peer.deliver_ordered_logical_delivery(pending[i], bounds);
-                    if (compare_node_id(acknowledgement.destination_db_uuid,
-                                        destination) != 0 ||
-                        compare_node_id(acknowledgement.origin_node_id,
-                                        local.node_id) != 0) {
+                    try {
+                        validate_logical_delivery_acknowledgement_for_delivery(
+                            acknowledgement, pending[i], bounds);
+                    } catch (const std::exception& e) {
                         return LogicalDeliveryDispatchResult::failure(
-                            "Logical delivery peer acknowledgement identity mismatch");
-                    }
-                    if (acknowledgement.acknowledged_through >
-                        pending[i].origin_sequence) {
-                        return LogicalDeliveryDispatchResult::failure(
-                            "Logical delivery peer acknowledgement exceeds delivery");
+                            e.what());
                     }
                     if (acknowledgement.acknowledged_through >
                         out.acknowledged_through) {
@@ -760,11 +756,6 @@ namespace sync {
                         out.retryable = acknowledgement.retryable;
                         out.error = acknowledgement.error;
                         return out;
-                    }
-                    if (acknowledgement.acknowledged_through <
-                        pending[i].origin_sequence) {
-                        return LogicalDeliveryDispatchResult::failure(
-                            "Successful logical delivery acknowledgement is behind delivery");
                     }
                     ++out.delivered;
                 }
