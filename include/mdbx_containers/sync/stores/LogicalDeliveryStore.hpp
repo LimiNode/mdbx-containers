@@ -293,12 +293,12 @@ namespace sync {
         }
 
         bool open_watermark_if_exists(MDBX_txn* txn) const {
+            if (!named_dbi_exists(txn, m_watermark_dbi_name)) {
+                return false;
+            }
             const int rc = mdbx_dbi_open(
                 txn, m_watermark_dbi_name.c_str(),
                 static_cast<MDBX_db_flags_t>(0), &m_watermark_dbi);
-            if (rc == MDBX_NOTFOUND) {
-                return false;
-            }
             check_mdbx(rc, "Failed to open LogicalDeliveryStore watermark DBI");
             return true;
         }
@@ -312,10 +312,39 @@ namespace sync {
                                      MDBX_dbi& dbi) {
             int rc = mdbx_dbi_open(txn, name.c_str(), MDBX_CREATE, &dbi);
             if (rc == MDBX_EACCESS) {
+                if (!named_dbi_exists(txn, name)) {
+                    check_mdbx(MDBX_NOTFOUND,
+                               "Failed to open LogicalDeliveryStore DBI");
+                }
                 rc = mdbx_dbi_open(txn, name.c_str(),
                                    static_cast<MDBX_db_flags_t>(0), &dbi);
             }
             check_mdbx(rc, "Failed to open LogicalDeliveryStore DBI");
+        }
+
+        static bool named_dbi_exists(MDBX_txn* txn,
+                                     const std::string& name) {
+            // Check the main DB first so a missing named DBI is not opened.
+            MDBX_dbi main_dbi = 0;
+            check_mdbx(
+                mdbx_dbi_open(
+                    txn,
+                    static_cast<const char*>(MDBX_CHK_MAIN),
+                    static_cast<MDBX_db_flags_t>(0),
+                    &main_dbi),
+                "Failed to open main DBI while checking LogicalDeliveryStore DBI");
+            MDBX_val key = {
+                const_cast<char*>(name.data()),
+                name.size()
+            };
+            MDBX_val value;
+            const int rc = mdbx_get(txn, main_dbi, &key, &value);
+            if (rc == MDBX_NOTFOUND) {
+                return false;
+            }
+            check_mdbx(rc,
+                       "Failed to inspect LogicalDeliveryStore DBI");
+            return true;
         }
 
         std::uint64_t read_watermark(MDBX_txn* txn,

@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Fixed `LogicalDeliveryStore` probing of absent optional DBIs. It now checks
+  the main DB before attempting a read-only named-DBI open, so a missing
+  logical-delivery watermark remains a normal legacy-layout condition in both
+  Debug and Release builds.
 - Added negotiated `CumulativeAcknowledgement` for ordered logical delivery.
   Sender outbox metadata now exposes a durable known-tail bound, allowing a
   receiver-ahead duplicate acknowledgement to clean a verified contiguous
