@@ -3281,6 +3281,8 @@ void test_logical_outbox_persists_ordered_destination_streams() {
         MDBXC_TEST_ASSERT(pending_a[1].origin_sequence == 2u);
         MDBXC_TEST_ASSERT(pending_b.size() == 1u);
         MDBXC_TEST_ASSERT(pending_b[0].origin_sequence == 1u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_a) == 2u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_b) == 1u);
 
         bool origin_mismatch_caught = false;
         {
@@ -3303,6 +3305,7 @@ void test_logical_outbox_persists_ordered_destination_streams() {
             engine.acknowledge_logical_deliveries(destination_a, 1u) == 1u);
         MDBXC_TEST_ASSERT(
             engine.logical_delivery_acknowledged_through(destination_a) == 1u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_a) == 2u);
         MDBXC_TEST_ASSERT(
             engine.acknowledge_logical_deliveries(destination_a, 1u) == 0u);
         const std::vector<mdbxc::sync::LogicalDeliveryEnvelope> after_ack =
@@ -3328,10 +3331,12 @@ void test_logical_outbox_persists_ordered_destination_streams() {
         MDBXC_TEST_ASSERT(pending[0].origin_sequence == 2u);
         MDBXC_TEST_ASSERT(
             engine.logical_delivery_acknowledged_through(destination_a) == 1u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_a) == 2u);
         const mdbxc::sync::LogicalDeliveryEnvelope next =
             engine.enqueue_logical_delivery(
                 destination_a, make_outbox_test_frame("app.outbox.a", 5u));
         MDBXC_TEST_ASSERT(next.origin_sequence == 3u);
+        MDBXC_TEST_ASSERT(engine.logical_delivery_known_tail(destination_a) == 3u);
         MDBXC_TEST_ASSERT(
             engine.acknowledge_logical_deliveries(destination_a, 3u) == 2u);
         MDBXC_TEST_ASSERT(

@@ -173,6 +173,22 @@ namespace sync {
             return read_metadata(txn, destination).acknowledged_through;
         }
 
+        /// \brief Returns the highest sequence durably allocated locally.
+        /// \details This is the sender's persisted known-tail bound. A peer
+        /// acknowledgement must never advance beyond it, including after the
+        /// sender restarts and redelivers an earlier pending entry.
+        std::uint64_t known_tail(MDBX_txn* txn,
+                                 const DbId& destination) const {
+            txn = checked_txn(txn, "LogicalOutboxStore::known_tail");
+            if (is_zero_sync_id(destination)) {
+                throw std::invalid_argument(
+                    "LogicalOutboxStore destination is zero");
+            }
+            open_existing(txn);
+            const Metadata metadata = read_metadata(txn, destination);
+            return metadata.next_sequence - 1u;
+        }
+
         /// \brief Advances one destination's cumulative acknowledgement.
         /// \return Number of deleted pending entries.
         std::size_t acknowledge_through(MDBX_txn* txn,
@@ -207,6 +223,7 @@ namespace sync {
             check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
                        "LogicalOutboxStore acknowledgement cursor open failed");
             std::size_t removed = 0u;
+            std::uint64_t expected = metadata.acknowledged_through + 1u;
             try {
                 MDBX_val key = make_val(first_key);
                 MDBX_val value;
@@ -216,14 +233,23 @@ namespace sync {
                     if (current > sequence) {
                         break;
                     }
+                    if (current != expected) {
+                        throw std::runtime_error(
+                            "LogicalOutboxStore acknowledgement prefix is not contiguous");
+                    }
                     check_mdbx(mdbx_cursor_del(cursor, MDBX_CURRENT),
                                "LogicalOutboxStore acknowledgement delete failed");
                     ++removed;
+                    ++expected;
                     rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
                 }
                 if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
                     check_mdbx(rc,
                                "LogicalOutboxStore acknowledgement cursor read failed");
+                }
+                if (expected != sequence + 1u) {
+                    throw std::runtime_error(
+                        "LogicalOutboxStore acknowledgement prefix is incomplete");
                 }
             } catch (...) {
                 mdbx_cursor_close(cursor);

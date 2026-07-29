@@ -703,6 +703,16 @@ namespace sync {
             return outbox.acknowledged_through(txn.handle(), destination);
         }
 
+        /// \brief Returns the highest locally persisted delivery sequence.
+        /// \details This durable value bounds any cumulative acknowledgement
+        /// accepted from a peer, including after a sender restart.
+        std::uint64_t logical_delivery_known_tail(
+                const DbId& destination) const {
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            return outbox.known_tail(txn.handle(), destination);
+        }
+
         /// \brief Delivers a pending ordered outbox prefix to one capable peer.
         /// \details A validated cumulative acknowledgement first advances the
         /// local outbox frontier. A failed acknowledgement can advance only an
