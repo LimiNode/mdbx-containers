@@ -381,6 +381,37 @@ Avoid it when:
 - Dense positional access is needed. Use an in-memory `std::vector`.
 - Key-value semantics with arbitrary keys are needed. Use `KeyValueTable`.
 
+## TableSequence
+
+`TableSequence` is a per-table allocator for positive uint64_t identifiers. It
+binds to an existing table wrapper and uses MDBX's table sequence metadata; it
+does not inspect or write the table's records.
+
+Use it when a transaction needs an identifier that must commit atomically with
+other table writes:
+
+```cpp
+mdbxc::KeyValueTable<uint64_t, std::string> orders(conn, "orders");
+mdbxc::TableSequence order_ids(orders);
+
+auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+const uint64_t id = order_ids.next(txn);
+orders.insert(id, "new", txn);
+txn.commit();
+```
+
+- `current(txn)` reads the last allocated value. It accepts read-only or
+  writable transactions.
+- `next(txn)` reserves one identifier and returns it.
+- `reserve(count, txn)` reserves a contiguous range and returns its first id.
+- Allocation is local to one MDBX DBI, starts at 1, and is committed or rolled
+  back with the supplied writable transaction.
+- It is not a cross-database or cross-replica identity scheme. Do not use it
+  as a distributed identifier allocator.
+- Its MDBX sequence metadata is not represented as a separate sync change
+  operation. Replicas must not rely on independently allocated sequence values
+  being equal.
+
 `KeyMultiValueTable<K, V>` is the multimap-like table. It stores multiple values
 for the same key and preserves exact repeated `(key, value)` pairs.
 

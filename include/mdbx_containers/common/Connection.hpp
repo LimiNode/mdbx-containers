@@ -29,6 +29,7 @@
 
 namespace mdbxc {
     class BaseTable;
+    class TableSequence;
     class VectorStore;
 
     namespace sync {
@@ -62,6 +63,7 @@ namespace mdbxc {
 #   endif
     private:
         friend class BaseTable;
+        friend class TableSequence;
 #   if MDBXC_SYNC_ENABLED
         friend class sync::SyncCaptureScope;
 #   endif

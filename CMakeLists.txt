@@ -433,6 +433,7 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/KeyTable.hpp
         mdbx_containers/KeyValueTable.hpp
         mdbx_containers/SequenceTable.hpp
+        mdbx_containers/TableSequence.hpp
         mdbx_containers/ValueTable.hpp
     )
     set(MDBXC_SYNC_STANDALONE_HEADERS
