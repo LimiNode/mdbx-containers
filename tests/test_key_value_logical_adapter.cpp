@@ -1081,6 +1081,8 @@ void test_key_multi_value_logical_capture_session_rolls_back_on_outbox_failure()
     IntStringMultiAdapter adapter(table, schema_id);
     ThrowingLogicalDeliveryOutbox outbox;
     bool caught = false;
+    bool commit_rejected = false;
+    bool retry_rejected = false;
     {
         std::unique_ptr<IntStringMultiAdapter::LogicalCaptureSession> session =
             adapter.begin_capture_session();
@@ -1090,9 +1092,28 @@ void test_key_multi_value_logical_capture_session_rolls_back_on_outbox_failure()
         } catch (const std::runtime_error&) {
             caught = true;
         }
+        MDBXC_TEST_ASSERT(session->pending_size() == 0u);
+
+        std::vector<mdbxc::sync::LogicalChange> changes;
+        try {
+            session->commit(changes);
+        } catch (const std::logic_error&) {
+            commit_rejected = true;
+        }
+        MDBXC_TEST_ASSERT(changes.empty());
+
+        try {
+            session->commit_to_outbox(outbox, make_node(0xDB));
+        } catch (const std::logic_error&) {
+            retry_rejected = true;
+        }
     }
     MDBXC_TEST_ASSERT(caught);
+    MDBXC_TEST_ASSERT(commit_rejected);
+    MDBXC_TEST_ASSERT(retry_rejected);
     MDBXC_TEST_ASSERT(table.count() == 0u);
+    MDBXC_TEST_ASSERT(
+        engine.pending_logical_deliveries(make_node(0xDB)).empty());
 
     conn->disconnect();
     cleanup(path);

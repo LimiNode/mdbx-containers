@@ -117,8 +117,9 @@ namespace sync {
         /// operations exposed by this class; direct table calls, bulk
         /// reconciliation, and range erasure remain local-only operations.
         /// The adapter, table, and connection referenced by the adapter must
-        /// outlive the session. If a mutation throws after it begins, the
-        /// session rolls back its transaction and becomes inactive.
+        /// outlive the session. If a session operation throws after it begins,
+        /// the session requests rollback of its transaction and becomes
+        /// inactive.
         class LogicalCaptureSession {
         public:
             explicit LogicalCaptureSession(
@@ -169,7 +170,7 @@ namespace sync {
                     }
                     return removed;
                 } catch (...) {
-                    abort_after_mutation_failure(previous_size);
+                    rollback_and_deactivate();
                     throw;
                 }
             }
@@ -190,7 +191,7 @@ namespace sync {
                     }
                     return removed;
                 } catch (...) {
-                    abort_after_mutation_failure(previous_size);
+                    rollback_and_deactivate();
                     throw;
                 }
             }
@@ -216,6 +217,7 @@ namespace sync {
                     out.erase(out.begin() +
                               static_cast<std::ptrdiff_t>(old_size),
                               out.end());
+                    rollback_and_deactivate();
                     throw;
                 }
                 m_pending.clear();
@@ -230,25 +232,25 @@ namespace sync {
                 ensure_active();
                 LogicalChangeFrame frame;
                 frame.changes = m_pending;
-                const LogicalDeliveryEnvelope envelope =
-                    outbox.enqueue_logical_delivery(
-                        m_txn.handle(), destination, frame, bounds);
-                m_txn.commit();
-                m_pending.clear();
-                m_active = false;
-                return envelope;
+                try {
+                    const LogicalDeliveryEnvelope envelope =
+                        outbox.enqueue_logical_delivery(
+                            m_txn.handle(), destination, frame, bounds);
+                    m_txn.commit();
+                    m_pending.clear();
+                    m_active = false;
+                    return envelope;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
             }
 
             void rollback() noexcept {
                 if (!m_active) {
                     return;
                 }
-                try {
-                    m_pending.clear();
-                    m_txn.rollback();
-                } catch (...) {
-                }
-                m_active = false;
+                rollback_and_deactivate();
             }
 
             std::size_t pending_size() const {
@@ -259,24 +261,21 @@ namespace sync {
             template<class Mutation>
             void append_then_mutate(const LogicalChange& change,
                                     const Mutation& mutation) {
-                const std::size_t previous_size = m_pending.size();
                 m_pending.push_back(change);
                 try {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_adapter.m_table.connection(), m_txn.handle());
                     mutation();
                 } catch (...) {
-                    abort_after_mutation_failure(previous_size);
+                    rollback_and_deactivate();
                     throw;
                 }
             }
 
-            void abort_after_mutation_failure(
-                    std::size_t previous_size) noexcept {
+            void rollback_and_deactivate() noexcept {
                 try {
-                    m_pending.resize(previous_size);
-                } catch (...) {
                     m_pending.clear();
+                } catch (...) {
                 }
                 try {
                     m_txn.rollback();
