@@ -13,7 +13,9 @@ rules, see [Sync table coverage matrix](sync-table-coverage.md).
   `ThreadLocalChangeAccumulator` is attached to the writing `Connection`;
   `SyncCaptureScope` provides RAII attach/restore for write phases.
 - `VectorStore` is covered indirectly through its internal `SequenceTable` and
-  `KeyValueTable` members.
+  `KeyValueTable` members. This is raw physical replication only: use one
+  authoritative or externally serialized writer per collection. It is not a
+  multi-writer logical `VectorStore` contract.
 - Standalone writes become standalone sync batches; an explicit transaction
   spanning multiple supported tables becomes one local atomic batch.
 - Reads, scans, vector search, and other non-mutating APIs are not captured.

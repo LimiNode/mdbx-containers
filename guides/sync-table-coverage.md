@@ -18,7 +18,7 @@ values during transport, and remote apply replays the captured physical
 | `KeyTable<K>` | Supported | `Put`, `Delete`, `ClearTable`; insert, erase, range erase, and clear paths are implemented. | Raw key bytes are replayed with empty values. | `test_sync_capture`, `test_sync_engine`, `test_sync_replication` |
 | `ValueTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; set, insert, update, erase, and clear paths are implemented. | The singleton physical key and serialized value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
 | `SequenceTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; append, `insert_or_assign`, erase, and clear paths are implemented. | Stable `uint64_t` sequence keys and value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
-| `VectorStore` | Indirectly supported | Captured through its internal `SequenceTable` and `KeyValueTable` members. | The internal table operations are replicated; `VectorStore` has no separate wire type. Already-open instances compare `Connection::sync_apply_generation()` and lazily rebuild their RAM index before index-dependent operations after remote apply. A connection apply/read barrier serializes remote `handle_push()` apply commits with cache-backed `VectorStore` operations. Each `VectorStore` instance serializes its own methods; C++17 builds let different readers share the connection read side, while C++11 builds use an exclusive connection mutex fallback. | `test_sync_capture`, `test_sync_replication` |
+| `VectorStore` | Indirectly supported | Captured through its internal `SequenceTable` and `KeyValueTable` members. | The internal table operations are replicated; `VectorStore` has no separate wire type. This raw path requires one authoritative or externally serialized writer per collection. Already-open instances compare `Connection::sync_apply_generation()` and lazily rebuild their RAM index before index-dependent operations after remote apply. A connection apply/read barrier serializes remote `handle_push()` apply commits with cache-backed `VectorStore` operations. Each `VectorStore` instance serializes its own methods; C++17 builds let different readers share the connection read side, while C++11 builds use an exclusive connection mutex fallback. | `test_sync_capture`, `test_sync_replication` |
 | `AnyValueTable<K>` | Deferred | No `ChangeOp` in v0.1. | Not applied by sync as a typed heterogeneous table. | `test_sync_capture` negative coverage |
 | `KeyMultiValueTable<K, V>` | Deferred | No `ChangeOp` in v0.1. | DUPSORT duplicate multiplicity and unordered multiset semantics are deferred. | `test_sync_capture` negative coverage |
 | `KeyOrderedMultiValueTable<K, V>` | Deferred | No `ChangeOp` in v0.1. | Per-key append order is explicit in local storage, but sync capture/apply is deferred until ordered multi-value wire semantics are tested. | `test_sync_capture` negative coverage |
@@ -61,6 +61,21 @@ logical or raw `ChangeOp` records.
 Focused capture and round-trip tests currently cover representative write,
 delete, bulk, range-erase, wrapper-specific `ClearTable`, indirect
 `VectorStore`, and deferred-table negative paths.
+
+## VectorStore Raw Replication Boundary
+
+`VectorStore` currently participates only through raw replication of its four
+internal DBIs: ids, embeddings, text, and metadata. This supports a
+leader/follower topology or an application that serializes writers externally.
+It does not provide a distributed id allocator, cross-node conflict resolution,
+or a logical `VectorStore` wire type.
+
+Replicas must use the same collection name, vector metric, and compatible
+embedding serialization. A remote apply invalidates an already-open store's
+RAM index through the connection generation and it rebuilds lazily before the
+next index-dependent operation. A future multi-DBI logical adapter needs a
+global record identity scheme and explicit ordering/conflict policy before this
+restriction can be relaxed.
 
 ## Deferred Table Rules
 

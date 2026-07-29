@@ -93,7 +93,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `KeyTable` | Supported | Captures insert/delete, range erase, reconcile/clear paths that operate on physical keys. |
 | `ValueTable` | Supported | Captures singleton put/delete/clear using its fixed physical key. |
 | `SequenceTable` | Supported | Captures set/append/delete/clear against stable `uint64_t` record ids. `append()` remains a local single-writer helper; external synchronization is still required for concurrent appenders. |
-| `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
+| `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Not supported in v0.1 | Deferred until unordered multiset replication and DUPSORT duplicate-value payload framing are implemented and tested. |
 | `KeyOrderedMultiValueTable` | Not supported in v0.1 | Local ordered multi-value table exists, but sync capture/apply is deferred until ordered-history wire identity and conflict semantics are specified and tested. |
@@ -107,6 +107,16 @@ new wire-format semantics.
 be non-empty and contain only ASCII letters, digits, `_`, and `-`; unsupported
 characters are rejected before internal DBI names are built. This prevents
 different logical collections from collapsing to the same physical DBI names.
+
+`VectorStore` sync is currently a raw physical replication path over its ids,
+embeddings, text, and metadata DBIs. Replicas must agree on collection name,
+vector metric, and embedding serialization. `VectorStore::add()` assigns ids
+from local table state, so concurrent independent writers can collide and have
+no conflict-resolution rule. The supported topology is therefore
+leader/follower or application-serialized writers per collection. A future
+multi-DBI logical adapter must introduce a global record identity scheme and
+explicit ordering/conflict semantics; raw capture must not be presented as that
+adapter.
 
 `Connection::sync_apply_generation()` is a coarse invalidation marker for sync
 apply commits. `SyncEngine::handle_push()` increments it after a successful
