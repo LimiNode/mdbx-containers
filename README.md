@@ -61,8 +61,11 @@
   raw physical replication for a leader/follower or otherwise externally
   serialized writer per collection, not multi-writer logical replication.
 - `AnyValueTable`, `KeyMultiValueTable`, `KeyOrderedMultiValueTable`, and
-  `HashedKeyValueStore` are not replicated in v0.1. `KeyMultiValueTable` has a
-  deferred unordered multiset sync design in `sync/DESIGN.md`.
+  `HashedKeyValueStore` are not raw-replicated in v0.1.
+  `KeyMultiValueTableLogicalAdapter` provides opt-in logical capture for
+  unordered `insert`, key erase, all-matching-value erase, and clear under a single writer
+  or causally serialized updates. Raw calls, `append`, `reconcile`, and range
+  erase remain outside that adapter scope. See `sync/DESIGN.md`.
   `KeyOrderedMultiValueTable` is the order-sensitive table API, but its sync
   capture/apply contract remains disabled until capture and round-trip tests
   exist. `AnyValueTable` and `HashedKeyValueStore` still need type-tag and
