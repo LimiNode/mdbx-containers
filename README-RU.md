@@ -83,7 +83,9 @@
   перед подключением `mdbx_containers/sync.hpp`.
 - v0.1 захватывает обычные write-path'ы `KeyValueTable`, `KeyTable`,
   `ValueTable` и `SequenceTable`; `VectorStore` реплицируется косвенно через
-  внутренние `SequenceTable` и `KeyValueTable`.
+  внутренние `SequenceTable` и `KeyValueTable`. Это raw physical репликация
+  для leader/follower либо для одного внешне сериализованного writer'а на
+  коллекцию, а не multi-writer logical репликация.
 - `AnyValueTable`, `KeyMultiValueTable`, `KeyOrderedMultiValueTable` и
   `HashedKeyValueStore` не реплицируются в v0.1. Для `KeyMultiValueTable` в
   `sync/DESIGN.md` описан отложенный unordered multiset sync design.
@@ -271,6 +273,14 @@ metadata filtering и генерация embeddings не входят в обл�
 
 Имена коллекций валидируются, а не переписываются: используйте непустые имена
 только из ASCII-букв, цифр, `_` и `-`.
+
+Сейчас sync воспроизводит четыре внутренних DBI этого store как raw physical
+изменения. На всех replica используйте одно имя коллекции, одну vector metric
+и совместимый embedding codec. У коллекции должен быть один authoritative
+writer либо приложение должно внешне сериализовать всех writer'ов: локальный
+`add()` выделяет id из локального состояния и не даёт cross-node identity
+allocation или conflict resolution. Logical sync adapter для `VectorStore`
+пока отсутствует.
 
 ```cpp
 #include <mdbx_containers/vector.hpp>
