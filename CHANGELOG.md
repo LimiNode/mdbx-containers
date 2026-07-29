@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added negotiated `CumulativeAcknowledgement` for ordered logical delivery.
+  Sender outbox metadata now exposes a durable known-tail bound, allowing a
+  receiver-ahead duplicate acknowledgement to clean a verified contiguous
+  prefix after sender restart. Legacy envelope-only delivery peers remain on
+  the conservative exact-sequence acknowledgement contract.
 - Added capability-gated ordered logical delivery dispatch through
   `ILogicalDeliveryPeer`, including the in-process `DirectLogicalDeliveryPeer`.
   Valid cumulative acknowledgements clean the matching sender outbox prefix;

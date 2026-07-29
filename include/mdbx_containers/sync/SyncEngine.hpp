@@ -735,9 +735,10 @@ namespace sync {
         }
 
         /// \brief Delivers a pending ordered outbox prefix to one capable peer.
-        /// \details A validated cumulative acknowledgement first advances the
-        /// local outbox frontier. A failed acknowledgement can advance only an
-        /// earlier prefix; it can never acknowledge the delivery that failed.
+        /// \details A negotiated cumulative acknowledgement can advance through
+        /// the sender's persisted known tail, including after restart. A failed
+        /// acknowledgement can advance only an earlier prefix; it can never
+        /// acknowledge the delivery that failed.
         /// Existing raw sync peers do not implement \c ILogicalDeliveryPeer and
         /// therefore cannot be passed to this opt-in API.
         LogicalDeliveryDispatchResult deliver_pending_logical_deliveries(
@@ -758,18 +759,32 @@ namespace sync {
                     return LogicalDeliveryDispatchResult::failure(
                         "Logical delivery peer does not support OrderedDelivery");
                 }
+                const bool cumulative_acknowledgement_negotiated =
+                    logical_delivery_capability_negotiated(
+                        local.capabilities, remote.capabilities,
+                        LogicalDeliveryCapability::CumulativeAcknowledgement);
 
                 LogicalDeliveryDispatchResult out;
                 const std::vector<LogicalDeliveryEnvelope> pending =
                     pending_logical_deliveries(destination, limit, bounds);
                 out.acknowledged_through =
                     logical_delivery_acknowledged_through(destination);
+                const std::uint64_t known_tail =
+                    logical_delivery_known_tail(destination);
                 for (std::size_t i = 0; i < pending.size(); ++i) {
+                    if (pending[i].origin_sequence <=
+                        out.acknowledged_through) {
+                        continue;
+                    }
+                    LogicalDeliveryRequest request;
+                    request.envelope = pending[i];
+                    request.sender_capabilities = local.capabilities;
                     const LogicalDeliveryAcknowledgement acknowledgement =
-                        peer.deliver_ordered_logical_delivery(pending[i], bounds);
+                        peer.deliver_ordered_logical_request(request, bounds);
                     try {
-                        validate_logical_delivery_acknowledgement_for_delivery(
-                            acknowledgement, pending[i], bounds);
+                        validate_logical_delivery_acknowledgement_for_sender(
+                            acknowledgement, pending[i], known_tail,
+                            cumulative_acknowledgement_negotiated, bounds);
                     } catch (const std::exception& e) {
                         return LogicalDeliveryDispatchResult::failure(
                             e.what());
