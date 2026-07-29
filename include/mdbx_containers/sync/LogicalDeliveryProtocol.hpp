@@ -43,7 +43,11 @@ namespace sync {
         LogicalDeliveryCapabilities capabilities;
     };
 
-    /// \brief Cumulative response to one ordered logical delivery attempt.
+    /// \brief Conservative cumulative response to one delivery attempt.
+    /// \details A successful response acknowledges exactly the delivery it
+    /// answers. A receiver that has already advanced farther caps a duplicate
+    /// response at that delivery's sequence, so sender cleanup remains local
+    /// to the attempted envelope.
     struct LogicalDeliveryAcknowledgement {
         DbId destination_db_uuid{};
         NodeId origin_node_id{};

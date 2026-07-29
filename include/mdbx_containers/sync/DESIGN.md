@@ -566,10 +566,18 @@ unordered and is not implicitly redirected through this outbox.
 that future exchange. Its `Hello` message carries optional capability bits; an
 unknown bit is preserved but does not become negotiated unless both peers expose
 a known capability. `Delivery` wraps a strict `LogicalDeliveryEnvelope`, and
-`Acknowledgement` carries a destination-scoped cumulative frontier with explicit
-success/retryability. The first defined capability is `OrderedDelivery`. No
+`Acknowledgement` carries a destination-scoped, conservative cumulative lower
+bound with explicit success/retryability. A successful response is capped at
+the sequence of the delivery it answers, even if the receiver has already
+persisted a higher frontier. This lets the sender validate and clean up only
+the attempted envelope. The first defined capability is `OrderedDelivery`. No
 existing HTTP, WebSocket, or raw pull/push endpoint advertises or accepts this
 protocol yet, so current transports remain backward-compatible raw-sync-only.
+
+Allowing a receiver to acknowledge a frontier ahead of the attempted delivery
+is deferred. That optimization requires a separate recovery contract for
+sender-state rollback, a local known-tail bound, and safe removal of multiple
+pending entries from one acknowledgement.
 
 `LogicalDeliveryStore` persists one monotonic per-origin watermark in the
 optional `_mdbxc_logical_delivery_watermarks` DBI. The DBI is created lazily by
