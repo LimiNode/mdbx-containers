@@ -674,7 +674,12 @@ pipeline.
 `LogicalCaptureSession`. The session owns a writable transaction, suppresses
 raw capture for its typed writes, buffers logical changes privately, and copies
 them to the caller only from `commit(out)`. Rollback, destruction, or commit
-failure discards the pending logical changes. Session construction validates
+failure discards the pending logical changes. An exception after physical
+mutation, outbox enqueue, or native commit processing begins requests
+transaction rollback and deactivates the session, so later `commit()` or
+`commit_to_outbox()` calls are rejected. Preparation or encoding failures
+before transaction mutation leave the session active.
+Session construction validates
 the adapter against the persistent schema marker in the same writable
 transaction, before any local mutation can be performed. For `KeyTable`, only
 successful membership changes are captured: inserting an existing key or

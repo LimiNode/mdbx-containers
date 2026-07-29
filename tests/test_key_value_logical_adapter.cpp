@@ -1326,6 +1326,67 @@ void test_key_table_logical_capture_session_commits_typed_local_writes() {
     cleanup(path);
 }
 
+void test_key_table_logical_capture_session_rolls_back_when_outbox_fails() {
+    const std::string path =
+        "test_key_table_logical_adapter_session_outbox_failure.mdbx";
+    const std::string dbi_name = "logical_key_table_session_outbox_failure";
+    const std::string schema_id =
+        "app.logical_key_table_session_outbox_failure.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x4D), make_node(0xD5));
+    engine.register_logical_schema(
+        schema_id, make_key_table_record(dbi_name));
+
+    mdbxc::KeyTable<int> table(conn, dbi_name);
+    IntKeyTableAdapter adapter(table, schema_id);
+    ThrowingLogicalDeliveryOutbox outbox;
+    bool caught = false;
+    bool commit_rejected = false;
+    bool retry_rejected = false;
+    {
+        std::unique_ptr<IntKeyTableAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        MDBXC_TEST_ASSERT(session->insert(8));
+        try {
+            session->commit_to_outbox(outbox, make_node(0xD6));
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        MDBXC_TEST_ASSERT(session->pending_size() == 0u);
+
+        std::vector<mdbxc::sync::LogicalChange> changes;
+        try {
+            session->commit(changes);
+        } catch (const std::logic_error&) {
+            commit_rejected = true;
+        }
+        MDBXC_TEST_ASSERT(changes.empty());
+
+        try {
+            session->commit_to_outbox(outbox, make_node(0xD6));
+        } catch (const std::logic_error&) {
+            retry_rejected = true;
+        }
+    }
+    MDBXC_TEST_ASSERT(caught);
+    MDBXC_TEST_ASSERT(commit_rejected);
+    MDBXC_TEST_ASSERT(retry_rejected);
+    MDBXC_TEST_ASSERT(!table.contains(8));
+    MDBXC_TEST_ASSERT(
+        engine.pending_logical_deliveries(make_node(0xD6)).empty());
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_table_logical_frame_replicates_capture_session() {
     const std::string source_path =
         "test_key_table_logical_frame_source.mdbx";
@@ -1998,6 +2059,8 @@ void test_key_value_logical_capture_session_rolls_back_when_outbox_fails() {
     IntStringAdapter adapter(table, schema_id);
     ThrowingLogicalDeliveryOutbox outbox;
     bool caught = false;
+    bool commit_rejected = false;
+    bool retry_rejected = false;
     {
         std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
             adapter.begin_capture_session();
@@ -2007,9 +2070,28 @@ void test_key_value_logical_capture_session_rolls_back_when_outbox_fails() {
         } catch (const std::runtime_error&) {
             caught = true;
         }
+        MDBXC_TEST_ASSERT(session->pending_size() == 0u);
+
+        std::vector<mdbxc::sync::LogicalChange> changes;
+        try {
+            session->commit(changes);
+        } catch (const std::logic_error&) {
+            commit_rejected = true;
+        }
+        MDBXC_TEST_ASSERT(changes.empty());
+
+        try {
+            session->commit_to_outbox(outbox, make_node(0xDA));
+        } catch (const std::logic_error&) {
+            retry_rejected = true;
+        }
     }
     MDBXC_TEST_ASSERT(caught);
+    MDBXC_TEST_ASSERT(commit_rejected);
+    MDBXC_TEST_ASSERT(retry_rejected);
     MDBXC_TEST_ASSERT(!table.contains(8));
+    MDBXC_TEST_ASSERT(
+        engine.pending_logical_deliveries(make_node(0xDA)).empty());
 
     conn->disconnect();
     cleanup(path);
@@ -4298,6 +4380,7 @@ int main() {
     test_key_multi_value_logical_capture_session_rolls_back_partial_erase();
     test_key_multi_value_logical_frame_replicates_capture_session();
     test_key_table_logical_capture_session_commits_typed_local_writes();
+    test_key_table_logical_capture_session_rolls_back_when_outbox_fails();
     test_key_table_logical_frame_replicates_capture_session();
     test_key_value_logical_adapter_engine_rejects_unknown_schema();
     test_key_value_logical_engine_rejects_missing_schema_marker();

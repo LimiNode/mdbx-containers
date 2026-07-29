@@ -398,10 +398,12 @@ namespace detail {
         /// buffered as logical changes and raw capture is suppressed for the
         /// transaction. Pending changes are copied to the caller only by
         /// \c commit(out), after the session has prepared the destination
-        /// vector and before the native commit. If commit fails, the appended
-        /// tail is erased and the destructor rolls back the transaction.
-        /// The adapter, table, and connection referenced by the adapter must
-        /// outlive the session.
+        /// vector and before the native commit. If a session operation throws
+        /// after physical mutation, outbox enqueue, or native commit
+        /// processing begins, the session requests transaction rollback and
+        /// becomes inactive. Preparation or encoding failures before
+        /// transaction mutation leave it active. The adapter, table, and
+        /// connection referenced by the adapter must outlive the session.
         class LogicalCaptureSession {
         public:
             explicit LogicalCaptureSession(
@@ -431,7 +433,6 @@ namespace detail {
             void insert_or_assign(const KeyT& key, const ValueT& value) {
                 ensure_active();
                 LogicalChange change = m_adapter.make_upsert(key, value);
-                const std::size_t previous_size = m_pending.size();
                 m_pending.push_back(change);
                 try {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
@@ -439,7 +440,7 @@ namespace detail {
                     m_adapter.m_table.insert_or_assign(
                         key, value, m_txn.handle());
                 } catch (...) {
-                    m_pending.resize(previous_size);
+                    rollback_and_deactivate();
                     throw;
                 }
             }
@@ -459,7 +460,7 @@ namespace detail {
                     }
                     return removed;
                 } catch (...) {
-                    m_pending.resize(previous_size);
+                    rollback_and_deactivate();
                     throw;
                 }
             }
@@ -467,14 +468,13 @@ namespace detail {
             void clear() {
                 ensure_active();
                 LogicalChange change = m_adapter.make_clear();
-                const std::size_t previous_size = m_pending.size();
                 m_pending.push_back(change);
                 try {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_adapter.m_table.connection(), m_txn.handle());
                     m_adapter.m_table.clear(m_txn.handle());
                 } catch (...) {
-                    m_pending.resize(previous_size);
+                    rollback_and_deactivate();
                     throw;
                 }
             }
@@ -493,6 +493,7 @@ namespace detail {
                     out.erase(out.begin() +
                               static_cast<std::ptrdiff_t>(old_size),
                               out.end());
+                    rollback_and_deactivate();
                     throw;
                 }
                 m_pending.clear();
@@ -507,19 +508,33 @@ namespace detail {
                 ensure_active();
                 LogicalChangeFrame frame;
                 frame.changes = m_pending;
-                const LogicalDeliveryEnvelope envelope =
-                    outbox.enqueue_logical_delivery(
-                        m_txn.handle(), destination, frame, bounds);
-                m_txn.commit();
-                m_pending.clear();
-                m_active = false;
-                return envelope;
+                try {
+                    const LogicalDeliveryEnvelope envelope =
+                        outbox.enqueue_logical_delivery(
+                            m_txn.handle(), destination, frame, bounds);
+                    m_txn.commit();
+                    m_pending.clear();
+                    m_active = false;
+                    return envelope;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
             }
 
             void rollback() noexcept {
                 if (!m_active) {
                     return;
                 }
+                rollback_and_deactivate();
+            }
+
+            std::size_t pending_size() const {
+                return m_pending.size();
+            }
+
+        private:
+            void rollback_and_deactivate() noexcept {
                 try {
                     m_pending.clear();
                     m_txn.rollback();
@@ -528,11 +543,6 @@ namespace detail {
                 m_active = false;
             }
 
-            std::size_t pending_size() const {
-                return m_pending.size();
-            }
-
-        private:
             void ensure_active() const {
                 if (!m_active) {
                     throw std::logic_error(

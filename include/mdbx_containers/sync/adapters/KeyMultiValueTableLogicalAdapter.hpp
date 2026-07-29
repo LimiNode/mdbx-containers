@@ -117,9 +117,10 @@ namespace sync {
         /// operations exposed by this class; direct table calls, bulk
         /// reconciliation, and range erasure remain local-only operations.
         /// The adapter, table, and connection referenced by the adapter must
-        /// outlive the session. If a session operation throws after it begins,
-        /// the session requests rollback of its transaction and becomes
-        /// inactive.
+        /// outlive the session. An exception after physical mutation, outbox
+        /// enqueue, or native commit processing begins requests rollback of
+        /// the transaction and deactivates the session. Preparation or
+        /// encoding failures before transaction mutation leave it active.
         class LogicalCaptureSession {
         public:
             explicit LogicalCaptureSession(
