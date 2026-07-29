@@ -562,6 +562,15 @@ wire acknowledgement, receiver-side ordering, capability negotiation, or retry
 scheduling. The older `apply_logical_delivery_envelope()` API remains intentionally
 unordered and is not implicitly redirected through this outbox.
 
+`LogicalDeliveryProtocol.hpp` reserves a separate versioned wire boundary for
+that future exchange. Its `Hello` message carries optional capability bits; an
+unknown bit is preserved but does not become negotiated unless both peers expose
+a known capability. `Delivery` wraps a strict `LogicalDeliveryEnvelope`, and
+`Acknowledgement` carries a destination-scoped cumulative frontier with explicit
+success/retryability. The first defined capability is `OrderedDelivery`. No
+existing HTTP, WebSocket, or raw pull/push endpoint advertises or accepts this
+protocol yet, so current transports remain backward-compatible raw-sync-only.
+
 `LogicalDeliveryStore` persists one monotonic per-origin watermark in the
 optional `_mdbxc_logical_delivery_watermarks` DBI. The DBI is created lazily by
 the first `SyncEngine::prune_logical_delivery_markers()` call; normal logical
