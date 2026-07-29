@@ -27,7 +27,7 @@ namespace sync {
                 envelope, bounds);
         }
 
-        LogicalDeliveryAcknowledgement deliver_ordered_logical_delivery(
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
                 const LogicalDeliveryRequest& request,
                 const CodecBounds* bounds = nullptr) override {
             return m_remote.apply_ordered_logical_delivery_envelope(

@@ -45,6 +45,35 @@ bool throws_runtime_error(Fn fn) {
     return false;
 }
 
+class LegacyLogicalDeliveryPeer : public mdbxc::sync::ILogicalDeliveryPeer {
+public:
+    explicit LegacyLogicalDeliveryPeer(const mdbxc::sync::LogicalDeliveryHello& hello)
+        : m_hello(hello),
+          m_calls(0u) {}
+
+    mdbxc::sync::LogicalDeliveryHello logical_delivery_hello() override {
+        return m_hello;
+    }
+
+    mdbxc::sync::LogicalDeliveryAcknowledgement
+    deliver_ordered_logical_delivery(
+            const mdbxc::sync::LogicalDeliveryEnvelope& envelope,
+            const mdbxc::sync::CodecBounds* /* bounds */ = nullptr) override {
+        ++m_calls;
+        mdbxc::sync::LogicalDeliveryAcknowledgement out;
+        out.destination_db_uuid = envelope.destination_db_uuid;
+        out.origin_node_id = envelope.origin_node_id;
+        out.acknowledged_through = envelope.origin_sequence;
+        return out;
+    }
+
+    std::size_t calls() const { return m_calls; }
+
+private:
+    mdbxc::sync::LogicalDeliveryHello m_hello;
+    std::size_t m_calls;
+};
+
 void test_hello_round_trip_and_capability_negotiation() {
     mdbxc::sync::LogicalDeliveryHello hello;
     hello.node_id = make_node(0x30);
@@ -181,6 +210,28 @@ void test_cumulative_acknowledgement_respects_sender_tail() {
     }));
 }
 
+void test_legacy_peer_receives_request_through_default_forwarding() {
+    const mdbxc::sync::LogicalDeliveryEnvelope envelope = make_envelope();
+    mdbxc::sync::LogicalDeliveryHello hello;
+    hello.node_id = make_node(0x91);
+    hello.db_uuid = envelope.destination_db_uuid;
+    LegacyLogicalDeliveryPeer peer(hello);
+    mdbxc::sync::LogicalDeliveryRequest request;
+    request.envelope = envelope;
+    request.sender_capabilities.flags = static_cast<std::uint64_t>(
+        mdbxc::sync::LogicalDeliveryCapability::OrderedDelivery);
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement =
+        peer.deliver_ordered_logical_request(request);
+    MDBXC_TEST_ASSERT(peer.calls() == 1u);
+    MDBXC_TEST_ASSERT(acknowledgement.destination_db_uuid ==
+                      envelope.destination_db_uuid);
+    MDBXC_TEST_ASSERT(acknowledgement.origin_node_id ==
+                      envelope.origin_node_id);
+    MDBXC_TEST_ASSERT(acknowledgement.acknowledged_through ==
+                      envelope.origin_sequence);
+}
+
 } // namespace
 
 int main() {
@@ -189,5 +240,6 @@ int main() {
     test_protocol_rejects_invalid_header_and_acknowledgement();
     test_acknowledgement_matches_its_delivery();
     test_cumulative_acknowledgement_respects_sender_tail();
+    test_legacy_peer_receives_request_through_default_forwarding();
     return 0;
 }
