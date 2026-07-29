@@ -57,7 +57,9 @@
   `mdbx_containers/sync.hpp`.
 - v0.1 captures normal write paths for `KeyValueTable`, `KeyTable`,
   `ValueTable`, and `SequenceTable`; `VectorStore` is replicated indirectly
-  through its internal `SequenceTable` and `KeyValueTable` members.
+  through its internal `SequenceTable` and `KeyValueTable` members. This is
+  raw physical replication for a leader/follower or otherwise externally
+  serialized writer per collection, not multi-writer logical replication.
 - `AnyValueTable`, `KeyMultiValueTable`, `KeyOrderedMultiValueTable`, and
   `HashedKeyValueStore` are not replicated in v0.1. `KeyMultiValueTable` has a
   deferred unordered multiset sync design in `sync/DESIGN.md`.
@@ -240,6 +242,13 @@ an exact RAM index on open. It is intended as a local RAG MVP: search is exact
 filtering, and generated embeddings are out of scope.
 Collection names are validated, not rewritten: use non-empty names containing
 only ASCII letters, digits, `_`, and `-`.
+
+Sync currently replays this store's four internal DBIs as raw physical changes.
+Use the same collection name, vector metric, and compatible embedding codec on
+every replica. A collection has one authoritative writer, or the application
+must serialize all writers externally: local `add()` allocates ids from local
+state and does not provide cross-node identity allocation or conflict
+resolution. There is no logical `VectorStore` sync adapter yet.
 
 ```cpp
 #include <mdbx_containers/vector.hpp>
