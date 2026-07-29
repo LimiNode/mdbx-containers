@@ -3522,6 +3522,18 @@ void test_ordered_logical_delivery_enforces_receiver_frontier() {
         decoded_receiver_ahead_duplicate, first);
     MDBXC_TEST_ASSERT(apply_calls == 2);
 
+    mdbxc::sync::LogicalDeliveryCapabilities cumulative_sender;
+    cumulative_sender.flags = static_cast<std::uint64_t>(
+        mdbxc::sync::LogicalDeliveryCapability::CumulativeAcknowledgement);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement cumulative_duplicate =
+        engine.apply_ordered_logical_delivery_envelope(
+            first, &cumulative_sender);
+    MDBXC_TEST_ASSERT(cumulative_duplicate.ok);
+    MDBXC_TEST_ASSERT(cumulative_duplicate.acknowledged_through == 2u);
+    mdbxc::sync::validate_logical_delivery_acknowledgement_for_sender(
+        cumulative_duplicate, first, 2u, true);
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
     mdbxc::sync::LogicalDeliveryEnvelope wrong_destination = second;
     wrong_destination.destination_db_uuid = make_node(0x01);
     wrong_destination.origin_sequence = 3u;
