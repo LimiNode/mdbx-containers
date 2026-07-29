@@ -109,8 +109,10 @@ namespace sync {
         /// suppressed for the transaction. Pending changes are copied to the
         /// caller only by \c commit(out), after the session has prepared the
         /// destination vector and before the native commit. If a session
-        /// operation throws after it begins, the session requests rollback of
-        /// its transaction and becomes inactive. The adapter, table, and
+        /// operation throws after physical mutation, outbox enqueue, or native
+        /// commit processing begins, the session requests transaction rollback
+        /// and becomes inactive. Preparation or encoding failures before
+        /// transaction mutation leave it active. The adapter, table, and
         /// connection referenced by the adapter must outlive the session.
         class LogicalCaptureSession {
         public:
