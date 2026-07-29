@@ -1980,7 +1980,19 @@ void test_key_value_logical_delivery_prunes_markers_behind_watermark() {
             MDBXC_TEST_ASSERT(
                 delivery.watermark(txn.handle(), origin_node) == 1u);
             MDBXC_TEST_ASSERT(delivery.count(txn.handle()) == 3u);
+            MDBXC_TEST_ASSERT(!delivery.contains(txn.handle(), first));
+            MDBXC_TEST_ASSERT(delivery.contains(txn.handle(), second));
         }
+
+        MDBXC_TEST_ASSERT(
+            engine.prune_logical_delivery_markers(origin_node, 3) == 2u);
+        bool decreasing_threw = false;
+        try {
+            (void)engine.prune_logical_delivery_markers(origin_node, 2);
+        } catch (const std::invalid_argument&) {
+            decreasing_threw = true;
+        }
+        MDBXC_TEST_ASSERT(decreasing_threw);
 
         conn->disconnect();
     }
@@ -2003,6 +2015,70 @@ void test_key_value_logical_delivery_prunes_markers_behind_watermark() {
         conn->disconnect();
     }
 
+    cleanup(path);
+}
+
+void test_logical_delivery_store_reads_legacy_layout_without_watermarks() {
+    const std::string path =
+        "test_logical_delivery_legacy_without_watermarks.mdbx";
+    const std::string dbi_name = "logical_delivery_legacy_table";
+    const std::string schema_id = "app.logical_delivery_legacy.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x50);
+    const mdbxc::sync::NodeId origin_node = make_node(0x51);
+    const mdbxc::sync::NodeId db_uuid = make_node(0xD6);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = origin_node;
+    envelope.origin_sequence = 1;
+    envelope.frame_id = "legacy-layout-marker";
+    envelope.frame.changes.push_back(adapter.make_upsert(92, "legacy"));
+    MDBXC_TEST_ASSERT(engine.apply_logical_delivery_envelope(envelope).ok);
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi watermark_dbi = 0;
+        const int open_rc = mdbx_dbi_open(
+            txn.handle(), "_mdbxc_logical_delivery_watermarks",
+            static_cast<MDBX_db_flags_t>(0), &watermark_dbi);
+        if (open_rc == MDBX_SUCCESS) {
+            mdbxc::check_mdbx(mdbx_drop(txn.handle(), watermark_dbi, 1),
+                              "test legacy watermark DBI drop failed");
+        } else {
+            MDBXC_TEST_ASSERT(open_rc == MDBX_NOTFOUND);
+        }
+        txn.commit();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::LogicalDeliveryStore delivery(conn->env_handle());
+        MDBXC_TEST_ASSERT(delivery.count(txn.handle()) == 1u);
+        MDBXC_TEST_ASSERT(delivery.list_markers(txn.handle()).size() == 1u);
+        MDBXC_TEST_ASSERT(
+            delivery.watermark(txn.handle(), origin_node) == 0u);
+        MDBXC_TEST_ASSERT(delivery.contains(txn.handle(), envelope));
+    }
+
+    conn->disconnect();
     cleanup(path);
 }
 
@@ -2969,6 +3045,7 @@ int main() {
     test_key_value_logical_delivery_marker_rolls_back_after_apply_failure();
     test_key_value_logical_delivery_envelope_skips_self_origin();
     test_key_value_logical_delivery_prunes_markers_behind_watermark();
+    test_logical_delivery_store_reads_legacy_layout_without_watermarks();
     test_key_value_logical_delivery_envelope_accepts_long_frame_id();
     test_key_value_logical_delivery_envelope_keeps_custom_bounds();
     test_key_value_logical_delivery_object_api_rejects_frame_id_bound();

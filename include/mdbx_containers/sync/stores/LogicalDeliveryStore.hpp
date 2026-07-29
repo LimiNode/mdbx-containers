@@ -55,26 +55,30 @@ namespace sync {
               m_watermark_dbi_name(dbi_name + "_watermarks"),
               m_dbi(0),
               m_watermark_dbi(0),
-              m_open(false) {}
+              m_marker_open(false),
+              m_watermark_open(false) {}
 
         /// \brief Opens the store DBI inside the supplied transaction.
         void open(MDBX_txn* txn) {
             txn = checked_txn(txn, "LogicalDeliveryStore::open");
-            open_checked(txn);
+            open_marker_checked(txn);
         }
 
-        bool is_open() const { return m_open; }
+        bool is_open() const { return m_marker_open; }
 
         MDBX_dbi handle(MDBX_txn* txn) const {
             txn = checked_txn(txn, "LogicalDeliveryStore::handle");
-            open_checked(txn);
+            open_marker_checked(txn);
             return m_dbi;
         }
 
-        void reset_open() { m_open = false; }
+        void reset_open() {
+            m_marker_open = false;
+            m_watermark_open = false;
+        }
 
         void ensure_open() const {
-            if (!m_open) {
+            if (!m_marker_open) {
                 throw std::logic_error("LogicalDeliveryStore is not open");
             }
         }
@@ -141,11 +145,11 @@ namespace sync {
         }
 
         /// \brief Returns the persisted replay-pruning watermark for \p origin.
-        /// \return Zero when no markers for \p origin have been pruned.
+        /// \return Zero when no markers for \p origin have been pruned or
+        /// the optional watermark DBI has not been created yet.
         std::uint64_t watermark(MDBX_txn* txn,
                                 const NodeId& origin) const {
             txn = checked_txn(txn, "LogicalDeliveryStore::watermark");
-            open_const(txn);
             return read_watermark(txn, origin);
         }
 
@@ -156,6 +160,8 @@ namespace sync {
         /// successful no-ops. The caller must advance this boundary only after
         /// its delivery protocol guarantees that no unseen envelope at or
         /// below the boundary can arrive later.
+        /// The first call creates the optional watermark DBI and therefore
+        /// requires one additional named-DBI slot in the MDBX environment.
         /// \return Number of removed delivery markers.
         std::size_t prune_up_to(MDBX_txn* txn,
                                 const NodeId& origin,
@@ -169,7 +175,8 @@ namespace sync {
                 throw std::invalid_argument(
                     "LogicalDeliveryStore prune watermark is zero");
             }
-            open(txn);
+            open_marker_checked(txn);
+            open_watermark_for_write(txn);
             const std::uint64_t previous = read_watermark(txn, origin);
             if (safe_through_sequence < previous) {
                 throw std::invalid_argument(
@@ -211,16 +218,17 @@ namespace sync {
             return removed;
         }
 
-        /// \brief Returns true when \p envelope already has an applied marker.
+        /// \brief Returns true when \p envelope has an exact applied marker.
+        /// \details A persisted replay watermark is intentionally not included
+        /// in this inspection result. Use \c watermark() to inspect the
+        /// pruning boundary; \c try_mark_applied() applies that boundary when
+        /// deciding whether a delivery may mutate local data.
         bool contains(MDBX_txn* txn,
                       const LogicalDeliveryEnvelope& envelope,
                       const CodecBounds* bounds = nullptr) const {
             txn = checked_txn(txn, "LogicalDeliveryStore::contains");
             open_const(txn);
             validate_logical_delivery_envelope(envelope, bounds);
-            if (is_at_or_below_watermark(txn, envelope)) {
-                return true;
-            }
             const std::vector<std::uint8_t> key =
                 make_key(envelope, bounds);
             MDBX_val k = {
@@ -241,7 +249,7 @@ namespace sync {
                               const LogicalDeliveryEnvelope& envelope,
                               const CodecBounds* bounds = nullptr) {
             txn = checked_txn(txn, "LogicalDeliveryStore::try_mark_applied");
-            open(txn);
+            open_marker_checked(txn);
             validate_logical_delivery_envelope(envelope, bounds);
             if (is_at_or_below_watermark(txn, envelope)) {
                 return false;
@@ -278,13 +286,35 @@ namespace sync {
 
         void open_const(MDBX_txn* txn) const {
             txn = checked_txn(txn, "LogicalDeliveryStore::open");
-            open_checked(txn);
+            open_marker_checked(txn);
         }
 
-        void open_checked(MDBX_txn* txn) const {
+        void open_marker_checked(MDBX_txn* txn) const {
             open_dbi_checked(txn, m_dbi_name, m_dbi);
+            m_marker_open = true;
+        }
+
+        bool open_watermark_if_exists(MDBX_txn* txn) const {
+            if (m_watermark_open) {
+                return true;
+            }
+            const int rc = mdbx_dbi_open(
+                txn, m_watermark_dbi_name.c_str(),
+                static_cast<MDBX_db_flags_t>(0), &m_watermark_dbi);
+            if (rc == MDBX_NOTFOUND) {
+                return false;
+            }
+            check_mdbx(rc, "Failed to open LogicalDeliveryStore watermark DBI");
+            m_watermark_open = true;
+            return true;
+        }
+
+        void open_watermark_for_write(MDBX_txn* txn) const {
+            if (m_watermark_open) {
+                return;
+            }
             open_dbi_checked(txn, m_watermark_dbi_name, m_watermark_dbi);
-            m_open = true;
+            m_watermark_open = true;
         }
 
         static void open_dbi_checked(MDBX_txn* txn,
@@ -300,6 +330,9 @@ namespace sync {
 
         std::uint64_t read_watermark(MDBX_txn* txn,
                                      const NodeId& origin) const {
+            if (!open_watermark_if_exists(txn)) {
+                return 0u;
+            }
             MDBX_val key = {
                 const_cast<std::uint8_t*>(&origin[0]),
                 origin.size()
@@ -316,6 +349,7 @@ namespace sync {
         void write_watermark(MDBX_txn* txn,
                              const NodeId& origin,
                              std::uint64_t sequence) const {
+            open_watermark_for_write(txn);
             MDBX_val key = {
                 const_cast<std::uint8_t*>(&origin[0]),
                 origin.size()
@@ -634,7 +668,8 @@ namespace sync {
         std::string m_watermark_dbi_name;
         mutable MDBX_dbi m_dbi;
         mutable MDBX_dbi m_watermark_dbi;
-        mutable bool     m_open;
+        mutable bool     m_marker_open;
+        mutable bool     m_watermark_open;
     };
 
 } // namespace sync
