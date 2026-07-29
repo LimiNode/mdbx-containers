@@ -3624,6 +3624,88 @@ void test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers() {
     cleanup(receiver_path);
 }
 
+void test_cumulative_logical_delivery_acknowledgement_recovers_after_restart() {
+    const std::string sender_path = "test_cumulative_logical_sender.mdbx";
+    const std::string receiver_path = "test_cumulative_logical_receiver.mdbx";
+    const std::string dbi_name = "cumulative_logical_dispatch";
+    const std::string schema_id = "app.cumulative_logical_dispatch.v1";
+    cleanup(sender_path);
+    cleanup(receiver_path);
+
+    mdbxc::Config sender_cfg;
+    sender_cfg.pathname = sender_path;
+    sender_cfg.max_dbs = 20;
+    sender_cfg.no_subdir = true;
+    mdbxc::Config receiver_cfg = sender_cfg;
+    receiver_cfg.pathname = receiver_path;
+    std::shared_ptr<mdbxc::Connection> sender_conn =
+        mdbxc::Connection::create(sender_cfg);
+    std::shared_ptr<mdbxc::Connection> receiver_conn =
+        mdbxc::Connection::create(receiver_cfg);
+
+    const mdbxc::sync::NodeId sender_node = make_node(0x51);
+    const mdbxc::sync::NodeId receiver_node = make_node(0x61);
+    const mdbxc::sync::DbId sender_db = make_node(0x71);
+    const mdbxc::sync::DbId receiver_db = make_node(0x81);
+    mdbxc::sync::SyncEngine receiver(receiver_conn);
+    receiver.initialize_local_identity(receiver_node, receiver_db);
+    receiver.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(receiver_conn, dbi_name);
+    int apply_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(table, schema_id, apply_calls);
+    receiver.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalSchemaRef ref;
+    ref.schema_id = schema_id;
+    ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+    ref.schema_version = 1u;
+    mdbxc::sync::LogicalChangeFrame frame;
+    frame.changes.push_back(mdbxc::sync::LogicalChange(
+        ref, 1u, 0u, std::vector<std::uint8_t>()));
+    std::vector<mdbxc::sync::LogicalDeliveryEnvelope> pending;
+    {
+        mdbxc::sync::SyncEngine sender(sender_conn);
+        sender.initialize_local_identity(sender_node, sender_db);
+        sender.enqueue_logical_delivery(receiver_db, frame);
+        sender.enqueue_logical_delivery(receiver_db, frame);
+        pending = sender.pending_logical_deliveries(receiver_db);
+        MDBXC_TEST_ASSERT(pending.size() == 2u);
+        MDBXC_TEST_ASSERT(receiver.apply_ordered_logical_delivery_envelope(
+            pending[0]).ok);
+        MDBXC_TEST_ASSERT(receiver.apply_ordered_logical_delivery_envelope(
+            pending[1]).ok);
+        MDBXC_TEST_ASSERT(apply_calls == 2);
+        MDBXC_TEST_ASSERT(sender.logical_delivery_known_tail(receiver_db) == 2u);
+    }
+    sender_conn->disconnect();
+    sender_conn.reset();
+    sender_conn = mdbxc::Connection::create(sender_cfg);
+
+    {
+        mdbxc::sync::SyncEngine restarted_sender(sender_conn);
+        restarted_sender.initialize_local_identity(sender_node, sender_db);
+        mdbxc::sync::DirectLogicalDeliveryPeer peer(receiver);
+        const mdbxc::sync::LogicalDeliveryDispatchResult dispatched =
+            restarted_sender.deliver_pending_logical_deliveries(
+                peer, receiver_db, 1u);
+        MDBXC_TEST_ASSERT(dispatched.ok);
+        MDBXC_TEST_ASSERT(dispatched.delivered == 1u);
+        MDBXC_TEST_ASSERT(dispatched.acknowledged_through == 2u);
+        MDBXC_TEST_ASSERT(
+            restarted_sender.logical_delivery_acknowledged_through(receiver_db) ==
+            2u);
+        MDBXC_TEST_ASSERT(
+            restarted_sender.pending_logical_deliveries(receiver_db).empty());
+        MDBXC_TEST_ASSERT(apply_calls == 2);
+    }
+
+    sender_conn->disconnect();
+    receiver_conn->disconnect();
+    cleanup(sender_path);
+    cleanup(receiver_path);
+}
+
 void test_ordered_logical_delivery_loopback_cleans_outbox() {
     const std::string path = "test_ordered_logical_loopback.mdbx";
     const std::string dbi_name = "ordered_logical_loopback";
@@ -3768,6 +3850,7 @@ int main() {
     test_logical_outbox_acknowledgement_gap_preserves_caller_transaction();
     test_ordered_logical_delivery_enforces_receiver_frontier();
     test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers();
+    test_cumulative_logical_delivery_acknowledgement_recovers_after_restart();
     test_ordered_logical_delivery_loopback_cleans_outbox();
     test_ordered_logical_delivery_dispatch_rejects_invalid_acknowledgements();
     return 0;
