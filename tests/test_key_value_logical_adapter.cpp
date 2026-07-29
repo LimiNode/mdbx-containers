@@ -3286,6 +3286,132 @@ void test_logical_outbox_persists_ordered_destination_streams() {
     cleanup(path);
 }
 
+void test_ordered_logical_delivery_enforces_receiver_frontier() {
+    const std::string path = "test_ordered_logical_delivery.mdbx";
+    const std::string dbi_name = "ordered_logical_delivery";
+    const std::string schema_id = "app.ordered_logical_delivery.v1";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0xD1);
+    const mdbxc::sync::DbId local_db = make_node(0xE1);
+    const mdbxc::sync::NodeId remote_node = make_node(0xF1);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    int apply_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(table, schema_id, apply_calls);
+    engine.register_logical_adapter(adapter);
+
+    const mdbxc::sync::LogicalDeliveryHello hello =
+        engine.logical_delivery_hello();
+    MDBXC_TEST_ASSERT(hello.node_id == local_node);
+    MDBXC_TEST_ASSERT(hello.db_uuid == local_db);
+    MDBXC_TEST_ASSERT(hello.capabilities.supports(
+        mdbxc::sync::LogicalDeliveryCapability::OrderedDelivery));
+
+    mdbxc::sync::LogicalSchemaRef ref;
+    ref.schema_id = schema_id;
+    ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+    ref.schema_version = 1u;
+    const std::vector<std::uint8_t> payload;
+
+    mdbxc::sync::LogicalDeliveryEnvelope first;
+    first.destination_db_uuid = local_db;
+    first.origin_node_id = remote_node;
+    first.origin_sequence = 1u;
+    first.frame_id = "ordered-1";
+    first.frame.changes.push_back(
+        mdbxc::sync::LogicalChange(ref, 1u, 0u, payload));
+    mdbxc::sync::LogicalDeliveryEnvelope second = first;
+    second.origin_sequence = 2u;
+    second.frame_id = "ordered-2";
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement gap =
+        engine.apply_ordered_logical_delivery_envelope(second);
+    MDBXC_TEST_ASSERT(!gap.ok);
+    MDBXC_TEST_ASSERT(gap.retryable);
+    MDBXC_TEST_ASSERT(gap.acknowledged_through == 0u);
+    MDBXC_TEST_ASSERT(apply_calls == 0);
+
+    mdbxc::sync::CodecBounds small_error_bounds;
+    small_error_bounds.max_error_len = 8u;
+    const mdbxc::sync::LogicalDeliveryAcknowledgement bounded_gap =
+        engine.apply_ordered_logical_delivery_envelope(
+            second, &small_error_bounds);
+    MDBXC_TEST_ASSERT(!bounded_gap.ok);
+    MDBXC_TEST_ASSERT(bounded_gap.error.size() == 8u);
+    const std::vector<std::uint8_t> encoded_bounded_gap =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_acknowledgement(
+            bounded_gap, &small_error_bounds);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement decoded_bounded_gap =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::decode_acknowledgement(
+            encoded_bounded_gap, &small_error_bounds);
+    MDBXC_TEST_ASSERT(decoded_bounded_gap.error == bounded_gap.error);
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement first_ack =
+        engine.apply_ordered_logical_delivery_envelope(first);
+    MDBXC_TEST_ASSERT(first_ack.ok);
+    MDBXC_TEST_ASSERT(first_ack.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(apply_calls == 1);
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement duplicate =
+        engine.apply_ordered_logical_delivery_envelope(first);
+    MDBXC_TEST_ASSERT(duplicate.ok);
+    MDBXC_TEST_ASSERT(duplicate.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(apply_calls == 1);
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement second_ack =
+        engine.apply_ordered_logical_delivery_envelope(second);
+    MDBXC_TEST_ASSERT(second_ack.ok);
+    MDBXC_TEST_ASSERT(second_ack.acknowledged_through == 2u);
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement receiver_ahead_duplicate =
+        engine.apply_ordered_logical_delivery_envelope(first);
+    MDBXC_TEST_ASSERT(receiver_ahead_duplicate.ok);
+    MDBXC_TEST_ASSERT(receiver_ahead_duplicate.acknowledged_through == 1u);
+    mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
+        receiver_ahead_duplicate, first);
+    const std::vector<std::uint8_t> encoded_receiver_ahead_duplicate =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_acknowledgement(
+            receiver_ahead_duplicate);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement
+        decoded_receiver_ahead_duplicate =
+            mdbxc::sync::LogicalDeliveryProtocolCodec::decode_acknowledgement(
+                encoded_receiver_ahead_duplicate);
+    mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
+        decoded_receiver_ahead_duplicate, first);
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
+    mdbxc::sync::LogicalDeliveryEnvelope wrong_destination = second;
+    wrong_destination.destination_db_uuid = make_node(0x01);
+    wrong_destination.origin_sequence = 3u;
+    wrong_destination.frame_id = "ordered-wrong-destination";
+    const mdbxc::sync::LogicalDeliveryAcknowledgement rejected =
+        engine.apply_ordered_logical_delivery_envelope(wrong_destination);
+    MDBXC_TEST_ASSERT(!rejected.ok);
+    MDBXC_TEST_ASSERT(!rejected.retryable);
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::LogicalDeliveryOrderStore order(conn->env_handle());
+        MDBXC_TEST_ASSERT(order.last_applied(txn.handle(), remote_node) == 2u);
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 } // namespace
 
 int main() {
@@ -3340,5 +3466,6 @@ int main() {
     test_key_value_logical_adapter_decodes_literal_little_endian_payload();
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     test_logical_outbox_persists_ordered_destination_streams();
+    test_ordered_logical_delivery_enforces_receiver_frontier();
     return 0;
 }

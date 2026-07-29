@@ -579,6 +579,17 @@ is deferred. That optimization requires a separate recovery contract for
 sender-state rollback, a local known-tail bound, and safe removal of multiple
 pending entries from one acknowledgement.
 
+`SyncEngine::apply_ordered_logical_delivery_envelope()` is the receiver-side
+implementation of `OrderedDelivery`. `_mdbxc_logical_delivery_order` stores the
+highest committed contiguous sequence for each remote origin. A sequence at or
+below that frontier is a successful no-op acknowledged through the attempted
+sequence; this intentionally caps the receiver's higher frontier. Only the
+exact next sequence reaches schema validation and adapters; a gap is a
+retryable acknowledgement and leaves both user data and markers untouched. The
+generic unordered delivery API remains separate, so applications do not acquire
+ordering merely by changing a call site. Order-state advance, replay marker, and
+adapter mutations commit in one transaction.
+
 `LogicalDeliveryStore` persists one monotonic per-origin watermark in the
 optional `_mdbxc_logical_delivery_watermarks` DBI. The DBI is created lazily by
 the first `SyncEngine::prune_logical_delivery_markers()` call; normal logical

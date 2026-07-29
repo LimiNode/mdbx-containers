@@ -43,6 +43,7 @@
 #include "ChangeOp.hpp"
 #include "LogicalDeliveryEnvelopeCodec.hpp"
 #include "ILogicalDeliveryOutbox.hpp"
+#include "LogicalDeliveryProtocol.hpp"
 #include "LogicalChangeFrameCodec.hpp"
 #include "LogicalTableAdapter.hpp"
 #include "LogicalSchemaValidation.hpp"
@@ -51,6 +52,7 @@
 #include "stores/AppliedStore.hpp"
 #include "stores/ChangeLogStore.hpp"
 #include "stores/LogicalDeliveryStore.hpp"
+#include "stores/LogicalDeliveryOrderStore.hpp"
 #include "stores/LogicalOutboxStore.hpp"
 #include "stores/MetaStore.hpp"
 #include "stores/OriginIndexStore.hpp"
@@ -420,6 +422,162 @@ namespace sync {
                 m_conn->notify_sync_apply_observers(notification);
             }
             return result;
+        }
+
+        /// \brief Returns logical delivery features implemented by this engine.
+        LogicalDeliveryCapabilities logical_delivery_capabilities() const {
+            LogicalDeliveryCapabilities out;
+            out.flags = static_cast<std::uint64_t>(
+                LogicalDeliveryCapability::OrderedDelivery);
+            return out;
+        }
+
+        /// \brief Builds this engine's capability hello after local init.
+        LogicalDeliveryHello logical_delivery_hello() const {
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            MetaStore meta(m_conn->env_handle());
+            meta.open(txn.handle());
+            LogicalDeliveryHello out;
+            out.node_id = meta.get_node_id(txn.handle());
+            out.db_uuid = meta.get_db_uuid(txn.handle());
+            if (is_zero_sync_id(out.node_id) || is_zero_sync_id(out.db_uuid)) {
+                throw std::logic_error(
+                    "SyncEngine local identity is not initialised");
+            }
+            out.capabilities = logical_delivery_capabilities();
+            return out;
+        }
+
+        /// \brief Applies one strictly ordered logical delivery envelope.
+        /// \details This is distinct from the legacy unordered delivery API.
+        /// It accepts only the next contiguous origin sequence, acknowledges
+        /// duplicate and self-origin no-ops through their own sequence, and
+        /// reports a gap as a retryable acknowledgement without invoking
+        /// logical adapters.
+        LogicalDeliveryAcknowledgement apply_ordered_logical_delivery_envelope(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) {
+            LogicalDeliveryAcknowledgement acknowledgement;
+            acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+            acknowledgement.origin_node_id = envelope.origin_node_id;
+            try {
+                validate_logical_delivery_envelope(envelope, bounds);
+            } catch (const std::exception& e) {
+                set_logical_delivery_acknowledgement_failure(
+                    acknowledgement, e.what(), false, bounds);
+                return acknowledgement;
+            } catch (...) {
+                set_logical_delivery_acknowledgement_failure(
+                    acknowledgement,
+                    "Logical ordered delivery envelope validation failed",
+                    false, bounds);
+                return acknowledgement;
+            }
+
+            const std::vector<LogicalChange>& changes = envelope.frame.changes;
+            std::vector<std::string> affected_dbi_names;
+            Connection::SyncApplyNotification notification;
+            bool notify = false;
+            {
+                const Connection::SyncApplyWriteGuard sync_apply_guard =
+                    m_conn->sync_apply_write_guard();
+                auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+                MetaStore meta(m_conn->env_handle());
+                LogicalDeliveryStore delivery(m_conn->env_handle());
+                LogicalDeliveryOrderStore order(m_conn->env_handle());
+                meta.open(txn.handle());
+                delivery.open(txn.handle());
+                order.open(txn.handle());
+
+                const DbId local_db_uuid = meta.get_db_uuid(txn.handle());
+                const NodeId local_node_id = meta.get_node_id(txn.handle());
+                acknowledgement.destination_db_uuid = local_db_uuid;
+                if (compare_node_id(local_db_uuid,
+                                    envelope.destination_db_uuid) != 0) {
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement,
+                        "Logical ordered delivery destination db_uuid mismatch",
+                        false, bounds);
+                    txn.rollback();
+                    return acknowledgement;
+                }
+                if (compare_node_id(local_node_id,
+                                    envelope.origin_node_id) == 0) {
+                    acknowledgement.acknowledged_through =
+                        envelope.origin_sequence;
+                    txn.rollback();
+                    return acknowledgement;
+                }
+
+                const std::uint64_t last = order.last_applied(
+                    txn.handle(), envelope.origin_node_id);
+                acknowledgement.acknowledged_through = last;
+                if (envelope.origin_sequence <= last) {
+                    acknowledgement.acknowledged_through =
+                        envelope.origin_sequence;
+                    txn.rollback();
+                    return acknowledgement;
+                }
+                if (last == (std::numeric_limits<std::uint64_t>::max)() ||
+                    envelope.origin_sequence != last + 1u) {
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement,
+                        "Logical ordered delivery sequence gap", true, bounds);
+                    txn.rollback();
+                    return acknowledgement;
+                }
+                if (!delivery.try_mark_applied(txn.handle(), envelope, bounds)) {
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement,
+                        "Logical ordered delivery marker conflicts with order state",
+                        false, bounds);
+                    txn.rollback();
+                    return acknowledgement;
+                }
+
+                collect_logical_affected_dbis(changes, affected_dbi_names);
+                const LogicalApplyResult validation =
+                    validate_logical_schema_markers(txn.handle(), changes);
+                if (!validation.ok) {
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement, validation.error,
+                        validation.retryable, bounds);
+                    txn.rollback();
+                    return acknowledgement;
+                }
+                LogicalApplyResult apply_result;
+                {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_conn, txn.handle());
+                    apply_result = m_logical_registry.preflight_then_apply(
+                        txn.handle(), changes);
+                }
+                if (!apply_result.ok) {
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement, apply_result.error,
+                        apply_result.retryable, bounds);
+                    txn.rollback();
+                    return acknowledgement;
+                }
+                order.advance(txn.handle(), envelope.origin_node_id,
+                              envelope.origin_sequence);
+                txn.commit();
+                acknowledgement.acknowledged_through =
+                    envelope.origin_sequence;
+                if (!changes.empty()) {
+                    try {
+                        notification = m_conn->mark_sync_apply_committed(
+                            1u, changes.size(), affected_dbi_names);
+                        notify = true;
+                    } catch (...) {
+                        return acknowledgement;
+                    }
+                }
+            }
+            if (notify) {
+                m_conn->notify_sync_apply_observers(notification);
+            }
+            return acknowledgement;
         }
 
         /// \brief Decodes and applies a logical delivery envelope.
@@ -853,6 +1011,17 @@ namespace sync {
         }
 
     private:
+        static void set_logical_delivery_acknowledgement_failure(
+                LogicalDeliveryAcknowledgement& acknowledgement,
+                const std::string& error,
+                bool retryable,
+                const CodecBounds* bounds) {
+            acknowledgement.ok = false;
+            acknowledgement.retryable = retryable;
+            acknowledgement.error =
+                bounded_logical_delivery_acknowledgement_error(error, bounds);
+        }
+
         struct CursorGuard {
             explicit CursorGuard(MDBX_cursor* cursor) : raw(cursor) {}
             ~CursorGuard() { if (raw) mdbx_cursor_close(raw); }
@@ -878,12 +1047,14 @@ namespace sync {
             AppliedStore applied(m_conn->env_handle());
             SchemaRegistryStore schemas(m_conn->env_handle());
             LogicalDeliveryStore logical_delivery(m_conn->env_handle());
+            LogicalDeliveryOrderStore logical_delivery_order(m_conn->env_handle());
             LogicalOutboxStore logical_outbox(m_conn->env_handle());
             meta.open(txn);
             change_log.open(txn);
             applied.open(txn);
             schemas.open(txn);
             logical_delivery.open(txn);
+            logical_delivery_order.open(txn);
             logical_outbox.open(txn);
         }
 
