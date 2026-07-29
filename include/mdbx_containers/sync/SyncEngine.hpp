@@ -42,6 +42,7 @@
 #include "ChangeBatchCodec.hpp"
 #include "ChangeOp.hpp"
 #include "LogicalDeliveryEnvelopeCodec.hpp"
+#include "ILogicalDeliveryOutbox.hpp"
 #include "LogicalChangeFrameCodec.hpp"
 #include "LogicalTableAdapter.hpp"
 #include "LogicalSchemaValidation.hpp"
@@ -50,6 +51,7 @@
 #include "stores/AppliedStore.hpp"
 #include "stores/ChangeLogStore.hpp"
 #include "stores/LogicalDeliveryStore.hpp"
+#include "stores/LogicalOutboxStore.hpp"
 #include "stores/MetaStore.hpp"
 #include "stores/OriginIndexStore.hpp"
 #include "stores/SchemaRegistryStore.hpp"
@@ -126,7 +128,7 @@ namespace sync {
     };
 
     /// \brief Pull/push/apply coordinator bound to a single \c Connection.
-    class SyncEngine {
+    class SyncEngine : public ILogicalDeliveryOutbox {
         struct PullOrigin {
             NodeId origin;
             std::uint64_t last_seq;
@@ -473,6 +475,75 @@ namespace sync {
             return removed;
         }
 
+        /// \brief Persists a locally-originated ordered logical delivery.
+        /// \details Sequences are allocated independently for each destination.
+        /// This only enqueues the envelope; transport dispatch and receiver
+        /// acknowledgements are separate protocol layers.
+        LogicalDeliveryEnvelope enqueue_logical_delivery(
+                const DbId& destination,
+                const LogicalChangeFrame& frame,
+                const CodecBounds* bounds = nullptr) {
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            const LogicalDeliveryEnvelope envelope = enqueue_logical_delivery(
+                txn.handle(), destination, frame, bounds);
+            txn.commit();
+            return envelope;
+        }
+
+        /// \brief Persists one delivery in a caller-owned write transaction.
+        /// \details This does not commit or roll back \p txn. It is the
+        /// transaction-bound outbox API used by logical capture sessions to
+        /// atomically commit their table mutations and queued delivery.
+        LogicalDeliveryEnvelope enqueue_logical_delivery(
+                MDBX_txn* txn,
+                const DbId& destination,
+                const LogicalChangeFrame& frame,
+                const CodecBounds* bounds = nullptr) override {
+            txn = checked_external_txn(
+                txn, "SyncEngine::enqueue_logical_delivery");
+            initialize_system_stores(txn);
+            MetaStore meta(m_conn->env_handle());
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            meta.open(txn);
+            const NodeId origin = meta.get_node_id(txn);
+            if (is_zero_sync_id(origin)) {
+                throw std::logic_error(
+                    "SyncEngine local node identity is not initialised");
+            }
+            return outbox.enqueue(txn, destination, origin, frame, bounds);
+        }
+
+        /// \brief Lists locally queued ordered deliveries for one destination.
+        std::vector<LogicalDeliveryEnvelope> pending_logical_deliveries(
+                const DbId& destination,
+                std::size_t limit = 0u,
+                const CodecBounds* bounds = nullptr) const {
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            return outbox.list_pending(txn.handle(), destination, limit, bounds);
+        }
+
+        /// \brief Persists a cumulative acknowledgement and removes its prefix.
+        std::size_t acknowledge_logical_deliveries(
+                const DbId& destination,
+                std::uint64_t acknowledged_through) {
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            initialize_system_stores(txn.handle());
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            const std::size_t removed = outbox.acknowledge_through(
+                txn.handle(), destination, acknowledged_through);
+            txn.commit();
+            return removed;
+        }
+
+        /// \brief Returns the persisted cumulative acknowledgement frontier.
+        std::uint64_t logical_delivery_acknowledged_through(
+                const DbId& destination) const {
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            return outbox.acknowledged_through(txn.handle(), destination);
+        }
+
         /// \brief Applies a single \c ChangeBatch to local DBIs inside \p txn.
         /// \details See class-level docs for the seq / apply rules. The
         /// caller commits the transaction. User DBIs are opened lazily by
@@ -807,11 +878,13 @@ namespace sync {
             AppliedStore applied(m_conn->env_handle());
             SchemaRegistryStore schemas(m_conn->env_handle());
             LogicalDeliveryStore logical_delivery(m_conn->env_handle());
+            LogicalOutboxStore logical_outbox(m_conn->env_handle());
             meta.open(txn);
             change_log.open(txn);
             applied.open(txn);
             schemas.open(txn);
             logical_delivery.open(txn);
+            logical_outbox.open(txn);
         }
 
         static ApplyOutcome make_apply_outcome(ApplyResult result,

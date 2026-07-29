@@ -16,6 +16,7 @@
 #include <vector>
 
 #include "../../KeyValueTable.hpp"
+#include "../ILogicalDeliveryOutbox.hpp"
 #include "../LogicalTableAdapter.hpp"
 #include "../LogicalSchemaValidation.hpp"
 #include "../common.hpp"
@@ -478,6 +479,10 @@ namespace detail {
                 }
             }
 
+            /// \brief Commits local mutations and returns their logical changes.
+            /// \warning The returned changes are not published atomically with
+            /// the table transaction. Use \c commit_to_outbox() when local
+            /// durability and delivery enqueueing must share one transaction.
             void commit(std::vector<LogicalChange>& out) {
                 ensure_active();
                 const std::size_t old_size = out.size();
@@ -492,6 +497,23 @@ namespace detail {
                 }
                 m_pending.clear();
                 m_active = false;
+            }
+
+            /// \brief Commits captured table mutations and their delivery atomically.
+            LogicalDeliveryEnvelope commit_to_outbox(
+                    ILogicalDeliveryOutbox& outbox,
+                    const DbId& destination,
+                    const CodecBounds* bounds = nullptr) {
+                ensure_active();
+                LogicalChangeFrame frame;
+                frame.changes = m_pending;
+                const LogicalDeliveryEnvelope envelope =
+                    outbox.enqueue_logical_delivery(
+                        m_txn.handle(), destination, frame, bounds);
+                m_txn.commit();
+                m_pending.clear();
+                m_active = false;
+                return envelope;
             }
 
             void rollback() noexcept {

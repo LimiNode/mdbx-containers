@@ -542,6 +542,26 @@ the numeric `origin_sequence`: it does not decide whether an envelope is an
 exact duplicate delivery identity, persist a watermark, buffer missing frames,
 or decide whether it is safe to advance one.
 
+`LogicalOutboxStore` is the sender-side durable foundation for a future ordered
+delivery protocol. `SyncEngine::enqueue_logical_delivery()` persists an envelope
+in `_mdbxc_logical_outbox` and allocates a monotonic `origin_sequence` per
+destination database, not globally across unrelated destinations. Its MDBX entry
+keys contain the destination and a big-endian sequence suffix, so
+`pending_logical_deliveries()` reads the stream in numeric order. The generated
+frame id is stable for that stored sequence, and allocating a frame, updating the
+next sequence, acknowledging a prefix, and deleting acknowledged entries are all
+transactional. A rollback therefore neither consumes a sequence nor leaves a
+queue entry behind. `_mdbxc_logical_outbox` is created during the normal
+committed sync-system initialization lifecycle, so deployments need one
+additional named-DBI slot in `Config::max_dbs` compared with a layout that did
+not use the outbox.
+
+`acknowledge_logical_deliveries()` currently exposes only a local cumulative
+frontier and deletes its acknowledged outbox prefix. It does not establish a
+wire acknowledgement, receiver-side ordering, capability negotiation, or retry
+scheduling. The older `apply_logical_delivery_envelope()` API remains intentionally
+unordered and is not implicitly redirected through this outbox.
+
 `LogicalDeliveryStore` persists one monotonic per-origin watermark in the
 optional `_mdbxc_logical_delivery_watermarks` DBI. The DBI is created lazily by
 the first `SyncEngine::prune_logical_delivery_markers()` call; normal logical

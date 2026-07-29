@@ -3,6 +3,15 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added `_mdbxc_logical_outbox` and the sender-side
+  `SyncEngine::enqueue_logical_delivery()` lifecycle for future ordered logical
+  delivery. The outbox persists independent monotonic streams per destination,
+  lists pending envelopes in numeric order, and atomically removes an
+  acknowledged prefix through `acknowledge_logical_deliveries()`. It is a local
+  durable queue only: transport capability negotiation, receiver ordering, and
+  wire acknowledgements remain subsequent protocol work. Sync environments now
+  reserve one additional named-DBI slot in `Config::max_dbs` for the committed
+  `_mdbxc_logical_outbox` system store.
 - Added explicit logical-delivery replay-marker pruning with persistent
   per-origin watermarks. `SyncEngine::prune_logical_delivery_markers()` lazily
   creates its watermark DBI, removes acknowledged markers atomically, and turns

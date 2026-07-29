@@ -443,6 +443,7 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/sync/LogicalChangeFrameCodec.hpp
         mdbx_containers/sync/LogicalDeliveryEnvelope.hpp
         mdbx_containers/sync/LogicalDeliveryEnvelopeCodec.hpp
+        mdbx_containers/sync/ILogicalDeliveryOutbox.hpp
         mdbx_containers/sync/LogicalTableAdapter.hpp
         mdbx_containers/sync/LogicalSchemaValidation.hpp
         mdbx_containers/sync/adapters/KeyValueTableLogicalAdapter.hpp
@@ -453,6 +454,7 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/sync/SyncNodeSession.hpp
         mdbx_containers/sync/SyncWorkerGuard.hpp
         mdbx_containers/sync/stores/LogicalDeliveryStore.hpp
+        mdbx_containers/sync/stores/LogicalOutboxStore.hpp
         mdbx_containers/sync/stores/SchemaRegistryStore.hpp
         mdbx_containers/sync/TransportMessageCodec.hpp
     )
