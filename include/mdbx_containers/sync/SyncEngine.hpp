@@ -780,7 +780,7 @@ namespace sync {
                     request.envelope = pending[i];
                     request.sender_capabilities = local.capabilities;
                     const LogicalDeliveryAcknowledgement acknowledgement =
-                        peer.deliver_ordered_logical_delivery(request, bounds);
+                        peer.deliver_ordered_logical_request(request, bounds);
                     try {
                         validate_logical_delivery_acknowledgement_for_sender(
                             acknowledgement, pending[i], known_tail,

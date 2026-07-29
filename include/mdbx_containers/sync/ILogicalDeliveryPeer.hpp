@@ -27,7 +27,7 @@ namespace sync {
         /// \brief Delivers one request with sender feature context.
         /// \details The default preserves existing peers that implemented the
         /// earlier envelope-only virtual method. Such peers remain on the
-        /// conservative acknowledgement path until they override this overload.
+        /// conservative acknowledgement path until they override this method.
         virtual LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
                 const LogicalDeliveryRequest& request,
                 const CodecBounds* bounds = nullptr) {
