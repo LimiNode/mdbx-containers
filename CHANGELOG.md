@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added capability-gated ordered logical delivery dispatch through
+  `ILogicalDeliveryPeer`, including the in-process `DirectLogicalDeliveryPeer`.
+  Valid cumulative acknowledgements clean the matching sender outbox prefix;
+  receiver-side ordered marker pruning is explicit and bounded by its persisted
+  contiguous frontier.
 - Added persisted receiver-side ordering for the `OrderedDelivery` capability.
   `SyncEngine::apply_ordered_logical_delivery_envelope()` accepts only the next
   contiguous sequence per remote origin, returns a cumulative acknowledgement,

@@ -170,6 +170,65 @@ public:
     }
 };
 
+class InvalidLogicalDeliveryPeer : public mdbxc::sync::ILogicalDeliveryPeer {
+public:
+    enum Mode {
+        FailedCurrentDelivery,
+        SuccessfulRetryableDelivery,
+        WrongDestination,
+        WrongOrigin,
+        AckBeyondDelivery
+    };
+
+    InvalidLogicalDeliveryPeer(const mdbxc::sync::NodeId& node,
+                               const mdbxc::sync::DbId& db_uuid,
+                               Mode mode)
+        : m_mode(mode) {
+        m_hello.node_id = node;
+        m_hello.db_uuid = db_uuid;
+        m_hello.capabilities.flags = static_cast<std::uint64_t>(
+            mdbxc::sync::LogicalDeliveryCapability::OrderedDelivery);
+    }
+
+    mdbxc::sync::LogicalDeliveryHello logical_delivery_hello() override {
+        return m_hello;
+    }
+
+    mdbxc::sync::LogicalDeliveryAcknowledgement
+    deliver_ordered_logical_delivery(
+            const mdbxc::sync::LogicalDeliveryEnvelope& envelope,
+            const mdbxc::sync::CodecBounds*) override {
+        mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
+        acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+        acknowledgement.origin_node_id = envelope.origin_node_id;
+        acknowledgement.acknowledged_through = envelope.origin_sequence;
+        switch (m_mode) {
+        case FailedCurrentDelivery:
+            acknowledgement.ok = false;
+            acknowledgement.retryable = true;
+            acknowledgement.error = "retry";
+            break;
+        case SuccessfulRetryableDelivery:
+            acknowledgement.retryable = true;
+            break;
+        case WrongDestination:
+            acknowledgement.destination_db_uuid = make_node(0xEE);
+            break;
+        case WrongOrigin:
+            acknowledgement.origin_node_id = make_node(0xEF);
+            break;
+        case AckBeyondDelivery:
+            ++acknowledgement.acknowledged_through;
+            break;
+        }
+        return acknowledgement;
+    }
+
+private:
+    mdbxc::sync::LogicalDeliveryHello m_hello;
+    Mode m_mode;
+};
+
 class RawWritingLogicalAdapter : public mdbxc::sync::ILogicalTableAdapter {
 public:
     RawWritingLogicalAdapter(
@@ -3412,6 +3471,162 @@ void test_ordered_logical_delivery_enforces_receiver_frontier() {
     cleanup(path);
 }
 
+void test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers() {
+    const std::string sender_path = "test_ordered_logical_sender.mdbx";
+    const std::string receiver_path = "test_ordered_logical_receiver.mdbx";
+    const std::string dbi_name = "ordered_logical_dispatch";
+    const std::string schema_id = "app.ordered_logical_dispatch.v1";
+    cleanup(sender_path);
+    cleanup(receiver_path);
+
+    mdbxc::Config sender_cfg;
+    sender_cfg.pathname = sender_path;
+    sender_cfg.max_dbs = 20;
+    sender_cfg.no_subdir = true;
+    mdbxc::Config receiver_cfg = sender_cfg;
+    receiver_cfg.pathname = receiver_path;
+    std::shared_ptr<mdbxc::Connection> sender_conn =
+        mdbxc::Connection::create(sender_cfg);
+    std::shared_ptr<mdbxc::Connection> receiver_conn =
+        mdbxc::Connection::create(receiver_cfg);
+
+    const mdbxc::sync::NodeId sender_node = make_node(0x11);
+    const mdbxc::sync::NodeId receiver_node = make_node(0x21);
+    const mdbxc::sync::DbId sender_db = make_node(0x31);
+    const mdbxc::sync::DbId receiver_db = make_node(0x41);
+    mdbxc::sync::SyncEngine sender(sender_conn);
+    mdbxc::sync::SyncEngine receiver(receiver_conn);
+    sender.initialize_local_identity(sender_node, sender_db);
+    receiver.initialize_local_identity(receiver_node, receiver_db);
+    receiver.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(receiver_conn, dbi_name);
+    int apply_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(table, schema_id, apply_calls);
+    receiver.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalSchemaRef ref;
+    ref.schema_id = schema_id;
+    ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+    ref.schema_version = 1u;
+    const std::vector<std::uint8_t> payload;
+    mdbxc::sync::LogicalChangeFrame frame;
+    frame.changes.push_back(mdbxc::sync::LogicalChange(ref, 1u, 0u, payload));
+    sender.enqueue_logical_delivery(receiver_db, frame);
+    sender.enqueue_logical_delivery(receiver_db, frame);
+
+    mdbxc::sync::DirectLogicalDeliveryPeer peer(receiver);
+    const mdbxc::sync::LogicalDeliveryDispatchResult dispatched =
+        sender.deliver_pending_logical_deliveries(peer, receiver_db);
+    MDBXC_TEST_ASSERT(dispatched.ok);
+    MDBXC_TEST_ASSERT(dispatched.delivered == 2u);
+    MDBXC_TEST_ASSERT(dispatched.acknowledged_through == 2u);
+    MDBXC_TEST_ASSERT(sender.pending_logical_deliveries(receiver_db).empty());
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
+    MDBXC_TEST_ASSERT(
+        receiver.prune_ordered_logical_delivery_markers(sender_node) == 2u);
+    {
+        mdbxc::Transaction txn =
+            receiver_conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::LogicalDeliveryStore delivery(receiver_conn->env_handle());
+        MDBXC_TEST_ASSERT(delivery.count(txn.handle()) == 0u);
+        MDBXC_TEST_ASSERT(delivery.watermark(txn.handle(), sender_node) == 2u);
+    }
+
+    sender_conn->disconnect();
+    receiver_conn->disconnect();
+    cleanup(sender_path);
+    cleanup(receiver_path);
+}
+
+void test_ordered_logical_delivery_loopback_cleans_outbox() {
+    const std::string path = "test_ordered_logical_loopback.mdbx";
+    const std::string dbi_name = "ordered_logical_loopback";
+    const std::string schema_id = "app.ordered_logical_loopback.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId node = make_node(0xB1);
+    const mdbxc::sync::DbId local_db = make_node(0xC1);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(node, local_db);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, schema_id);
+    {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->insert_or_assign(11, "eleven");
+        const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+            session->commit_to_outbox(engine, local_db);
+        MDBXC_TEST_ASSERT(envelope.origin_sequence == 1u);
+    }
+
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(local_db).size() == 1u);
+    mdbxc::sync::DirectLogicalDeliveryPeer peer(engine);
+    const mdbxc::sync::LogicalDeliveryDispatchResult dispatched =
+        engine.deliver_pending_logical_deliveries(peer, local_db);
+    MDBXC_TEST_ASSERT(dispatched.ok);
+    MDBXC_TEST_ASSERT(dispatched.delivered == 1u);
+    MDBXC_TEST_ASSERT(dispatched.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(local_db).empty());
+    const std::pair<bool, std::string> found = table.find_compat(11);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "eleven");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_ordered_logical_delivery_dispatch_rejects_invalid_acknowledgements() {
+    const std::string path = "test_ordered_logical_invalid_ack.mdbx";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId sender_node = make_node(0x71);
+    const mdbxc::sync::NodeId peer_node = make_node(0x81);
+    const mdbxc::sync::DbId sender_db = make_node(0x91);
+    const mdbxc::sync::DbId destination = make_node(0xA1);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(sender_node, sender_db);
+    engine.enqueue_logical_delivery(
+        destination, make_outbox_test_frame("app.invalid_ack", 1u));
+
+    const InvalidLogicalDeliveryPeer::Mode modes[] = {
+        InvalidLogicalDeliveryPeer::FailedCurrentDelivery,
+        InvalidLogicalDeliveryPeer::SuccessfulRetryableDelivery,
+        InvalidLogicalDeliveryPeer::WrongDestination,
+        InvalidLogicalDeliveryPeer::WrongOrigin,
+        InvalidLogicalDeliveryPeer::AckBeyondDelivery
+    };
+    for (std::size_t i = 0u;
+         i < sizeof(modes) / sizeof(modes[0]); ++i) {
+        InvalidLogicalDeliveryPeer peer(peer_node, destination, modes[i]);
+        const mdbxc::sync::LogicalDeliveryDispatchResult result =
+            engine.deliver_pending_logical_deliveries(peer, destination);
+        MDBXC_TEST_ASSERT(!result.ok);
+        MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(destination).size() ==
+                          1u);
+        MDBXC_TEST_ASSERT(
+            engine.logical_delivery_acknowledged_through(destination) == 0u);
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 } // namespace
 
 int main() {
@@ -3467,5 +3682,8 @@ int main() {
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     test_logical_outbox_persists_ordered_destination_streams();
     test_ordered_logical_delivery_enforces_receiver_frontier();
+    test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers();
+    test_ordered_logical_delivery_loopback_cleans_outbox();
+    test_ordered_logical_delivery_dispatch_rejects_invalid_acknowledgements();
     return 0;
 }

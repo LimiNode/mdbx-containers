@@ -44,6 +44,7 @@
 #include "LogicalDeliveryEnvelopeCodec.hpp"
 #include "ILogicalDeliveryOutbox.hpp"
 #include "LogicalDeliveryProtocol.hpp"
+#include "ILogicalDeliveryPeer.hpp"
 #include "LogicalChangeFrameCodec.hpp"
 #include "LogicalTableAdapter.hpp"
 #include "LogicalSchemaValidation.hpp"
@@ -700,6 +701,96 @@ namespace sync {
             auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
             LogicalOutboxStore outbox(m_conn->env_handle());
             return outbox.acknowledged_through(txn.handle(), destination);
+        }
+
+        /// \brief Delivers a pending ordered outbox prefix to one capable peer.
+        /// \details A validated cumulative acknowledgement first advances the
+        /// local outbox frontier. A failed acknowledgement can advance only an
+        /// earlier prefix; it can never acknowledge the delivery that failed.
+        /// Existing raw sync peers do not implement \c ILogicalDeliveryPeer and
+        /// therefore cannot be passed to this opt-in API.
+        LogicalDeliveryDispatchResult deliver_pending_logical_deliveries(
+                ILogicalDeliveryPeer& peer,
+                const DbId& destination,
+                std::size_t limit = 0u,
+                const CodecBounds* bounds = nullptr) {
+            try {
+                const LogicalDeliveryHello local = logical_delivery_hello();
+                const LogicalDeliveryHello remote = peer.logical_delivery_hello();
+                if (compare_node_id(remote.db_uuid, destination) != 0) {
+                    return LogicalDeliveryDispatchResult::failure(
+                        "Logical delivery peer destination db_uuid mismatch");
+                }
+                if (!logical_delivery_capability_negotiated(
+                        local.capabilities, remote.capabilities,
+                        LogicalDeliveryCapability::OrderedDelivery)) {
+                    return LogicalDeliveryDispatchResult::failure(
+                        "Logical delivery peer does not support OrderedDelivery");
+                }
+
+                LogicalDeliveryDispatchResult out;
+                const std::vector<LogicalDeliveryEnvelope> pending =
+                    pending_logical_deliveries(destination, limit, bounds);
+                out.acknowledged_through =
+                    logical_delivery_acknowledged_through(destination);
+                for (std::size_t i = 0; i < pending.size(); ++i) {
+                    const LogicalDeliveryAcknowledgement acknowledgement =
+                        peer.deliver_ordered_logical_delivery(pending[i], bounds);
+                    try {
+                        validate_logical_delivery_acknowledgement_for_delivery(
+                            acknowledgement, pending[i], bounds);
+                    } catch (const std::exception& e) {
+                        return LogicalDeliveryDispatchResult::failure(
+                            e.what());
+                    }
+                    if (acknowledgement.acknowledged_through >
+                        out.acknowledged_through) {
+                        acknowledge_logical_deliveries(
+                            destination,
+                            acknowledgement.acknowledged_through);
+                        out.acknowledged_through =
+                            acknowledgement.acknowledged_through;
+                    }
+                    if (!acknowledgement.ok) {
+                        out.ok = false;
+                        out.retryable = acknowledgement.retryable;
+                        out.error = acknowledgement.error;
+                        return out;
+                    }
+                    ++out.delivered;
+                }
+                return out;
+            } catch (const std::exception& e) {
+                return LogicalDeliveryDispatchResult::failure(e.what(), true);
+            } catch (...) {
+                return LogicalDeliveryDispatchResult::failure(
+                    "Logical delivery dispatch failed", true);
+            }
+        }
+
+        /// \brief Prunes ordered-delivery replay markers through its frontier.
+        /// \details This is safe only for an origin whose deliveries use the
+        /// ordered path exclusively: the persisted order frontier already makes
+        /// every sequence at or below it a no-op. Do not mix unordered envelopes
+        /// from the same origin with this pruning lifecycle.
+        std::size_t prune_ordered_logical_delivery_markers(
+                const NodeId& origin) {
+            const Connection::SyncApplyWriteGuard sync_apply_guard =
+                m_conn->sync_apply_write_guard();
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            initialize_system_stores(txn.handle());
+            LogicalDeliveryOrderStore order(m_conn->env_handle());
+            LogicalDeliveryStore delivery(m_conn->env_handle());
+            const std::uint64_t frontier =
+                order.last_applied(txn.handle(), origin);
+            if (frontier == 0u) {
+                txn.rollback();
+                return 0u;
+            }
+            const std::size_t removed = delivery.prune_up_to(
+                txn.handle(), origin, frontier);
+            txn.commit();
+            return removed;
         }
 
         /// \brief Applies a single \c ChangeBatch to local DBIs inside \p txn.
