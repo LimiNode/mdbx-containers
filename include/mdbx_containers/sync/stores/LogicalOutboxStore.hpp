@@ -219,11 +219,14 @@ namespace sync {
             std::vector<std::uint8_t> first_key = prefix;
             detail::append_u64_be(first_key,
                                   metadata.acknowledged_through + 1u);
+            validate_acknowledgement_prefix(
+                txn, prefix, first_key, metadata.acknowledged_through + 1u,
+                sequence);
+
             MDBX_cursor* cursor = nullptr;
             check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
                        "LogicalOutboxStore acknowledgement cursor open failed");
             std::size_t removed = 0u;
-            std::uint64_t expected = metadata.acknowledged_through + 1u;
             try {
                 MDBX_val key = make_val(first_key);
                 MDBX_val value;
@@ -233,23 +236,19 @@ namespace sync {
                     if (current > sequence) {
                         break;
                     }
-                    if (current != expected) {
-                        throw std::runtime_error(
-                            "LogicalOutboxStore acknowledgement prefix is not contiguous");
-                    }
                     check_mdbx(mdbx_cursor_del(cursor, MDBX_CURRENT),
                                "LogicalOutboxStore acknowledgement delete failed");
                     ++removed;
-                    ++expected;
                     rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
                 }
                 if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
                     check_mdbx(rc,
                                "LogicalOutboxStore acknowledgement cursor read failed");
                 }
-                if (expected != sequence + 1u) {
+                if (removed != static_cast<std::size_t>(
+                        sequence - metadata.acknowledged_through)) {
                     throw std::runtime_error(
-                        "LogicalOutboxStore acknowledgement prefix is incomplete");
+                        "LogicalOutboxStore acknowledgement delete count is invalid");
                 }
             } catch (...) {
                 mdbx_cursor_close(cursor);
@@ -366,6 +365,43 @@ namespace sync {
                     "LogicalOutboxStore entry key has invalid prefix");
             }
             return detail::read_u64_be(bytes + entry_prefix_size());
+        }
+
+        void validate_acknowledgement_prefix(
+                MDBX_txn* txn,
+                const std::vector<std::uint8_t>& prefix,
+                const std::vector<std::uint8_t>& first_key,
+                std::uint64_t first_sequence,
+                std::uint64_t last_sequence) const {
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalOutboxStore acknowledgement validation cursor open failed");
+            try {
+                std::uint64_t expected = first_sequence;
+                MDBX_val key = make_val(first_key);
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_SET_RANGE);
+                while (expected <= last_sequence) {
+                    if (rc != MDBX_SUCCESS || !has_entry_prefix(key, prefix) ||
+                        decode_entry_sequence(key) != expected) {
+                        throw std::runtime_error(
+                            "LogicalOutboxStore acknowledgement prefix is not contiguous");
+                    }
+                    if (expected == last_sequence) {
+                        break;
+                    }
+                    ++expected;
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalOutboxStore acknowledgement validation cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
         }
 
         Metadata read_metadata(MDBX_txn* txn,
