@@ -3417,6 +3417,73 @@ void test_logical_outbox_acknowledgement_gap_preserves_caller_transaction() {
     cleanup(path);
 }
 
+void test_logical_outbox_acknowledgement_missing_tail_preserves_caller_transaction() {
+    const std::string path = "test_logical_outbox_acknowledgement_missing_tail.mdbx";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    const mdbxc::sync::NodeId local_node = make_node(0xD2);
+    const mdbxc::sync::DbId local_db = make_node(0xE2);
+    const mdbxc::sync::DbId destination = make_node(0xF2);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+    engine.enqueue_logical_delivery(
+        destination, make_outbox_test_frame("app.outbox.missing-tail", 1u));
+    engine.enqueue_logical_delivery(
+        destination, make_outbox_test_frame("app.outbox.missing-tail", 2u));
+    engine.enqueue_logical_delivery(
+        destination, make_outbox_test_frame("app.outbox.missing-tail", 3u));
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        mdbxc::sync::LogicalOutboxStore outbox(conn->env_handle());
+        const MDBX_dbi dbi = outbox.handle(txn.handle());
+        std::vector<std::uint8_t> key;
+        key.reserve(2u + destination.size() + 8u);
+        key.push_back(1u);
+        key.push_back(1u);
+        key.insert(key.end(), destination.begin(), destination.end());
+        mdbxc::sync::detail::append_u64_be(key, 3u);
+        MDBX_val raw_key = {
+            key.empty() ? nullptr : &key[0],
+            key.size()
+        };
+        MDBXC_TEST_ASSERT(mdbx_del(txn.handle(), dbi, &raw_key, nullptr) ==
+                          MDBX_SUCCESS);
+        txn.commit();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        mdbxc::sync::LogicalOutboxStore outbox(conn->env_handle());
+        bool rejected = false;
+        try {
+            outbox.acknowledge_through(txn.handle(), destination, 3u);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        MDBXC_TEST_ASSERT(rejected);
+        txn.commit();
+    }
+
+    MDBXC_TEST_ASSERT(
+        engine.logical_delivery_acknowledged_through(destination) == 0u);
+    const std::vector<mdbxc::sync::LogicalDeliveryEnvelope> pending =
+        engine.pending_logical_deliveries(destination);
+    MDBXC_TEST_ASSERT(pending.size() == 2u);
+    MDBXC_TEST_ASSERT(pending[0].origin_sequence == 1u);
+    MDBXC_TEST_ASSERT(pending[1].origin_sequence == 2u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_ordered_logical_delivery_enforces_receiver_frontier() {
     const std::string path = "test_ordered_logical_delivery.mdbx";
     const std::string dbi_name = "ordered_logical_delivery";
@@ -3848,6 +3915,7 @@ int main() {
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     test_logical_outbox_persists_ordered_destination_streams();
     test_logical_outbox_acknowledgement_gap_preserves_caller_transaction();
+    test_logical_outbox_acknowledgement_missing_tail_preserves_caller_transaction();
     test_ordered_logical_delivery_enforces_receiver_frontier();
     test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers();
     test_cumulative_logical_delivery_acknowledgement_recovers_after_restart();
