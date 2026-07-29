@@ -97,9 +97,8 @@ The logical sync scaffolding is preparatory only:
   after any mutation. The transport `handle_push()` path still applies raw DBI
   operations only.
 - `KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are explicit
-  apply helpers only. `KeyValueTableLogicalAdapter` also has an opt-in typed
-  capture session; `KeyTableLogicalAdapter` does not yet capture local typed
-  writes.
+  apply helpers with opt-in typed capture sessions. Neither is connected to
+  the transport pull/push path yet; callers own logical frame delivery.
 
 Until a causal context or another conflict model is implemented, future logical
 table support should document either one authoritative writer for the affected
