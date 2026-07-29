@@ -2082,6 +2082,51 @@ void test_logical_delivery_store_reads_legacy_layout_without_watermarks() {
     cleanup(path);
 }
 
+void test_logical_delivery_store_reopens_watermark_after_aborted_create() {
+    const std::string path =
+        "test_logical_delivery_watermark_abort_reopen.mdbx";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId origin = make_node(0x52);
+    mdbxc::sync::LogicalDeliveryStore store(conn->env_handle());
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBXC_TEST_ASSERT(store.prune_up_to(txn.handle(), origin, 7u) == 0u);
+        txn.rollback();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        MDBXC_TEST_ASSERT(store.watermark(txn.handle(), origin) == 0u);
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBXC_TEST_ASSERT(store.prune_up_to(txn.handle(), origin, 7u) == 0u);
+        txn.commit();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        MDBXC_TEST_ASSERT(store.watermark(txn.handle(), origin) == 7u);
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_value_logical_delivery_envelope_accepts_long_frame_id() {
     const std::string path =
         "test_key_value_logical_delivery_long_frame_id.mdbx";
@@ -3046,6 +3091,7 @@ int main() {
     test_key_value_logical_delivery_envelope_skips_self_origin();
     test_key_value_logical_delivery_prunes_markers_behind_watermark();
     test_logical_delivery_store_reads_legacy_layout_without_watermarks();
+    test_logical_delivery_store_reopens_watermark_after_aborted_create();
     test_key_value_logical_delivery_envelope_accepts_long_frame_id();
     test_key_value_logical_delivery_envelope_keeps_custom_bounds();
     test_key_value_logical_delivery_object_api_rejects_frame_id_bound();

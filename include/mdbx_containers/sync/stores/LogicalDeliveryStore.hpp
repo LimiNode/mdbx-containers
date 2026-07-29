@@ -55,8 +55,7 @@ namespace sync {
               m_watermark_dbi_name(dbi_name + "_watermarks"),
               m_dbi(0),
               m_watermark_dbi(0),
-              m_marker_open(false),
-              m_watermark_open(false) {}
+              m_marker_open(false) {}
 
         /// \brief Opens the store DBI inside the supplied transaction.
         void open(MDBX_txn* txn) {
@@ -74,7 +73,6 @@ namespace sync {
 
         void reset_open() {
             m_marker_open = false;
-            m_watermark_open = false;
         }
 
         void ensure_open() const {
@@ -295,9 +293,6 @@ namespace sync {
         }
 
         bool open_watermark_if_exists(MDBX_txn* txn) const {
-            if (m_watermark_open) {
-                return true;
-            }
             const int rc = mdbx_dbi_open(
                 txn, m_watermark_dbi_name.c_str(),
                 static_cast<MDBX_db_flags_t>(0), &m_watermark_dbi);
@@ -305,16 +300,11 @@ namespace sync {
                 return false;
             }
             check_mdbx(rc, "Failed to open LogicalDeliveryStore watermark DBI");
-            m_watermark_open = true;
             return true;
         }
 
         void open_watermark_for_write(MDBX_txn* txn) const {
-            if (m_watermark_open) {
-                return;
-            }
             open_dbi_checked(txn, m_watermark_dbi_name, m_watermark_dbi);
-            m_watermark_open = true;
         }
 
         static void open_dbi_checked(MDBX_txn* txn,
@@ -669,7 +659,6 @@ namespace sync {
         mutable MDBX_dbi m_dbi;
         mutable MDBX_dbi m_watermark_dbi;
         mutable bool     m_marker_open;
-        mutable bool     m_watermark_open;
     };
 
 } // namespace sync
