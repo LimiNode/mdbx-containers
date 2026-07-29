@@ -35,7 +35,9 @@ std::shared_ptr<mdbxc::Connection> open_env(const std::string& path) {
     using namespace mdbxc;
     Config c;
     c.pathname = path;
-    c.max_dbs = 8;
+    // SyncEngine owns seven system DBIs; this test also opens an application
+    // table and the origin index while validating changelog pagination.
+    c.max_dbs = 16;
     c.no_subdir = true;
     return Connection::create(c);
 }
