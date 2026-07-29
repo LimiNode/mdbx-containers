@@ -566,39 +566,42 @@ unordered and is not implicitly redirected through this outbox.
 that future exchange. Its `Hello` message carries optional capability bits; an
 unknown bit is preserved but does not become negotiated unless both peers expose
 a known capability. `Delivery` wraps a strict `LogicalDeliveryEnvelope`, and
-`Acknowledgement` carries a destination-scoped, conservative cumulative lower
-bound with explicit success/retryability. A successful response is capped at
-the sequence of the delivery it answers, even if the receiver has already
-persisted a higher frontier. This lets the sender validate and clean up only
-the attempted envelope. The first defined capability is `OrderedDelivery`. No
-existing HTTP, WebSocket, or raw pull/push endpoint advertises or accepts this
-protocol yet, so current transports remain backward-compatible raw-sync-only.
-
-Allowing a receiver to acknowledge a frontier ahead of the attempted delivery
-is deferred. That optimization requires a separate recovery contract for
-sender-state rollback, a local known-tail bound, and safe removal of multiple
-pending entries from one acknowledgement.
+`Acknowledgement` carries a destination-scoped cumulative lower bound with
+explicit success/retryability. `OrderedDelivery` alone keeps the conservative
+contract: a success acknowledges exactly the delivery it answers. When both
+peers negotiate `CumulativeAcknowledgement`, the receiver may return its higher
+persisted contiguous frontier for a duplicate. The sender validates that value
+against its own durable outbox known tail, then atomically removes the verified
+contiguous local prefix. This supports a sender restart after the receiver
+committed an earlier delivery but before the sender persisted cleanup. Existing
+peers that implement only the envelope-only delivery virtual method remain on
+the conservative contract. No existing HTTP, WebSocket, or raw pull/push
+endpoint advertises or accepts this protocol yet, so current transports remain
+backward-compatible raw-sync-only.
 
 `SyncEngine::apply_ordered_logical_delivery_envelope()` is the receiver-side
 implementation of `OrderedDelivery`. `_mdbxc_logical_delivery_order` stores the
 highest committed contiguous sequence for each remote origin. A sequence at or
-below that frontier is a successful no-op acknowledged through the attempted
-sequence; this intentionally caps the receiver's higher frontier. Only the
-exact next sequence reaches schema validation and adapters; a gap is a
-retryable acknowledgement and leaves both user data and markers untouched. The
-generic unordered delivery API remains separate, so applications do not acquire
-ordering merely by changing a call site. Order-state advance, replay marker, and
-adapter mutations commit in one transaction.
+below that frontier is a successful no-op. It acknowledges through the attempted
+sequence by default, or through the persisted frontier when the sender advertises
+`CumulativeAcknowledgement`. Only the exact next sequence reaches schema
+validation and adapters; a gap is a retryable acknowledgement and leaves both
+user data and markers untouched. The generic unordered delivery API remains
+separate, so applications do not acquire ordering merely by changing a call site.
+Order-state advance, replay marker, and adapter mutations commit in one
+transaction.
 
 `ILogicalDeliveryPeer` and `DirectLogicalDeliveryPeer` provide the capability-
 gated dispatch boundary. `SyncEngine::deliver_pending_logical_deliveries()`
 checks destination identity and negotiated `OrderedDelivery` before sending its
-outbox prefix. Each valid cumulative acknowledgement advances only that
-destination's local outbox frontier; a retryable negative acknowledgement can
-still acknowledge an earlier prefix. Receiver marker retention remains an
-explicit lifecycle choice: `prune_ordered_logical_delivery_markers(origin)`
-prunes only through the persisted contiguous frontier. It must be used only for
-origins that do not mix legacy unordered delivery with the ordered protocol.
+outbox prefix. A negotiated cumulative success is bounded by the sender's
+durable known tail, so it can safely clean a prefix that was delivered before a
+sender restart; entries already removed by that acknowledgement are skipped from
+the in-memory pending snapshot. A retryable negative acknowledgement can still
+acknowledge only an earlier prefix. Receiver marker retention remains an explicit
+lifecycle choice: `prune_ordered_logical_delivery_markers(origin)` prunes only
+through the persisted contiguous frontier. It must be used only for origins that
+do not mix legacy unordered delivery with the ordered protocol.
 
 `LogicalDeliveryStore` persists one monotonic per-origin watermark in the
 optional `_mdbxc_logical_delivery_watermarks` DBI. The DBI is created lazily by
