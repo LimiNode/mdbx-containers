@@ -144,11 +144,12 @@ different cache-backed readers can share the connection read side. Each
 instance mutex to preserve the existing table wrapper thread-safety contract.
 C++11 builds fall back to an exclusive connection mutex model.
 
-## Deferred `KeyMultiValueTable` sync design
+## `KeyMultiValueTable` logical sync contract
 
-This section documents the intended direction for future
-`KeyMultiValueTable` replication. It is a design contract only:
-`KeyMultiValueTable` still emits no `ChangeOp` in sync v0.1.
+This section documents the logical replication contract for
+`KeyMultiValueTable`. Raw v0.1 capture remains unsupported:
+`KeyMultiValueTable` emits no raw `ChangeOp` records. A future explicit typed
+capture session may emit only the operations defined by this contract.
 
 `KeyMultiValueTable` cannot safely reuse the v0.1 raw DBI put/delete model as
 an undocumented implementation detail. The table stores one MDBX DUPSORT record
@@ -192,7 +193,7 @@ relevant key/logical dataset or otherwise serializes conflicting updates before
 they are replicated. Ordered distributed history belongs to the separate
 `KeyOrderedMultiValueTable` API and still needs its own sync contract.
 
-Planned logical operations:
+The complete logical operation model is:
 
 | Operation | Required payload | Apply semantics |
 |-----------|------------------|-----------------|
@@ -203,36 +204,36 @@ Planned logical operations:
 | `EraseRange` | serialized inclusive key range | Remove every physical pair whose key is in the range. |
 | `Clear` | no key/value payload | Remove all pairs in the table. |
 
-These operations require an explicit wire extension. Do not encode them as
-plain v0.1 `ChangeOpType::Put` / `Delete` records against the DUPSORT DBI:
-that would leak the local sequence-prefixed duplicate value and would make
-remote replay depend on another node's private prefix allocator. A future
-implementation must add either a table-kind/sub-operation field to `ChangeOp`
-or a versioned table-specific payload envelope before enabling capture.
-Receivers must not attempt raw apply when they do not understand the extension.
-An old v0.1 decoder can only fail closed at the codec/framing boundary, which
-normally surfaces as a transport/framing rejection rather than a structured
-`PushResponse`. A capability-aware receiver may return a structured permanent
-sync error such as `UnsupportedCapability` only after it can parse the common
-envelope and determine that the table-specific operation is unsupported.
+These operations use the existing `LogicalChange` envelope with
+`LogicalTableKind::KeyMultiValue`, an adapter-local opcode, and an
+adapter-owned payload. They must not be encoded as plain v0.1
+`ChangeOpType::Put` / `Delete` records against the DUPSORT DBI: that would leak
+the local sequence-prefixed duplicate value and make remote replay depend on
+another node's private prefix allocator. Receivers without a registered
+matching adapter fail closed before mutation through logical schema-marker and
+adapter validation.
+
+The first implementation scope is intentionally smaller than the complete
+model. Its explicit typed capture session supports `InsertOne`, `EraseKey`,
+`EraseAllValues`, and `Clear`. It does not capture raw table calls, `append()`,
+`reconcile()`, `erase_range()`, or `EraseOneValue`. Those paths remain local
+until a later extension can preserve their exact multiset semantics. This is
+not partial raw capture: callers opt into the typed session and only its
+documented methods publish logical changes.
 
 Implementation phases:
 
-1. Add a capability-readable envelope and codec framing for a
-   `KeyMultiValueTable` operation subtype. Keep the subtype behind a new
-   mandatory batch/op capability bit so old decoders fail closed before apply,
-   while upgraded decoders can reject unsupported capability combinations as
-   structured permanent sync errors.
+1. Implement adapter payload encoding and preflight through the existing
+   logical schema marker and adapter registry. A receiver without the adapter
+   must reject the change before table mutation.
 2. Implement apply helpers that call the public/logical multivalue semantics:
    assign a fresh local duplicate prefix on `InsertOne`; match stripped public
    values for `EraseOneValue` and `EraseAllValues`; use public key ordering for
    range erasure.
-3. Add capture only after every mutating public method maps to one of the
-   logical operations above. A method that mutates the table but emits no
-   operation keeps the wrapper unsupported.
-4. Add negative compatibility tests: old decoders must reject the extension at
-   the framing boundary, while capability-aware decoders that lack the
-   `KeyMultiValueTable` subtype must return a structured permanent sync error.
+3. Add the scoped typed capture session only for methods that map directly to
+   the first implementation operations. Raw capture stays disabled.
+4. Add negative compatibility tests: receivers without the matching adapter or
+   persistent marker must fail before table mutation.
 5. Add round-trip tests before documenting the wrapper as supported. Tests must
    compare logical multiset counts, not raw duplicate bytes or local iteration
    order.
