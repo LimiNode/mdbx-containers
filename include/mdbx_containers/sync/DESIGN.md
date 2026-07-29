@@ -96,7 +96,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear under one-writer or causally serialized updates. |
-| `KeyOrderedMultiValueTable` | Append-only logical adapter | `KeyOrderedMultiValueTableLogicalAdapter` applies append-only changes through ordered delivery for one origin stream. Typed capture and destructive operations remain deferred. |
+| `KeyOrderedMultiValueTable` | Append-only logical adapter | `KeyOrderedMultiValueTableLogicalAdapter` captures and applies append-only changes through ordered delivery for the schema marker's one authoritative origin. Destructive operations remain deferred. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
 Do not add `record_op()` paths for unsupported table types without first
@@ -305,12 +305,14 @@ between nodes. A causally meaningful distributed history would need an explicit
 Lamport/HLC-style component or another causal-ordering model.
 
 The initial adapter supports only `append(key, value)`. `insert` is an alias for
-that operation and may use the same capture method. `erase`, `erase_at`,
+that operation and uses the same typed capture method. Its capture session owns
+one writable transaction and can atomically commit local appends plus an ordered
+outbox envelope through `commit_to_outbox()`. `erase`, `erase_at`,
 `clear`, and `replace_with` remain local-only until a persistent element
 identity, delete/tombstone semantics, and a new round-trip contract are
 specified.
 
-Required tests before enabling capture:
+Further ordered-history extensions require:
 
 - codec tests proving unknown multivalue operation bits/subtypes are rejected by
   older or capability-limited decoders;
@@ -342,9 +344,8 @@ anchors, see the
   format; deferred until an explicit identity-mapping scheme lands.
 - `KeyMultiValueTable` — DUPSORT duplicate values need the unordered multiset
   model described above before capture can be enabled.
-- `KeyOrderedMultiValueTable` — local ordered storage exists, but ordered
-  distributed histories need the explicit sync wire identity described above
-  before capture can be enabled.
+- `KeyOrderedMultiValueTable` — destructive ordered-history operations remain
+  deferred until a persistent element identity and tombstone contract exists.
 - `AnyValueTable` — heterogeneous values need type-tag propagation on the wire.
 - `IdentityProvider` integration in `BaseTable` — declared in v0.1, no
   write path until HashedKeyValueStore.
@@ -710,6 +711,12 @@ transaction, before any local mutation can be performed. For `KeyTable`, only
 successful membership changes are captured: inserting an existing key or
 erasing an absent key leaves the pending logical frame unchanged; an explicit
 clear request is captured even when the table is already empty.
+
+`KeyOrderedMultiValueTableLogicalAdapter` additionally requires its persistent
+schema marker to name the local node as the authoritative ordered origin before
+it starts capture. This prevents a local append from being committed into an
+outbox stream that the ordered receiver must reject. Its capture factory is
+lvalue-qualified because a session holds a reference to its adapter.
 
 The adapter payload codec is not the table storage serializer. The initial
 codec surface is deliberately small and explicit: callers provide key/value

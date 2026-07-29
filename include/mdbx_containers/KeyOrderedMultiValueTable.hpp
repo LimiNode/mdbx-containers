@@ -35,9 +35,10 @@ namespace mdbxc {
     /// significant. Use \ref KeyMultiValueTable when only pair multiplicity is
     /// significant and reconciliation by unordered multiset semantics is desired.
     ///
-    /// \note Sync v0.1 does not capture this wrapper yet. The physical format is
-    ///       intentionally explicit, but wire-level ordered multi-value
-    ///       replication needs separate capture/apply tests before being enabled.
+    /// \note Sync v0.1 emits no raw \c ChangeOp for this wrapper. The opt-in
+    ///       \c KeyOrderedMultiValueTableLogicalAdapter instead captures only
+    ///       append history through one ordered logical-delivery origin;
+    ///       destructive operations remain local-only.
     ///
     /// \note \c MDBX_DB_ACCEDE is accepted only for DBIs created with a
     ///       compatible \c KeyOrderedMultiValueTable storage contract: the same
