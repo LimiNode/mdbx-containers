@@ -429,7 +429,9 @@ namespace sync {
         LogicalDeliveryCapabilities logical_delivery_capabilities() const {
             LogicalDeliveryCapabilities out;
             out.flags = static_cast<std::uint64_t>(
-                LogicalDeliveryCapability::OrderedDelivery);
+                LogicalDeliveryCapability::OrderedDelivery) |
+                static_cast<std::uint64_t>(
+                    LogicalDeliveryCapability::CumulativeAcknowledgement);
             return out;
         }
 
@@ -457,6 +459,19 @@ namespace sync {
         /// logical adapters.
         LogicalDeliveryAcknowledgement apply_ordered_logical_delivery_envelope(
                 const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) {
+            return apply_ordered_logical_delivery_envelope(
+                envelope,
+                static_cast<const LogicalDeliveryCapabilities*>(nullptr),
+                bounds);
+        }
+
+        /// \brief Applies one ordered delivery with sender feature context.
+        /// \details The envelope-only overload preserves the earlier public
+        /// contract and therefore uses conservative acknowledgements.
+        LogicalDeliveryAcknowledgement apply_ordered_logical_delivery_envelope(
+                const LogicalDeliveryEnvelope& envelope,
+                const LogicalDeliveryCapabilities* sender_capabilities,
                 const CodecBounds* bounds = nullptr) {
             LogicalDeliveryAcknowledgement acknowledgement;
             acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
@@ -514,8 +529,14 @@ namespace sync {
                     txn.handle(), envelope.origin_node_id);
                 acknowledgement.acknowledged_through = last;
                 if (envelope.origin_sequence <= last) {
-                    acknowledgement.acknowledged_through =
-                        envelope.origin_sequence;
+                    if (sender_capabilities != nullptr &&
+                        sender_capabilities->supports(
+                            LogicalDeliveryCapability::CumulativeAcknowledgement)) {
+                        acknowledgement.acknowledged_through = last;
+                    } else {
+                        acknowledgement.acknowledged_through =
+                            envelope.origin_sequence;
+                    }
                     txn.rollback();
                     return acknowledgement;
                 }

@@ -22,7 +22,8 @@ namespace sync {
     /// \brief Optional features understood by a logical-delivery peer.
     enum class LogicalDeliveryCapability : std::uint64_t {
         None = 0u,
-        OrderedDelivery = UINT64_C(1) << 0
+        OrderedDelivery = UINT64_C(1) << 0,
+        CumulativeAcknowledgement = UINT64_C(1) << 1
     };
 
     /// \brief Capability set exchanged before logical delivery.
@@ -43,11 +44,21 @@ namespace sync {
         LogicalDeliveryCapabilities capabilities;
     };
 
-    /// \brief Conservative cumulative response to one delivery attempt.
-    /// \details A successful response acknowledges exactly the delivery it
-    /// answers. A receiver that has already advanced farther caps a duplicate
-    /// response at that delivery's sequence, so sender cleanup remains local
-    /// to the attempted envelope.
+    /// \brief One ordered delivery attempt with sender feature context.
+    /// \details The envelope remains the stable persisted object. Capability
+    /// context describes only this peer exchange and lets a receiver retain
+    /// conservative acknowledgements for older senders.
+    struct LogicalDeliveryRequest {
+        LogicalDeliveryEnvelope envelope;
+        LogicalDeliveryCapabilities sender_capabilities;
+    };
+
+    /// \brief Cumulative response to one delivery attempt.
+    /// \details Without negotiated
+    /// \c CumulativeAcknowledgement a successful response acknowledges exactly
+    /// the delivery it answers. With that capability, a receiver can return a
+    /// higher persisted contiguous frontier, bounded by the sender's durable
+    /// known tail during validation.
     struct LogicalDeliveryAcknowledgement {
         DbId destination_db_uuid{};
         NodeId origin_node_id{};
@@ -112,6 +123,52 @@ namespace sync {
         }
     }
 
+    /// \brief Validates an acknowledgement against sender recovery state.
+    /// \details A negotiated cumulative success may acknowledge a known local
+    /// prefix beyond the delivery that triggered it. Failed acknowledgements
+    /// remain restricted to an earlier prefix, so they never report success for
+    /// the delivery that failed.
+    inline void validate_logical_delivery_acknowledgement_for_sender(
+            const LogicalDeliveryAcknowledgement& acknowledgement,
+            const LogicalDeliveryEnvelope& delivery,
+            std::uint64_t known_tail,
+            bool cumulative_acknowledgement_negotiated,
+            const CodecBounds* bounds = nullptr) {
+        validate_logical_delivery_acknowledgement(acknowledgement, bounds);
+        if (compare_node_id(acknowledgement.destination_db_uuid,
+                            delivery.destination_db_uuid) != 0 ||
+            compare_node_id(acknowledgement.origin_node_id,
+                            delivery.origin_node_id) != 0) {
+            throw std::runtime_error(
+                "Logical delivery acknowledgement identity does not match delivery");
+        }
+        if (known_tail < delivery.origin_sequence) {
+            throw std::invalid_argument(
+                "Logical delivery sender known tail precedes delivery");
+        }
+        if (acknowledgement.acknowledged_through > known_tail) {
+            throw std::runtime_error(
+                "Logical delivery acknowledgement exceeds sender known tail");
+        }
+        if (acknowledgement.ok) {
+            if (acknowledgement.acknowledged_through <
+                delivery.origin_sequence) {
+                throw std::runtime_error(
+                    "Successful logical delivery acknowledgement is incomplete");
+            }
+            if (!cumulative_acknowledgement_negotiated &&
+                acknowledgement.acknowledged_through !=
+                delivery.origin_sequence) {
+                throw std::runtime_error(
+                    "Logical delivery cumulative acknowledgement was not negotiated");
+            }
+        } else if (acknowledgement.acknowledged_through >=
+                   delivery.origin_sequence) {
+            throw std::runtime_error(
+                "Failed logical delivery acknowledgement includes delivery");
+        }
+    }
+
     /// \brief Truncates an acknowledgement diagnostic to its wire bound.
     inline std::string bounded_logical_delivery_acknowledgement_error(
             const std::string& error,
@@ -123,10 +180,12 @@ namespace sync {
             : error.substr(0u, effective.max_error_len);
     }
 
-    /// \brief Returns the only capabilities this protocol version understands.
+    /// \brief Returns the capabilities this protocol version understands.
     inline std::uint64_t logical_delivery_supported_capability_flags() {
         return static_cast<std::uint64_t>(
-            LogicalDeliveryCapability::OrderedDelivery);
+            LogicalDeliveryCapability::OrderedDelivery) |
+            static_cast<std::uint64_t>(
+                LogicalDeliveryCapability::CumulativeAcknowledgement);
     }
 
     /// \brief Returns true when both peers offer \p capability.

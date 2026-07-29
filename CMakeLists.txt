@@ -527,6 +527,8 @@ if(MDBXC_BUILD_TESTS)
               NOT CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC")))
         target_compile_options(header_sync_umbrella_test PRIVATE
             -Woverloaded-virtual -Werror)
+        target_compile_options(test_logical_delivery_protocol PRIVATE
+            -Woverloaded-virtual -Werror)
     endif()
 
     set(_mdbxc_generated_test_dir "${CMAKE_CURRENT_BINARY_DIR}/generated_tests")

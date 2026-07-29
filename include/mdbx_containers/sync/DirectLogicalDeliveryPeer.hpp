@@ -27,6 +27,13 @@ namespace sync {
                 envelope, bounds);
         }
 
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr) override {
+            return m_remote.apply_ordered_logical_delivery_envelope(
+                request.envelope, &request.sender_capabilities, bounds);
+        }
+
     private:
         SyncEngine& m_remote;
     };
