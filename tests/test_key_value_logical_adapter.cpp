@@ -3374,6 +3374,23 @@ void test_ordered_logical_delivery_enforces_receiver_frontier() {
     MDBXC_TEST_ASSERT(second_ack.acknowledged_through == 2u);
     MDBXC_TEST_ASSERT(apply_calls == 2);
 
+    const mdbxc::sync::LogicalDeliveryAcknowledgement receiver_ahead_duplicate =
+        engine.apply_ordered_logical_delivery_envelope(first);
+    MDBXC_TEST_ASSERT(receiver_ahead_duplicate.ok);
+    MDBXC_TEST_ASSERT(receiver_ahead_duplicate.acknowledged_through == 1u);
+    mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
+        receiver_ahead_duplicate, first);
+    const std::vector<std::uint8_t> encoded_receiver_ahead_duplicate =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_acknowledgement(
+            receiver_ahead_duplicate);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement
+        decoded_receiver_ahead_duplicate =
+            mdbxc::sync::LogicalDeliveryProtocolCodec::decode_acknowledgement(
+                encoded_receiver_ahead_duplicate);
+    mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
+        decoded_receiver_ahead_duplicate, first);
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
     mdbxc::sync::LogicalDeliveryEnvelope wrong_destination = second;
     wrong_destination.destination_db_uuid = make_node(0x01);
     wrong_destination.origin_sequence = 3u;

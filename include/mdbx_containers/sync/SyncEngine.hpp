@@ -450,9 +450,10 @@ namespace sync {
 
         /// \brief Applies one strictly ordered logical delivery envelope.
         /// \details This is distinct from the legacy unordered delivery API.
-        /// It accepts only the next contiguous origin sequence, returns the
-        /// persisted cumulative receiver frontier, and reports a gap as a
-        /// retryable acknowledgement without invoking logical adapters.
+        /// It accepts only the next contiguous origin sequence, acknowledges
+        /// duplicate and self-origin no-ops through their own sequence, and
+        /// reports a gap as a retryable acknowledgement without invoking
+        /// logical adapters.
         LogicalDeliveryAcknowledgement apply_ordered_logical_delivery_envelope(
                 const LogicalDeliveryEnvelope& envelope,
                 const CodecBounds* bounds = nullptr) {
@@ -502,7 +503,8 @@ namespace sync {
                 }
                 if (compare_node_id(local_node_id,
                                     envelope.origin_node_id) == 0) {
-                    acknowledgement.acknowledged_through = 0u;
+                    acknowledgement.acknowledged_through =
+                        envelope.origin_sequence;
                     txn.rollback();
                     return acknowledgement;
                 }
@@ -511,6 +513,8 @@ namespace sync {
                     txn.handle(), envelope.origin_node_id);
                 acknowledgement.acknowledged_through = last;
                 if (envelope.origin_sequence <= last) {
+                    acknowledgement.acknowledged_through =
+                        envelope.origin_sequence;
                     txn.rollback();
                     return acknowledgement;
                 }
