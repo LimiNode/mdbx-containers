@@ -3,6 +3,13 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Ordered logical schemas now persist an explicit authoritative origin in
+  `_mdbxc_sync_schema`. Ordered delivery validates that binding before replay
+  marker insertion or adapter callbacks, so independent origins cannot append
+  one ordered dataset in arrival-dependent order. Older ordered markers must
+  be migrated explicitly before ordered delivery; duplicate deliveries now
+  require their exact replay marker and fail closed after that marker is
+  pruned.
 - Added an ordered-delivery requirement to the logical adapter contract.
   Existing adapters keep the default unrestricted behavior; append-history
   adapters can reject direct logical frames and unordered delivery before

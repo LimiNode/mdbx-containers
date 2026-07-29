@@ -525,10 +525,46 @@ namespace sync {
                     return acknowledgement;
                 }
 
+                const LogicalApplyResult origin_validation =
+                    validate_ordered_logical_schema_origins(
+                        txn.handle(), changes, envelope.origin_node_id);
+                if (!origin_validation.ok) {
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement, origin_validation.error,
+                        origin_validation.retryable, bounds);
+                    txn.rollback();
+                    return acknowledgement;
+                }
+
                 const std::uint64_t last = order.last_applied(
                     txn.handle(), envelope.origin_node_id);
                 acknowledgement.acknowledged_through = last;
                 if (envelope.origin_sequence <= last) {
+                    bool exact_replay = false;
+                    try {
+                        exact_replay = delivery.contains(
+                            txn.handle(), envelope, bounds);
+                    } catch (const std::exception& e) {
+                        set_logical_delivery_acknowledgement_failure(
+                            acknowledgement, e.what(), false, bounds);
+                        txn.rollback();
+                        return acknowledgement;
+                    } catch (...) {
+                        set_logical_delivery_acknowledgement_failure(
+                            acknowledgement,
+                            "Logical ordered delivery replay validation failed",
+                            false, bounds);
+                        txn.rollback();
+                        return acknowledgement;
+                    }
+                    if (!exact_replay) {
+                        set_logical_delivery_acknowledgement_failure(
+                            acknowledgement,
+                            "Logical ordered delivery replay identity is missing or conflicts",
+                            false, bounds);
+                        txn.rollback();
+                        return acknowledgement;
+                    }
                     if (sender_capabilities != nullptr &&
                         sender_capabilities->supports(
                             LogicalDeliveryCapability::CumulativeAcknowledgement)) {
@@ -815,10 +851,11 @@ namespace sync {
         }
 
         /// \brief Prunes ordered-delivery replay markers through its frontier.
-        /// \details This is safe only for an origin whose deliveries use the
-        /// ordered path exclusively: the persisted order frontier already makes
-        /// every sequence at or below it a no-op. Do not mix unordered envelopes
-        /// from the same origin with this pruning lifecycle.
+        /// \details This is safe only after the sender can no longer retry the
+        /// pruned prefix. Ordered duplicate delivery requires the exact persisted
+        /// marker to validate replay identity; a replay below the frontier whose
+        /// marker was pruned is rejected fail-closed. Do not mix unordered
+        /// envelopes from the same origin with this pruning lifecycle.
         std::size_t prune_ordered_logical_delivery_markers(
                 const NodeId& origin) {
             const Connection::SyncApplyWriteGuard sync_apply_guard =
@@ -1303,6 +1340,56 @@ namespace sync {
                         txn, m_conn->env_handle(), *adapter);
                 if (!marker_result.ok) return marker_result;
 
+                checked_schema_ids.push_back(schema_id);
+            }
+
+            return LogicalApplyResult::success();
+        }
+
+        LogicalApplyResult validate_ordered_logical_schema_origins(
+                MDBX_txn* txn,
+                const std::vector<LogicalChange>& changes,
+                const NodeId& origin) const {
+            SchemaRegistryStore schemas(m_conn->env_handle());
+            std::vector<std::string> checked_schema_ids;
+
+            for (std::size_t i = 0; i < changes.size(); ++i) {
+                const std::string& schema_id = changes[i].schema.schema_id;
+                if (std::find(checked_schema_ids.begin(),
+                              checked_schema_ids.end(),
+                              schema_id) != checked_schema_ids.end()) {
+                    continue;
+                }
+
+                ILogicalTableAdapter* adapter = m_logical_registry.find(schema_id);
+                if (adapter == nullptr) {
+                    return LogicalApplyResult::failure(
+                        "No logical adapter registered for schema id");
+                }
+                if (!adapter->requires_ordered_delivery()) {
+                    checked_schema_ids.push_back(schema_id);
+                    continue;
+                }
+
+                LogicalSchemaRecord record;
+                if (!schemas.get(txn, schema_id, record)) {
+                    return LogicalApplyResult::failure(
+                        "Persistent logical schema marker is missing");
+                }
+                if (record.kind != changes[i].schema.kind ||
+                    record.schema_version != changes[i].schema.schema_version) {
+                    return LogicalApplyResult::failure(
+                        "Persistent logical schema marker does not match ordered delivery");
+                }
+                if (is_zero_sync_id(record.ordered_delivery_origin_node_id)) {
+                    return LogicalApplyResult::failure(
+                        "Persistent logical schema marker has no ordered delivery origin");
+                }
+                if (compare_node_id(record.ordered_delivery_origin_node_id,
+                                    origin) != 0) {
+                    return LogicalApplyResult::failure(
+                        "Logical ordered delivery origin does not match schema marker");
+                }
                 checked_schema_ids.push_back(schema_id);
             }
 

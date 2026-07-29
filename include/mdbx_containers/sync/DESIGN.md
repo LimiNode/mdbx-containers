@@ -279,10 +279,13 @@ local-order-prefix       = per-key uint64_t assigned by the destination DBI
 The local-order prefix is a storage detail, not a cross-node identity. The
 append-only adapter obtains its stable history order from one ordered delivery
 stream: envelope origin sequence followed by logical-change position within the
-frame. A caller must use one authoritative writer for each logical dataset, or
-otherwise serialize all conflicting writes through one origin stream. The
-receiver replays changes in that stream order and assigns local prefixes while
-preserving the observable per-key append order.
+frame. The persistent logical schema marker binds an ordered adapter to one
+non-zero authoritative origin. A caller must register that binding before
+capture or delivery; a missing or mismatched origin fails before marker
+insertion, adapter callbacks, or table mutation. Existing ordered markers
+without the binding require an explicit schema-marker migration. The receiver
+replays changes in that stream order and assigns local prefixes while preserving
+the observable per-key append order.
 
 Multiple independent origins writing the same ordered dataset are not supported
 by this contract. A future multi-writer format must carry an explicit globally
@@ -610,14 +613,16 @@ backward-compatible raw-sync-only.
 `SyncEngine::apply_ordered_logical_delivery_envelope()` is the receiver-side
 implementation of `OrderedDelivery`. `_mdbxc_logical_delivery_order` stores the
 highest committed contiguous sequence for each remote origin. A sequence at or
-below that frontier is a successful no-op. It acknowledges through the attempted
-sequence by default, or through the persisted frontier when the sender advertises
-`CumulativeAcknowledgement`. Only the exact next sequence reaches schema
-validation and adapters; a gap is a retryable acknowledgement and leaves both
-user data and markers untouched. The generic unordered delivery API remains
-separate, so applications do not acquire ordering merely by changing a call site.
-Order-state advance, replay marker, and adapter mutations commit in one
-transaction.
+below that frontier is a successful no-op only when its exact persisted delivery
+marker matches the incoming frame. A reused sequence with a different frame or
+payload, or a replay whose marker has been pruned, fails closed. A valid duplicate
+acknowledges through the attempted sequence by default, or through the persisted
+frontier when the sender advertises `CumulativeAcknowledgement`. Only the exact
+next sequence reaches schema validation and adapters; a gap is a retryable
+acknowledgement and leaves both user data and markers untouched. The generic
+unordered delivery API remains separate, so applications do not acquire ordering
+merely by changing a call site. Order-state advance, replay marker, and adapter
+mutations commit in one transaction.
 
 `ILogicalDeliveryPeer` and `DirectLogicalDeliveryPeer` provide the capability-
 gated dispatch boundary. `SyncEngine::deliver_pending_logical_deliveries()`

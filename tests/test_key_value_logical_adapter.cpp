@@ -938,8 +938,11 @@ void test_logical_adapter_can_require_ordered_delivery() {
     const mdbxc::sync::DbId db_uuid = make_node(0xDAu);
     mdbxc::sync::SyncEngine engine(conn);
     engine.initialize_local_identity(local_node, db_uuid);
-    engine.register_logical_schema(
-        schema_id, make_key_ordered_multi_value_record(dbi_name));
+    const mdbxc::sync::LogicalSchemaRecord unbound_record =
+        make_key_ordered_multi_value_record(dbi_name);
+    mdbxc::sync::LogicalSchemaRecord record = unbound_record;
+    record.ordered_delivery_origin_node_id = remote_node;
+    engine.register_logical_schema(schema_id, unbound_record);
 
     mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
     OrderedDeliveryRequiredAdapter adapter(dbi_name, schema_id);
@@ -974,11 +977,107 @@ void test_logical_adapter_can_require_ordered_delivery() {
 
     const mdbxc::sync::LogicalDeliveryAcknowledgement ordered =
         engine.apply_ordered_logical_delivery_envelope(envelope);
-    MDBXC_TEST_ASSERT(ordered.ok);
-    MDBXC_TEST_ASSERT(ordered.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(!ordered.ok);
+    MDBXC_TEST_ASSERT(!ordered.retryable);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 0u);
+
+    engine.migrate_logical_schema(schema_id, unbound_record, record);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement migrated_ordered =
+        engine.apply_ordered_logical_delivery_envelope(envelope);
+    MDBXC_TEST_ASSERT(migrated_ordered.ok);
+    MDBXC_TEST_ASSERT(migrated_ordered.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
+
+    mdbxc::sync::LogicalDeliveryEnvelope conflicting = envelope;
+    conflicting.frame_id = "ordered-required-conflict";
+    const mdbxc::sync::LogicalDeliveryAcknowledgement conflict =
+        engine.apply_ordered_logical_delivery_envelope(conflicting);
+    MDBXC_TEST_ASSERT(!conflict.ok);
+    MDBXC_TEST_ASSERT(!conflict.retryable);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
+
+    mdbxc::sync::LogicalDeliveryEnvelope wrong_origin = envelope;
+    wrong_origin.origin_node_id = make_node(0x6Cu);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement wrong_origin_ack =
+        engine.apply_ordered_logical_delivery_envelope(wrong_origin);
+    MDBXC_TEST_ASSERT(!wrong_origin_ack.ok);
+    MDBXC_TEST_ASSERT(!wrong_origin_ack.retryable);
     MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
 
     conn->disconnect();
+    cleanup(path);
+}
+
+void test_ordered_logical_delivery_origin_binding_survives_reopen() {
+    const std::string path =
+        "test_ordered_logical_delivery_origin_binding.mdbx";
+    const std::string dbi_name = "logical_ordered_delivery_binding";
+    const std::string schema_id = "app.logical_ordered_delivery_binding.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+
+    const mdbxc::sync::NodeId local_node = make_node(0x6Du);
+    const mdbxc::sync::NodeId origin_a = make_node(0x6Eu);
+    const mdbxc::sync::NodeId origin_b = make_node(0x6Fu);
+    const mdbxc::sync::DbId db_uuid = make_node(0xDBu);
+    mdbxc::sync::LogicalSchemaRecord record =
+        make_key_ordered_multi_value_record(dbi_name);
+    record.ordered_delivery_origin_node_id = origin_a;
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = origin_a;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "ordered-binding-a";
+    mdbxc::sync::LogicalSchemaRef ref(
+        schema_id,
+        mdbxc::sync::LogicalTableKind::KeyOrderedMultiValue,
+        1u);
+    envelope.frame.changes.push_back(
+        mdbxc::sync::LogicalChange(ref, 1u, 0u,
+                                   std::vector<std::uint8_t>()));
+
+    {
+        std::shared_ptr<mdbxc::Connection> conn =
+            mdbxc::Connection::create(cfg);
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, db_uuid);
+        engine.register_logical_schema(schema_id, record);
+        mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+        OrderedDeliveryRequiredAdapter adapter(dbi_name, schema_id);
+        engine.register_logical_adapter(adapter);
+
+        const mdbxc::sync::LogicalDeliveryAcknowledgement applied =
+            engine.apply_ordered_logical_delivery_envelope(envelope);
+        MDBXC_TEST_ASSERT(applied.ok);
+        MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
+        conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<mdbxc::Connection> conn =
+            mdbxc::Connection::create(cfg);
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, db_uuid);
+        engine.register_logical_schema(schema_id, record);
+        mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+        OrderedDeliveryRequiredAdapter adapter(dbi_name, schema_id);
+        engine.register_logical_adapter(adapter);
+
+        mdbxc::sync::LogicalDeliveryEnvelope wrong_origin = envelope;
+        wrong_origin.origin_node_id = origin_b;
+        const mdbxc::sync::LogicalDeliveryAcknowledgement rejected =
+            engine.apply_ordered_logical_delivery_envelope(wrong_origin);
+        MDBXC_TEST_ASSERT(!rejected.ok);
+        MDBXC_TEST_ASSERT(!rejected.retryable);
+        MDBXC_TEST_ASSERT(adapter.apply_calls == 0u);
+        conn->disconnect();
+    }
+
     cleanup(path);
 }
 
@@ -4233,6 +4332,15 @@ void test_ordered_logical_delivery_enforces_receiver_frontier() {
         cumulative_duplicate, first, 2u, true);
     MDBXC_TEST_ASSERT(apply_calls == 2);
 
+    const std::size_t pruned =
+        engine.prune_ordered_logical_delivery_markers(remote_node);
+    MDBXC_TEST_ASSERT(pruned == 2u);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement pruned_duplicate =
+        engine.apply_ordered_logical_delivery_envelope(first);
+    MDBXC_TEST_ASSERT(!pruned_duplicate.ok);
+    MDBXC_TEST_ASSERT(!pruned_duplicate.retryable);
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
     mdbxc::sync::LogicalDeliveryEnvelope wrong_destination = second;
     wrong_destination.destination_db_uuid = make_node(0x01);
     wrong_destination.origin_sequence = 3u;
@@ -4500,6 +4608,7 @@ int main() {
     test_key_table_logical_adapter_applies_through_sync_engine();
     test_key_table_logical_adapter_rejects_malformed_payload();
     test_logical_adapter_can_require_ordered_delivery();
+    test_ordered_logical_delivery_origin_binding_survives_reopen();
     test_key_multi_value_logical_adapter_applies_multiset_operations();
     test_key_multi_value_logical_adapter_rejects_invalid_payload();
     test_key_multi_value_logical_capture_session_commits_typed_writes();
