@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added the versioned `LogicalDeliveryProtocol` wire contract with capability
+  hello, nested delivery, and cumulative acknowledgement messages. The first
+  optional capability is `OrderedDelivery`; unknown capability bits are not
+  negotiated implicitly. Existing HTTP/WebSocket/raw pull-push transports do
+  not advertise this contract until the ordered receiver path is available.
 - Added `_mdbxc_logical_outbox` and the sender-side
   `SyncEngine::enqueue_logical_delivery()` lifecycle for future ordered logical
   delivery. The outbox persists independent monotonic streams per destination,
