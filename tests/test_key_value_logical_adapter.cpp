@@ -1893,6 +1893,240 @@ void test_key_value_logical_delivery_envelope_skips_self_origin() {
     cleanup(path);
 }
 
+void test_key_value_logical_delivery_prunes_markers_behind_watermark() {
+    const std::string path =
+        "test_key_value_logical_delivery_prune.mdbx";
+    const std::string dbi_name = "logical_key_value_delivery_prune";
+    const std::string schema_id = "app.logical_kv_delivery_prune.v1";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x4D);
+    const mdbxc::sync::NodeId origin_node = make_node(0x4E);
+    const mdbxc::sync::NodeId other_origin_node = make_node(0x4F);
+    const mdbxc::sync::NodeId db_uuid = make_node(0xD5);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+
+    mdbxc::sync::LogicalDeliveryEnvelope first;
+    first.destination_db_uuid = db_uuid;
+    first.origin_node_id = origin_node;
+    first.origin_sequence = 1;
+    first.frame_id = "delivery-prune-1";
+
+    mdbxc::sync::LogicalDeliveryEnvelope second;
+    second.destination_db_uuid = db_uuid;
+    second.origin_node_id = origin_node;
+    second.origin_sequence = 2;
+    second.frame_id = "delivery-prune-2";
+
+    mdbxc::sync::LogicalDeliveryEnvelope third;
+    third.destination_db_uuid = db_uuid;
+    third.origin_node_id = origin_node;
+    third.origin_sequence = 3;
+    third.frame_id = "delivery-prune-3";
+
+    mdbxc::sync::LogicalDeliveryEnvelope other_origin;
+    other_origin.destination_db_uuid = db_uuid;
+    other_origin.origin_node_id = other_origin_node;
+    other_origin.origin_sequence = 1;
+    other_origin.frame_id = "delivery-prune-other-origin";
+
+    {
+        std::shared_ptr<mdbxc::Connection> conn =
+            mdbxc::Connection::create(cfg);
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, db_uuid);
+        engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+        mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+        IntStringAdapter adapter(table, schema_id);
+        engine.register_logical_adapter(adapter);
+
+        first.frame.changes.push_back(adapter.make_upsert(90, "one"));
+        second.frame.changes.push_back(adapter.make_upsert(90, "two"));
+        third.frame.changes.push_back(adapter.make_upsert(90, "three"));
+        other_origin.frame.changes.push_back(
+            adapter.make_upsert(91, "other-origin"));
+
+        MDBXC_TEST_ASSERT(
+            engine.apply_logical_delivery_envelope(first).ok);
+        MDBXC_TEST_ASSERT(
+            engine.apply_logical_delivery_envelope(second).ok);
+        MDBXC_TEST_ASSERT(
+            engine.apply_logical_delivery_envelope(other_origin).ok);
+        MDBXC_TEST_ASSERT(table.find_compat(90).second == "two");
+
+        MDBXC_TEST_ASSERT(
+            engine.prune_logical_delivery_markers(origin_node, 1) == 1u);
+        MDBXC_TEST_ASSERT(
+            engine.prune_logical_delivery_markers(origin_node, 1) == 0u);
+
+        MDBXC_TEST_ASSERT(
+            engine.apply_logical_delivery_envelope(first).ok);
+        MDBXC_TEST_ASSERT(table.find_compat(90).second == "two");
+        MDBXC_TEST_ASSERT(
+            engine.apply_logical_delivery_envelope(third).ok);
+        MDBXC_TEST_ASSERT(table.find_compat(90).second == "three");
+        MDBXC_TEST_ASSERT(table.find_compat(91).second == "other-origin");
+
+        {
+            mdbxc::Transaction txn =
+                conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+            mdbxc::sync::LogicalDeliveryStore delivery(conn->env_handle());
+            delivery.open(txn.handle());
+            MDBXC_TEST_ASSERT(
+                delivery.watermark(txn.handle(), origin_node) == 1u);
+            MDBXC_TEST_ASSERT(delivery.count(txn.handle()) == 3u);
+            MDBXC_TEST_ASSERT(!delivery.contains(txn.handle(), first));
+            MDBXC_TEST_ASSERT(delivery.contains(txn.handle(), second));
+        }
+
+        MDBXC_TEST_ASSERT(
+            engine.prune_logical_delivery_markers(origin_node, 3) == 2u);
+        bool decreasing_threw = false;
+        try {
+            (void)engine.prune_logical_delivery_markers(origin_node, 2);
+        } catch (const std::invalid_argument&) {
+            decreasing_threw = true;
+        }
+        MDBXC_TEST_ASSERT(decreasing_threw);
+
+        conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<mdbxc::Connection> conn =
+            mdbxc::Connection::create(cfg);
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, db_uuid);
+        engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+        mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+        IntStringAdapter adapter(table, schema_id);
+        engine.register_logical_adapter(adapter);
+
+        MDBXC_TEST_ASSERT(
+            engine.apply_logical_delivery_envelope(first).ok);
+        MDBXC_TEST_ASSERT(table.find_compat(90).second == "three");
+
+        conn->disconnect();
+    }
+
+    cleanup(path);
+}
+
+void test_logical_delivery_store_reads_legacy_layout_without_watermarks() {
+    const std::string path =
+        "test_logical_delivery_legacy_without_watermarks.mdbx";
+    const std::string dbi_name = "logical_delivery_legacy_table";
+    const std::string schema_id = "app.logical_delivery_legacy.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x50);
+    const mdbxc::sync::NodeId origin_node = make_node(0x51);
+    const mdbxc::sync::NodeId db_uuid = make_node(0xD6);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, db_uuid);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = origin_node;
+    envelope.origin_sequence = 1;
+    envelope.frame_id = "legacy-layout-marker";
+    envelope.frame.changes.push_back(adapter.make_upsert(92, "legacy"));
+    MDBXC_TEST_ASSERT(engine.apply_logical_delivery_envelope(envelope).ok);
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi watermark_dbi = 0;
+        const int open_rc = mdbx_dbi_open(
+            txn.handle(), "_mdbxc_logical_delivery_watermarks",
+            static_cast<MDBX_db_flags_t>(0), &watermark_dbi);
+        if (open_rc == MDBX_SUCCESS) {
+            mdbxc::check_mdbx(mdbx_drop(txn.handle(), watermark_dbi, 1),
+                              "test legacy watermark DBI drop failed");
+        } else {
+            MDBXC_TEST_ASSERT(open_rc == MDBX_NOTFOUND);
+        }
+        txn.commit();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::LogicalDeliveryStore delivery(conn->env_handle());
+        MDBXC_TEST_ASSERT(delivery.count(txn.handle()) == 1u);
+        MDBXC_TEST_ASSERT(delivery.list_markers(txn.handle()).size() == 1u);
+        MDBXC_TEST_ASSERT(
+            delivery.watermark(txn.handle(), origin_node) == 0u);
+        MDBXC_TEST_ASSERT(delivery.contains(txn.handle(), envelope));
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_logical_delivery_store_reopens_watermark_after_aborted_create() {
+    const std::string path =
+        "test_logical_delivery_watermark_abort_reopen.mdbx";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn =
+        mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId origin = make_node(0x52);
+    mdbxc::sync::LogicalDeliveryStore store(conn->env_handle());
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBXC_TEST_ASSERT(store.prune_up_to(txn.handle(), origin, 7u) == 0u);
+        txn.rollback();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        MDBXC_TEST_ASSERT(store.watermark(txn.handle(), origin) == 0u);
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBXC_TEST_ASSERT(store.prune_up_to(txn.handle(), origin, 7u) == 0u);
+        txn.commit();
+    }
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        MDBXC_TEST_ASSERT(store.watermark(txn.handle(), origin) == 7u);
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_value_logical_delivery_envelope_accepts_long_frame_id() {
     const std::string path =
         "test_key_value_logical_delivery_long_frame_id.mdbx";
@@ -2855,6 +3089,9 @@ int main() {
     test_key_value_logical_delivery_envelope_rejects_identity_collision();
     test_key_value_logical_delivery_marker_rolls_back_after_apply_failure();
     test_key_value_logical_delivery_envelope_skips_self_origin();
+    test_key_value_logical_delivery_prunes_markers_behind_watermark();
+    test_logical_delivery_store_reads_legacy_layout_without_watermarks();
+    test_logical_delivery_store_reopens_watermark_after_aborted_create();
     test_key_value_logical_delivery_envelope_accepts_long_frame_id();
     test_key_value_logical_delivery_envelope_keeps_custom_bounds();
     test_key_value_logical_delivery_object_api_rejects_frame_id_bound();

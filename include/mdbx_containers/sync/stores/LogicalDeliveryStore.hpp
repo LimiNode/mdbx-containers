@@ -50,26 +50,33 @@ namespace sync {
         explicit LogicalDeliveryStore(
                 MDBX_env* env,
                 const std::string& dbi_name = "_mdbxc_logical_delivery")
-            : m_env(env), m_dbi_name(dbi_name), m_dbi(0), m_open(false) {}
+            : m_env(env),
+              m_dbi_name(dbi_name),
+              m_watermark_dbi_name(dbi_name + "_watermarks"),
+              m_dbi(0),
+              m_watermark_dbi(0),
+              m_marker_open(false) {}
 
         /// \brief Opens the store DBI inside the supplied transaction.
         void open(MDBX_txn* txn) {
             txn = checked_txn(txn, "LogicalDeliveryStore::open");
-            open_checked(txn);
+            open_marker_checked(txn);
         }
 
-        bool is_open() const { return m_open; }
+        bool is_open() const { return m_marker_open; }
 
         MDBX_dbi handle(MDBX_txn* txn) const {
             txn = checked_txn(txn, "LogicalDeliveryStore::handle");
-            open_checked(txn);
+            open_marker_checked(txn);
             return m_dbi;
         }
 
-        void reset_open() { m_open = false; }
+        void reset_open() {
+            m_marker_open = false;
+        }
 
         void ensure_open() const {
-            if (!m_open) {
+            if (!m_marker_open) {
                 throw std::logic_error("LogicalDeliveryStore is not open");
             }
         }
@@ -135,12 +142,91 @@ namespace sync {
             return out;
         }
 
-        /// \brief Returns true when \p envelope already has an applied marker.
+        /// \brief Returns the persisted replay-pruning watermark for \p origin.
+        /// \return Zero when no markers for \p origin have been pruned or
+        /// the optional watermark DBI has not been created yet.
+        std::uint64_t watermark(MDBX_txn* txn,
+                                const NodeId& origin) const {
+            txn = checked_txn(txn, "LogicalDeliveryStore::watermark");
+            return read_watermark(txn, origin);
+        }
+
+        /// \brief Prunes markers through \p safe_through_sequence for one origin.
+        /// \details This persists a monotonic replay watermark in the same
+        /// transaction as marker removal. Future envelopes from \p origin
+        /// whose sequence is at or below the watermark are treated as stale
+        /// successful no-ops. The caller must advance this boundary only after
+        /// its delivery protocol guarantees that no unseen envelope at or
+        /// below the boundary can arrive later.
+        /// The first call creates the optional watermark DBI and therefore
+        /// requires one additional named-DBI slot in the MDBX environment.
+        /// \return Number of removed delivery markers.
+        std::size_t prune_up_to(MDBX_txn* txn,
+                                const NodeId& origin,
+                                std::uint64_t safe_through_sequence) {
+            txn = checked_txn(txn, "LogicalDeliveryStore::prune_up_to");
+            if (is_zero_sync_id(origin)) {
+                throw std::invalid_argument(
+                    "LogicalDeliveryStore prune origin is zero");
+            }
+            if (safe_through_sequence == 0u) {
+                throw std::invalid_argument(
+                    "LogicalDeliveryStore prune watermark is zero");
+            }
+            open_marker_checked(txn);
+            open_watermark_for_write(txn);
+            const std::uint64_t previous = read_watermark(txn, origin);
+            if (safe_through_sequence < previous) {
+                throw std::invalid_argument(
+                    "LogicalDeliveryStore prune watermark moved backwards");
+            }
+            if (safe_through_sequence == previous) {
+                return 0u;
+            }
+
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalDeliveryStore prune cursor open failed");
+            std::size_t removed = 0u;
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    const LogicalDeliveryMarkerInfo marker =
+                        decode_and_validate_marker(key, value);
+                    if (compare_node_id(marker.origin_node_id, origin) == 0 &&
+                        marker.origin_sequence <= safe_through_sequence) {
+                        check_mdbx(mdbx_cursor_del(cursor, MDBX_CURRENT),
+                                   "LogicalDeliveryStore prune cursor delete failed");
+                        ++removed;
+                    }
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalDeliveryStore prune cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            write_watermark(txn, origin, safe_through_sequence);
+            return removed;
+        }
+
+        /// \brief Returns true when \p envelope has an exact applied marker.
+        /// \details A persisted replay watermark is intentionally not included
+        /// in this inspection result. Use \c watermark() to inspect the
+        /// pruning boundary; \c try_mark_applied() applies that boundary when
+        /// deciding whether a delivery may mutate local data.
         bool contains(MDBX_txn* txn,
                       const LogicalDeliveryEnvelope& envelope,
                       const CodecBounds* bounds = nullptr) const {
             txn = checked_txn(txn, "LogicalDeliveryStore::contains");
             open_const(txn);
+            validate_logical_delivery_envelope(envelope, bounds);
             const std::vector<std::uint8_t> key =
                 make_key(envelope, bounds);
             MDBX_val k = {
@@ -161,7 +247,11 @@ namespace sync {
                               const LogicalDeliveryEnvelope& envelope,
                               const CodecBounds* bounds = nullptr) {
             txn = checked_txn(txn, "LogicalDeliveryStore::try_mark_applied");
-            open(txn);
+            open_marker_checked(txn);
+            validate_logical_delivery_envelope(envelope, bounds);
+            if (is_at_or_below_watermark(txn, envelope)) {
+                return false;
+            }
             const std::vector<std::uint8_t> key =
                 make_key(envelope, bounds);
             MDBX_val k = {
@@ -194,17 +284,83 @@ namespace sync {
 
         void open_const(MDBX_txn* txn) const {
             txn = checked_txn(txn, "LogicalDeliveryStore::open");
-            open_checked(txn);
+            open_marker_checked(txn);
         }
 
-        void open_checked(MDBX_txn* txn) const {
-            int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(), MDBX_CREATE, &m_dbi);
+        void open_marker_checked(MDBX_txn* txn) const {
+            open_dbi_checked(txn, m_dbi_name, m_dbi);
+            m_marker_open = true;
+        }
+
+        bool open_watermark_if_exists(MDBX_txn* txn) const {
+            const int rc = mdbx_dbi_open(
+                txn, m_watermark_dbi_name.c_str(),
+                static_cast<MDBX_db_flags_t>(0), &m_watermark_dbi);
+            if (rc == MDBX_NOTFOUND) {
+                return false;
+            }
+            check_mdbx(rc, "Failed to open LogicalDeliveryStore watermark DBI");
+            return true;
+        }
+
+        void open_watermark_for_write(MDBX_txn* txn) const {
+            open_dbi_checked(txn, m_watermark_dbi_name, m_watermark_dbi);
+        }
+
+        static void open_dbi_checked(MDBX_txn* txn,
+                                     const std::string& name,
+                                     MDBX_dbi& dbi) {
+            int rc = mdbx_dbi_open(txn, name.c_str(), MDBX_CREATE, &dbi);
             if (rc == MDBX_EACCESS) {
-                rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
-                                   static_cast<MDBX_db_flags_t>(0), &m_dbi);
+                rc = mdbx_dbi_open(txn, name.c_str(),
+                                   static_cast<MDBX_db_flags_t>(0), &dbi);
             }
             check_mdbx(rc, "Failed to open LogicalDeliveryStore DBI");
-            m_open = true;
+        }
+
+        std::uint64_t read_watermark(MDBX_txn* txn,
+                                     const NodeId& origin) const {
+            if (!open_watermark_if_exists(txn)) {
+                return 0u;
+            }
+            MDBX_val key = {
+                const_cast<std::uint8_t*>(&origin[0]),
+                origin.size()
+            };
+            MDBX_val value;
+            const int rc = mdbx_get(txn, m_watermark_dbi, &key, &value);
+            if (rc == MDBX_NOTFOUND) {
+                return 0u;
+            }
+            check_mdbx(rc, "LogicalDeliveryStore watermark read failed");
+            return decode_watermark(value);
+        }
+
+        void write_watermark(MDBX_txn* txn,
+                             const NodeId& origin,
+                             std::uint64_t sequence) const {
+            open_watermark_for_write(txn);
+            MDBX_val key = {
+                const_cast<std::uint8_t*>(&origin[0]),
+                origin.size()
+            };
+            const std::vector<std::uint8_t> bytes =
+                encode_watermark(sequence);
+            MDBX_val value = {
+                const_cast<std::uint8_t*>(
+                    bytes.empty() ? nullptr : &bytes[0]),
+                bytes.size()
+            };
+            check_mdbx(mdbx_put(txn, m_watermark_dbi, &key, &value,
+                                MDBX_UPSERT),
+                       "LogicalDeliveryStore watermark write failed");
+        }
+
+        bool is_at_or_below_watermark(
+                MDBX_txn* txn,
+                const LogicalDeliveryEnvelope& envelope) const {
+            return envelope.origin_sequence <=
+                read_watermark(txn, envelope.origin_node_id);
         }
 
         static std::vector<std::uint8_t> make_key(
@@ -319,6 +475,36 @@ namespace sync {
         static std::uint16_t marker_key_version() { return 1; }
 
         static std::uint16_t marker_value_version() { return 1; }
+
+        static std::uint16_t watermark_value_version() { return 1; }
+
+        static std::vector<std::uint8_t> encode_watermark(
+                std::uint64_t sequence) {
+            std::vector<std::uint8_t> out;
+            out.reserve(2u + 8u);
+            detail::append_u16_le(out, watermark_value_version());
+            detail::append_u64_le(out, sequence);
+            return out;
+        }
+
+        static std::uint64_t decode_watermark(const MDBX_val& value) {
+            if (value.iov_len != 2u + 8u || value.iov_base == nullptr) {
+                throw std::runtime_error(
+                    "LogicalDeliveryStore watermark has invalid size");
+            }
+            const std::uint8_t* bytes =
+                static_cast<const std::uint8_t*>(value.iov_base);
+            if (detail::read_u16_le(bytes) != watermark_value_version()) {
+                throw std::runtime_error(
+                    "Unsupported LogicalDeliveryStore watermark version");
+            }
+            const std::uint64_t sequence = detail::read_u64_le(bytes + 2u);
+            if (sequence == 0u) {
+                throw std::runtime_error(
+                    "LogicalDeliveryStore watermark is zero");
+            }
+            return sequence;
+        }
 
         struct ValueCursor {
             const std::uint8_t* data;
@@ -469,8 +655,10 @@ namespace sync {
 
         MDBX_env*   m_env;
         std::string m_dbi_name;
+        std::string m_watermark_dbi_name;
         mutable MDBX_dbi m_dbi;
-        mutable bool     m_open;
+        mutable MDBX_dbi m_watermark_dbi;
+        mutable bool     m_marker_open;
     };
 
 } // namespace sync

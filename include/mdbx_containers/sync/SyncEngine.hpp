@@ -451,6 +451,28 @@ namespace sync {
             }
         }
 
+        /// \brief Prunes acknowledged logical delivery replay markers.
+        /// \details Persists a per-origin watermark and removes markers whose
+        /// sequence is at or below \p safe_through_sequence in one write
+        /// transaction. The caller must supply this boundary only after its
+        /// delivery/acknowledgement protocol guarantees that no unseen
+        /// envelope at or below it can arrive later. Future replay at or below
+        /// the persisted watermark is a successful stale no-op.
+        /// \return Number of removed replay markers.
+        std::size_t prune_logical_delivery_markers(
+                const NodeId& origin,
+                std::uint64_t safe_through_sequence) {
+            const Connection::SyncApplyWriteGuard sync_apply_guard =
+                m_conn->sync_apply_write_guard();
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            initialize_system_stores(txn.handle());
+            LogicalDeliveryStore delivery(m_conn->env_handle());
+            const std::size_t removed = delivery.prune_up_to(
+                txn.handle(), origin, safe_through_sequence);
+            txn.commit();
+            return removed;
+        }
+
         /// \brief Applies a single \c ChangeBatch to local DBIs inside \p txn.
         /// \details See class-level docs for the seq / apply rules. The
         /// caller commits the transaction. User DBIs are opened lazily by

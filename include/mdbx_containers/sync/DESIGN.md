@@ -540,18 +540,32 @@ envelope against a caller-owned expected next sequence as in-order,
 behind the caller's watermark, or ahead with a sequence gap. It only classifies
 the numeric `origin_sequence`: it does not decide whether an envelope is an
 exact duplicate delivery identity, persist a watermark, buffer missing frames,
-or change `SyncEngine::apply_logical_delivery_envelope()` semantics. A future
-per-origin lifecycle PR should add persisted watermarks and pruning rules.
+or decide whether it is safe to advance one.
 
-`_mdbxc_logical_delivery` retention is currently permanent and unbounded. A
-future lifecycle PR should add an acknowledgement horizon or per-origin
-watermark before old replay markers can be pruned safely; deleting markers by
-time alone would re-open the exact late-retry problem the store prevents.
+`LogicalDeliveryStore` persists one monotonic per-origin watermark in the
+optional `_mdbxc_logical_delivery_watermarks` DBI. The DBI is created lazily by
+the first `SyncEngine::prune_logical_delivery_markers()` call; normal logical
+delivery and read-only inspection work with older layouts where it is absent
+and report a zero watermark. Environments that use pruning must reserve one
+additional named-DBI slot through `Config::max_dbs`. A caller may advance it
+through `SyncEngine::prune_logical_delivery_markers(origin,
+safe_through_sequence)`;
+the operation atomically deletes the matching replay markers through that
+sequence and persists the new boundary. Replays at or below the boundary become
+successful stale no-ops without adapter callbacks, even after restart. This is
+not an ordering, buffering, or acknowledgement protocol: the caller must
+advance the watermark only after its external delivery protocol has established
+that no unseen envelope at or below the boundary can arrive later. Time-based
+deletion remains unsafe.
 `LogicalDeliveryStore::count()` and `list_markers()` are read-only inspection
 helpers for diagnostics, repair tooling, and future lifecycle work. They expose
 delivery identity and stored frame metadata after validating that the persisted
 marker key matches the marker value identity and `frame_id` digest. They do not
-define a retention policy and must not be used as a standalone pruning signal.
+define an acknowledgement horizon and must not be used as a standalone pruning
+signal. `LogicalDeliveryStore::contains()` likewise reports only the presence
+of an exact physical marker; it does not treat a delivery below a watermark as
+present. `try_mark_applied()` applies the watermark when deciding whether a
+delivery is a stale no-op.
 
 `LogicalTableAdapter.hpp` reserves the apply-side extension point:
 
