@@ -42,6 +42,7 @@
 #include "ChangeBatchCodec.hpp"
 #include "ChangeOp.hpp"
 #include "LogicalDeliveryEnvelopeCodec.hpp"
+#include "ILogicalDeliveryOutbox.hpp"
 #include "LogicalChangeFrameCodec.hpp"
 #include "LogicalTableAdapter.hpp"
 #include "LogicalSchemaValidation.hpp"
@@ -127,7 +128,7 @@ namespace sync {
     };
 
     /// \brief Pull/push/apply coordinator bound to a single \c Connection.
-    class SyncEngine {
+    class SyncEngine : public ILogicalDeliveryOutbox {
         struct PullOrigin {
             NodeId origin;
             std::uint64_t last_seq;
@@ -483,19 +484,33 @@ namespace sync {
                 const LogicalChangeFrame& frame,
                 const CodecBounds* bounds = nullptr) {
             auto txn = m_conn->transaction(TransactionMode::WRITABLE);
-            initialize_system_stores(txn.handle());
+            const LogicalDeliveryEnvelope envelope = enqueue_logical_delivery(
+                txn.handle(), destination, frame, bounds);
+            txn.commit();
+            return envelope;
+        }
+
+        /// \brief Persists one delivery in a caller-owned write transaction.
+        /// \details This does not commit or roll back \p txn. It is the
+        /// transaction-bound outbox API used by logical capture sessions to
+        /// atomically commit their table mutations and queued delivery.
+        LogicalDeliveryEnvelope enqueue_logical_delivery(
+                MDBX_txn* txn,
+                const DbId& destination,
+                const LogicalChangeFrame& frame,
+                const CodecBounds* bounds = nullptr) override {
+            txn = checked_external_txn(
+                txn, "SyncEngine::enqueue_logical_delivery");
+            initialize_system_stores(txn);
             MetaStore meta(m_conn->env_handle());
             LogicalOutboxStore outbox(m_conn->env_handle());
-            meta.open(txn.handle());
-            const NodeId origin = meta.get_node_id(txn.handle());
+            meta.open(txn);
+            const NodeId origin = meta.get_node_id(txn);
             if (is_zero_sync_id(origin)) {
                 throw std::logic_error(
                     "SyncEngine local node identity is not initialised");
             }
-            const LogicalDeliveryEnvelope envelope = outbox.enqueue(
-                txn.handle(), destination, origin, frame, bounds);
-            txn.commit();
-            return envelope;
+            return outbox.enqueue(txn, destination, origin, frame, bounds);
         }
 
         /// \brief Lists locally queued ordered deliveries for one destination.

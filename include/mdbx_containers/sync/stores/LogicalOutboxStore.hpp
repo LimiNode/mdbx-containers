@@ -62,6 +62,12 @@ namespace sync {
             open_for_write(txn);
 
             Metadata metadata = read_metadata(txn, destination);
+            if (is_zero_sync_id(metadata.origin_node_id)) {
+                metadata.origin_node_id = origin;
+            } else if (compare_node_id(metadata.origin_node_id, origin) != 0) {
+                throw std::invalid_argument(
+                    "LogicalOutboxStore destination already belongs to a different origin");
+            }
             if (metadata.next_sequence ==
                 (std::numeric_limits<std::uint64_t>::max)()) {
                 throw std::overflow_error(
@@ -129,6 +135,8 @@ namespace sync {
                     LogicalDeliveryEnvelope envelope = decode_value(value, bounds);
                     if (compare_node_id(envelope.destination_db_uuid,
                                         destination) != 0 ||
+                        compare_node_id(envelope.origin_node_id,
+                                        metadata.origin_node_id) != 0 ||
                         envelope.origin_sequence != sequence) {
                         throw std::runtime_error(
                             "LogicalOutboxStore entry key/value mismatch");
@@ -231,10 +239,12 @@ namespace sync {
         struct Metadata {
             Metadata()
                 : next_sequence(1u),
-                  acknowledged_through(0u) {}
+                  acknowledged_through(0u),
+                  origin_node_id() {}
 
             std::uint64_t next_sequence;
             std::uint64_t acknowledged_through;
+            NodeId origin_node_id;
         };
 
         MDBX_txn* checked_txn(MDBX_txn* txn, const char* context) const {
@@ -360,15 +370,18 @@ namespace sync {
         static std::vector<std::uint8_t> encode_metadata(
                 const Metadata& metadata) {
             if (metadata.next_sequence == 0u ||
-                metadata.acknowledged_through >= metadata.next_sequence) {
+                metadata.acknowledged_through >= metadata.next_sequence ||
+                is_zero_sync_id(metadata.origin_node_id)) {
                 throw std::logic_error(
                     "LogicalOutboxStore metadata is invalid");
             }
             std::vector<std::uint8_t> out;
-            out.reserve(2u + 8u + 8u);
+            out.reserve(2u + 8u + 8u + metadata.origin_node_id.size());
             detail::append_u16_le(out, metadata_value_version());
             detail::append_u64_le(out, metadata.next_sequence);
             detail::append_u64_le(out, metadata.acknowledged_through);
+            out.insert(out.end(), metadata.origin_node_id.begin(),
+                       metadata.origin_node_id.end());
             return out;
         }
 
@@ -387,8 +400,11 @@ namespace sync {
             Metadata out;
             out.next_sequence = detail::read_u64_le(bytes + 2u);
             out.acknowledged_through = detail::read_u64_le(bytes + 10u);
+            std::memcpy(out.origin_node_id.data(), bytes + 18u,
+                        out.origin_node_id.size());
             if (out.next_sequence == 0u ||
-                out.acknowledged_through >= out.next_sequence) {
+                out.acknowledged_through >= out.next_sequence ||
+                is_zero_sync_id(out.origin_node_id)) {
                 throw std::runtime_error(
                     "LogicalOutboxStore metadata is invalid");
             }
@@ -412,10 +428,12 @@ namespace sync {
         static std::uint8_t key_version() { return 1u; }
         static std::uint8_t metadata_key_kind() { return 0u; }
         static std::uint8_t entry_key_kind() { return 1u; }
-        static std::uint16_t metadata_value_version() { return 1u; }
+        static std::uint16_t metadata_value_version() { return 2u; }
         static std::size_t entry_prefix_size() { return 2u + DbId().size(); }
         static std::size_t entry_key_size() { return entry_prefix_size() + 8u; }
-        static std::size_t metadata_value_size() { return 2u + 8u + 8u; }
+        static std::size_t metadata_value_size() {
+            return 2u + 8u + 8u + NodeId().size();
+        }
 
         MDBX_env* m_env;
         std::string m_dbi_name;

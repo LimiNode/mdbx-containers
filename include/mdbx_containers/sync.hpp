@@ -20,6 +20,7 @@
 #include "sync/LogicalChange.hpp"
 #include "sync/LogicalChangeFrameCodec.hpp"
 #include "sync/LogicalDeliveryEnvelopeCodec.hpp"
+#include "sync/ILogicalDeliveryOutbox.hpp"
 #include "sync/LogicalTableAdapter.hpp"
 #include "sync/LogicalSchemaValidation.hpp"
 #include "sync/adapters/KeyValueTableLogicalAdapter.hpp"
