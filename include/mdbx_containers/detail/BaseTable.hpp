@@ -15,6 +15,8 @@
 #include <vector>
 
 namespace mdbxc {
+
+    class TableSequence;
     
     /// \class BaseTable
     /// \ingroup mdbxc_core
@@ -33,6 +35,7 @@ namespace mdbxc {
     /// through separate wrapper instances while the shared Connection lifecycle
     /// remains stable.
     class BaseTable {
+        friend class TableSequence;
     public:
         /// \brief Construct the database table accessor.
         /// \param connection Shared MDBX connection.
