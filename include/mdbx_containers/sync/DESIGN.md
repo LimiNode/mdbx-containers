@@ -96,7 +96,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear under one-writer or causally serialized updates. |
-| `KeyOrderedMultiValueTable` | Not supported in v0.1 | Local ordered multi-value table exists, but sync capture/apply is deferred until ordered-history wire identity and conflict semantics are specified and tested. |
+| `KeyOrderedMultiValueTable` | Append-only logical adapter | `KeyOrderedMultiValueTableLogicalAdapter` applies append-only changes through ordered delivery for one origin stream. Typed capture and destructive operations remain deferred. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
 Do not add `record_op()` paths for unsupported table types without first
@@ -264,8 +264,8 @@ sequence prefix remains a local storage detail and is not a cross-node identity.
 
 `KeyOrderedMultiValueTable<K, V>` exists as a local table API for replicated
 per-key histories, event timelines, queues, and other local models where
-per-key append order is part of the contract. Its first logical adapter will be
-append-only and will accept changes only through
+per-key append order is part of the contract. Its first logical adapter is
+append-only and accepts changes only through
 `SyncEngine::apply_ordered_logical_delivery_envelope()`. Direct logical frames
 and unordered delivery must fail before adapter callbacks or table mutation.
 The local storage format is:

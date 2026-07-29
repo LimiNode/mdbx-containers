@@ -66,10 +66,11 @@
   unordered `insert`, key erase, all-matching-value erase, and clear under a single writer
   or causally serialized updates. Raw calls, `append`, `reconcile`, and range
   erase remain outside that adapter scope. See `sync/DESIGN.md`.
-  `KeyOrderedMultiValueTable` is the order-sensitive table API, but its sync
-  capture/apply contract remains disabled until capture and round-trip tests
-  exist. `AnyValueTable` and `HashedKeyValueStore` still need type-tag and
-  hash-index identity designs.
+  `KeyOrderedMultiValueTableLogicalAdapter` provides opt-in append-only apply
+  through ordered logical delivery for one origin stream. Direct logical frames
+  and unordered delivery are rejected; typed capture and destructive ordered
+  operations remain deferred. `AnyValueTable` and `HashedKeyValueStore` still
+  need type-tag and hash-index identity designs.
 - Application CRUD code does not need per-method sync wrappers for supported
   tables. Attach `ThreadLocalChangeAccumulator` to the writing `Connection`;
   use `SyncCaptureScope` for bounded write phases, or the lower-level
