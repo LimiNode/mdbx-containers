@@ -21,6 +21,7 @@
 - `KeyMultiValueTable<K, V>` stores multiple values per key with a `std::multimap`-like API, streaming and materialized key-range scans, reverse scans, range erasure, and repeated identical `(key, value)` pair preservation.
 - `KeyOrderedMultiValueTable<K, V>` stores multiple values per key where current append order is part of the API; repeated identical values stay visible and `find(key)` returns values in order.
 - `SequenceTable<ValueT>` stores values by stable uint64_t id with append-only semantics and sparse index support. Append returns a stable id; erase does not reindex following records.
+- `TableSequence` reserves positive, per-table uint64_t identifiers in a caller-owned MDBX transaction without storing a value. Allocations commit or roll back with that transaction.
 - `AnyValueTable` type-tag prefix verification is opt-in via `set_type_tag_check(true)` and is disabled by default for compatibility with existing raw records.
 - `VectorStore` is an MVP embedded vector store for local RAG: persistent MDBX
   storage with an exact in-memory `FlatVectorIndex`.
