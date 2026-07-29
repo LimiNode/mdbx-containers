@@ -87,8 +87,12 @@
   для leader/follower либо для одного внешне сериализованного writer'а на
   коллекцию, а не multi-writer logical репликация.
 - `AnyValueTable`, `KeyMultiValueTable`, `KeyOrderedMultiValueTable` и
-  `HashedKeyValueStore` не реплицируются в v0.1. Для `KeyMultiValueTable` в
-  `sync/DESIGN.md` описан отложенный unordered multiset sync design.
+  `HashedKeyValueStore` не имеют raw-репликации в v0.1.
+  `KeyMultiValueTableLogicalAdapter` даёт opt-in logical capture для
+  неупорядоченных `insert`, удаления ключа, удаления всех совпадающих значений и очистки при
+  одном writer'е либо причинно сериализованных обновлениях. Raw-вызовы,
+  `append`, `reconcile` и удаление диапазона остаются за пределами scope этого
+  adapter-а. См. `sync/DESIGN.md`.
   `KeyOrderedMultiValueTable` является order-sensitive table API, но её
   sync capture/apply контракт остаётся выключенным, пока не появятся capture и
   round-trip tests. Для `AnyValueTable` и `HashedKeyValueStore` ещё нужны

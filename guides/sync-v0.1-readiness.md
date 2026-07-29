@@ -75,9 +75,10 @@ These table families intentionally emit no `ChangeOp` in v0.1:
 
 - `AnyValueTable`, until a wire-level type tag and compatibility policy is
   specified.
-- `KeyMultiValueTable`, until the deferred unordered multiset design for
-  single-writer or causally serialized updates in `sync/DESIGN.md` is
-  implemented and covered by capture and round-trip tests.
+- raw `KeyMultiValueTable` capture, bulk/reconcile/range operations, and
+  general multi-writer destructive convergence. The explicit unordered logical
+  adapter covers only insert, key erase, all-matching-value erase, and clear for one writer
+  or causally serialized updates.
 - `KeyOrderedMultiValueTable`, until its ordered multi-value sync wire contract
   and round-trip tests are implemented.
 - `HashedKeyValueStore`, until the relationship between logical key bytes,
@@ -101,6 +102,9 @@ The logical sync scaffolding is preparatory only:
 - `KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are explicit
   apply helpers with opt-in typed capture sessions. Neither is connected to
   the transport pull/push path yet; callers own logical frame delivery.
+- `KeyMultiValueTableLogicalAdapter` follows the same explicit logical-frame
+  path for its limited unordered multiset operation set. It does not enable raw
+  `ChangeOp` capture for the table wrapper.
 - Logical delivery replay markers can be pruned through a persisted per-origin
   watermark. The watermark DBI is created lazily on the first pruning call, so
   deployments that use pruning must reserve one additional named-DBI slot in
@@ -120,14 +124,14 @@ tables.
 - Add optional table identity filters on top of the affected DBI names already
   reported by `ISyncApplyObserver`, if more cached wrappers need narrower
   subscriptions.
-- Add codec framing for logical table changes, including capability bits and
-  fail-closed tests for old or capability-limited decoders.
+- Extend logical-frame capability negotiation only when a new adapter requires
+  a compatibility distinction beyond the existing schema marker and adapter
+  registry fail-closed checks.
 - Integrate `LogicalTableRegistry` with `SyncEngine::handle_push()` only after
   logical changes can be parsed separately from raw DBI operations.
-- Prototype `KeyMultiValueTable` capture/apply using the deferred
-  single-writer/serialized unordered multiset design. Add explicit wire
-  sub-operation framing, registry integration, and repeated-pair round-trip
-  tests before enabling capture.
+- Extend `KeyMultiValueTable` logical capture only after every added bulk or
+  reconcile operation has explicit multiset replay semantics and round-trip
+  coverage. Raw capture remains disabled.
 - Implement the deferred full snapshot protocol before treating
   `SnapshotRequired` as automatically recoverable by sync itself.
 - Define explicit conflict/CRDT semantics before claiming general concurrent

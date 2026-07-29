@@ -95,7 +95,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `SequenceTable` | Supported | Captures set/append/delete/clear against stable `uint64_t` record ids. `append()` remains a local single-writer helper; external synchronization is still required for concurrent appenders. |
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
-| `KeyMultiValueTable` | Not supported in v0.1 | Deferred until unordered multiset replication and DUPSORT duplicate-value payload framing are implemented and tested. |
+| `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear under one-writer or causally serialized updates. |
 | `KeyOrderedMultiValueTable` | Not supported in v0.1 | Local ordered multi-value table exists, but sync capture/apply is deferred until ordered-history wire identity and conflict semantics are specified and tested. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
@@ -148,8 +148,8 @@ C++11 builds fall back to an exclusive connection mutex model.
 
 This section documents the logical replication contract for
 `KeyMultiValueTable`. Raw v0.1 capture remains unsupported:
-`KeyMultiValueTable` emits no raw `ChangeOp` records. A future explicit typed
-capture session may emit only the operations defined by this contract.
+`KeyMultiValueTable` emits no raw `ChangeOp` records. Its explicit typed
+capture session emits only the operations defined by this contract.
 
 `KeyMultiValueTable` cannot safely reuse the v0.1 raw DBI put/delete model as
 an undocumented implementation detail. The table stores one MDBX DUPSORT record
