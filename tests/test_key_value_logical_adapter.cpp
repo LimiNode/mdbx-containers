@@ -3341,6 +3341,21 @@ void test_ordered_logical_delivery_enforces_receiver_frontier() {
     MDBXC_TEST_ASSERT(gap.acknowledged_through == 0u);
     MDBXC_TEST_ASSERT(apply_calls == 0);
 
+    mdbxc::sync::CodecBounds small_error_bounds;
+    small_error_bounds.max_error_len = 8u;
+    const mdbxc::sync::LogicalDeliveryAcknowledgement bounded_gap =
+        engine.apply_ordered_logical_delivery_envelope(
+            second, &small_error_bounds);
+    MDBXC_TEST_ASSERT(!bounded_gap.ok);
+    MDBXC_TEST_ASSERT(bounded_gap.error.size() == 8u);
+    const std::vector<std::uint8_t> encoded_bounded_gap =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_acknowledgement(
+            bounded_gap, &small_error_bounds);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement decoded_bounded_gap =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::decode_acknowledgement(
+            encoded_bounded_gap, &small_error_bounds);
+    MDBXC_TEST_ASSERT(decoded_bounded_gap.error == bounded_gap.error);
+
     const mdbxc::sync::LogicalDeliveryAcknowledgement first_ack =
         engine.apply_ordered_logical_delivery_envelope(first);
     MDBXC_TEST_ASSERT(first_ack.ok);

@@ -112,6 +112,17 @@ namespace sync {
         }
     }
 
+    /// \brief Truncates an acknowledgement diagnostic to its wire bound.
+    inline std::string bounded_logical_delivery_acknowledgement_error(
+            const std::string& error,
+            const CodecBounds* bounds = nullptr) {
+        const CodecBounds& effective =
+            logical_delivery_effective_bounds(bounds);
+        return error.size() <= effective.max_error_len
+            ? error
+            : error.substr(0u, effective.max_error_len);
+    }
+
     /// \brief Returns the only capabilities this protocol version understands.
     inline std::uint64_t logical_delivery_supported_capability_flags() {
         return static_cast<std::uint64_t>(

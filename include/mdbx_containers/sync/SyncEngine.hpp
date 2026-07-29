@@ -462,13 +462,14 @@ namespace sync {
             try {
                 validate_logical_delivery_envelope(envelope, bounds);
             } catch (const std::exception& e) {
-                acknowledgement.ok = false;
-                acknowledgement.error = e.what();
+                set_logical_delivery_acknowledgement_failure(
+                    acknowledgement, e.what(), false, bounds);
                 return acknowledgement;
             } catch (...) {
-                acknowledgement.ok = false;
-                acknowledgement.error =
-                    "Logical ordered delivery envelope validation failed";
+                set_logical_delivery_acknowledgement_failure(
+                    acknowledgement,
+                    "Logical ordered delivery envelope validation failed",
+                    false, bounds);
                 return acknowledgement;
             }
 
@@ -492,9 +493,10 @@ namespace sync {
                 acknowledgement.destination_db_uuid = local_db_uuid;
                 if (compare_node_id(local_db_uuid,
                                     envelope.destination_db_uuid) != 0) {
-                    acknowledgement.ok = false;
-                    acknowledgement.error =
-                        "Logical ordered delivery destination db_uuid mismatch";
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement,
+                        "Logical ordered delivery destination db_uuid mismatch",
+                        false, bounds);
                     txn.rollback();
                     return acknowledgement;
                 }
@@ -514,16 +516,17 @@ namespace sync {
                 }
                 if (last == (std::numeric_limits<std::uint64_t>::max)() ||
                     envelope.origin_sequence != last + 1u) {
-                    acknowledgement.ok = false;
-                    acknowledgement.retryable = true;
-                    acknowledgement.error = "Logical ordered delivery sequence gap";
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement,
+                        "Logical ordered delivery sequence gap", true, bounds);
                     txn.rollback();
                     return acknowledgement;
                 }
                 if (!delivery.try_mark_applied(txn.handle(), envelope, bounds)) {
-                    acknowledgement.ok = false;
-                    acknowledgement.error =
-                        "Logical ordered delivery marker conflicts with order state";
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement,
+                        "Logical ordered delivery marker conflicts with order state",
+                        false, bounds);
                     txn.rollback();
                     return acknowledgement;
                 }
@@ -532,9 +535,9 @@ namespace sync {
                 const LogicalApplyResult validation =
                     validate_logical_schema_markers(txn.handle(), changes);
                 if (!validation.ok) {
-                    acknowledgement.ok = false;
-                    acknowledgement.retryable = validation.retryable;
-                    acknowledgement.error = validation.error;
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement, validation.error,
+                        validation.retryable, bounds);
                     txn.rollback();
                     return acknowledgement;
                 }
@@ -546,9 +549,9 @@ namespace sync {
                         txn.handle(), changes);
                 }
                 if (!apply_result.ok) {
-                    acknowledgement.ok = false;
-                    acknowledgement.retryable = apply_result.retryable;
-                    acknowledgement.error = apply_result.error;
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement, apply_result.error,
+                        apply_result.retryable, bounds);
                     txn.rollback();
                     return acknowledgement;
                 }
@@ -1004,6 +1007,17 @@ namespace sync {
         }
 
     private:
+        static void set_logical_delivery_acknowledgement_failure(
+                LogicalDeliveryAcknowledgement& acknowledgement,
+                const std::string& error,
+                bool retryable,
+                const CodecBounds* bounds) {
+            acknowledgement.ok = false;
+            acknowledgement.retryable = retryable;
+            acknowledgement.error =
+                bounded_logical_delivery_acknowledgement_error(error, bounds);
+        }
+
         struct CursorGuard {
             explicit CursorGuard(MDBX_cursor* cursor) : raw(cursor) {}
             ~CursorGuard() { if (raw) mdbx_cursor_close(raw); }
