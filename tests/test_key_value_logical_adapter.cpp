@@ -3412,6 +3412,75 @@ void test_ordered_logical_delivery_enforces_receiver_frontier() {
     cleanup(path);
 }
 
+void test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers() {
+    const std::string sender_path = "test_ordered_logical_sender.mdbx";
+    const std::string receiver_path = "test_ordered_logical_receiver.mdbx";
+    const std::string dbi_name = "ordered_logical_dispatch";
+    const std::string schema_id = "app.ordered_logical_dispatch.v1";
+    cleanup(sender_path);
+    cleanup(receiver_path);
+
+    mdbxc::Config sender_cfg;
+    sender_cfg.pathname = sender_path;
+    sender_cfg.max_dbs = 20;
+    sender_cfg.no_subdir = true;
+    mdbxc::Config receiver_cfg = sender_cfg;
+    receiver_cfg.pathname = receiver_path;
+    std::shared_ptr<mdbxc::Connection> sender_conn =
+        mdbxc::Connection::create(sender_cfg);
+    std::shared_ptr<mdbxc::Connection> receiver_conn =
+        mdbxc::Connection::create(receiver_cfg);
+
+    const mdbxc::sync::NodeId sender_node = make_node(0x11);
+    const mdbxc::sync::NodeId receiver_node = make_node(0x21);
+    const mdbxc::sync::DbId sender_db = make_node(0x31);
+    const mdbxc::sync::DbId receiver_db = make_node(0x41);
+    mdbxc::sync::SyncEngine sender(sender_conn);
+    mdbxc::sync::SyncEngine receiver(receiver_conn);
+    sender.initialize_local_identity(sender_node, sender_db);
+    receiver.initialize_local_identity(receiver_node, receiver_db);
+    receiver.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(receiver_conn, dbi_name);
+    int apply_calls = 0;
+    CountingDeliveryLogicalAdapter adapter(table, schema_id, apply_calls);
+    receiver.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalSchemaRef ref;
+    ref.schema_id = schema_id;
+    ref.kind = mdbxc::sync::LogicalTableKind::KeyValue;
+    ref.schema_version = 1u;
+    const std::vector<std::uint8_t> payload;
+    mdbxc::sync::LogicalChangeFrame frame;
+    frame.changes.push_back(mdbxc::sync::LogicalChange(ref, 1u, 0u, payload));
+    sender.enqueue_logical_delivery(receiver_db, frame);
+    sender.enqueue_logical_delivery(receiver_db, frame);
+
+    mdbxc::sync::DirectLogicalDeliveryPeer peer(receiver);
+    const mdbxc::sync::LogicalDeliveryDispatchResult dispatched =
+        sender.deliver_pending_logical_deliveries(peer, receiver_db);
+    MDBXC_TEST_ASSERT(dispatched.ok);
+    MDBXC_TEST_ASSERT(dispatched.delivered == 2u);
+    MDBXC_TEST_ASSERT(dispatched.acknowledged_through == 2u);
+    MDBXC_TEST_ASSERT(sender.pending_logical_deliveries(receiver_db).empty());
+    MDBXC_TEST_ASSERT(apply_calls == 2);
+
+    MDBXC_TEST_ASSERT(
+        receiver.prune_ordered_logical_delivery_markers(sender_node) == 2u);
+    {
+        mdbxc::Transaction txn =
+            receiver_conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::LogicalDeliveryStore delivery(receiver_conn->env_handle());
+        MDBXC_TEST_ASSERT(delivery.count(txn.handle()) == 0u);
+        MDBXC_TEST_ASSERT(delivery.watermark(txn.handle(), sender_node) == 2u);
+    }
+
+    sender_conn->disconnect();
+    receiver_conn->disconnect();
+    cleanup(sender_path);
+    cleanup(receiver_path);
+}
+
 } // namespace
 
 int main() {
@@ -3467,5 +3536,6 @@ int main() {
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     test_logical_outbox_persists_ordered_destination_streams();
     test_ordered_logical_delivery_enforces_receiver_frontier();
+    test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers();
     return 0;
 }

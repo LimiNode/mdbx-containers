@@ -590,6 +590,16 @@ generic unordered delivery API remains separate, so applications do not acquire
 ordering merely by changing a call site. Order-state advance, replay marker, and
 adapter mutations commit in one transaction.
 
+`ILogicalDeliveryPeer` and `DirectLogicalDeliveryPeer` provide the capability-
+gated dispatch boundary. `SyncEngine::deliver_pending_logical_deliveries()`
+checks destination identity and negotiated `OrderedDelivery` before sending its
+outbox prefix. Each valid cumulative acknowledgement advances only that
+destination's local outbox frontier; a retryable negative acknowledgement can
+still acknowledge an earlier prefix. Receiver marker retention remains an
+explicit lifecycle choice: `prune_ordered_logical_delivery_markers(origin)`
+prunes only through the persisted contiguous frontier. It must be used only for
+origins that do not mix legacy unordered delivery with the ordered protocol.
+
 `LogicalDeliveryStore` persists one monotonic per-origin watermark in the
 optional `_mdbxc_logical_delivery_watermarks` DBI. The DBI is created lazily by
 the first `SyncEngine::prune_logical_delivery_markers()` call; normal logical
