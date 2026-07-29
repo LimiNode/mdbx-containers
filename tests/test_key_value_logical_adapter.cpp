@@ -3540,6 +3540,51 @@ void test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers() {
     cleanup(receiver_path);
 }
 
+void test_ordered_logical_delivery_loopback_cleans_outbox() {
+    const std::string path = "test_ordered_logical_loopback.mdbx";
+    const std::string dbi_name = "ordered_logical_loopback";
+    const std::string schema_id = "app.ordered_logical_loopback.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId node = make_node(0xB1);
+    const mdbxc::sync::DbId local_db = make_node(0xC1);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(node, local_db);
+    engine.register_logical_schema(schema_id, make_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    IntStringAdapter adapter(table, schema_id);
+    {
+        std::unique_ptr<IntStringAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->insert_or_assign(11, "eleven");
+        const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+            session->commit_to_outbox(engine, local_db);
+        MDBXC_TEST_ASSERT(envelope.origin_sequence == 1u);
+    }
+
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(local_db).size() == 1u);
+    mdbxc::sync::DirectLogicalDeliveryPeer peer(engine);
+    const mdbxc::sync::LogicalDeliveryDispatchResult dispatched =
+        engine.deliver_pending_logical_deliveries(peer, local_db);
+    MDBXC_TEST_ASSERT(dispatched.ok);
+    MDBXC_TEST_ASSERT(dispatched.delivered == 1u);
+    MDBXC_TEST_ASSERT(dispatched.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(local_db).empty());
+    const std::pair<bool, std::string> found = table.find_compat(11);
+    MDBXC_TEST_ASSERT(found.first);
+    MDBXC_TEST_ASSERT(found.second == "eleven");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_ordered_logical_delivery_dispatch_rejects_invalid_acknowledgements() {
     const std::string path = "test_ordered_logical_invalid_ack.mdbx";
     cleanup(path);
@@ -3638,6 +3683,7 @@ int main() {
     test_logical_outbox_persists_ordered_destination_streams();
     test_ordered_logical_delivery_enforces_receiver_frontier();
     test_ordered_logical_delivery_dispatch_cleans_outbox_and_markers();
+    test_ordered_logical_delivery_loopback_cleans_outbox();
     test_ordered_logical_delivery_dispatch_rejects_invalid_acknowledgements();
     return 0;
 }
