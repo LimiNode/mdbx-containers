@@ -141,6 +141,16 @@ namespace sync {
             out.insert(out.end(), bytes, bytes + sizeof(bytes));
         }
 
+        /// \brief Appends an unsigned integer in big-endian byte order.
+        /// \details This is for bytewise MDBX keys whose lexical order must
+        /// match their numeric order. Protocol payloads remain little-endian.
+        inline void append_u64_be(std::vector<std::uint8_t>& out,
+                                  std::uint64_t value) {
+            std::uint8_t bytes[8];
+            write_u64_be(value, bytes);
+            out.insert(out.end(), bytes, bytes + sizeof(bytes));
+        }
+
     } // namespace detail
 
 } // namespace sync

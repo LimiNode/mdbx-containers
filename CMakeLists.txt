@@ -453,6 +453,7 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/sync/SyncNodeSession.hpp
         mdbx_containers/sync/SyncWorkerGuard.hpp
         mdbx_containers/sync/stores/LogicalDeliveryStore.hpp
+        mdbx_containers/sync/stores/LogicalOutboxStore.hpp
         mdbx_containers/sync/stores/SchemaRegistryStore.hpp
         mdbx_containers/sync/TransportMessageCodec.hpp
     )

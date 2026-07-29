@@ -52,6 +52,7 @@
 #include "sync/stores/AppliedStore.hpp"
 #include "sync/stores/IdentityIndexStore.hpp"
 #include "sync/stores/LogicalDeliveryStore.hpp"
+#include "sync/stores/LogicalOutboxStore.hpp"
 #include "sync/stores/SchemaRegistryStore.hpp"
 #endif
 
