@@ -104,6 +104,11 @@ unordered multiset model. Repeated identical `(key, value)` pairs preserve
 multiplicity under single-writer or causally serialized updates. Raw v0.1
 capture, bulk/reconcile/range capture, and general concurrent destructive
 updates remain deferred.
+Before adding another `KeyMultiValueTableLogicalAdapter` opcode or capture
+method, expand its malformed-payload regression matrix to cover truncated
+pair payloads, oversized declared lengths, trailing bytes, payload-bearing
+clear, and unknown opcodes. This is deferred coverage work for the next
+logical-adapter extension, not a claim that those operations are supported.
 The detailed deferred contract lives in
 `include/mdbx_containers/sync/DESIGN.md`: it requires explicit multivalue wire
 sub-operations and receiver-side logical apply helpers before capture can be

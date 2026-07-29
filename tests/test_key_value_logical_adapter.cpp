@@ -1098,6 +1098,82 @@ void test_key_multi_value_logical_capture_session_rolls_back_on_outbox_failure()
     cleanup(path);
 }
 
+void test_key_multi_value_logical_capture_session_rolls_back_partial_erase() {
+    const std::string path =
+        "test_key_multi_value_logical_adapter_partial_erase.mdbx";
+    const std::string dbi_name = "logical_key_multi_value_partial_erase";
+    const std::string schema_id =
+        "app.logical_key_multi_value_partial_erase.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    {
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(make_node(0x54), make_node(0xDB));
+        engine.register_logical_schema(
+            schema_id, make_key_multi_value_record(dbi_name));
+
+        mdbxc::KeyMultiValueTable<int, std::string> table(conn, dbi_name);
+        IntStringMultiAdapter adapter(table, schema_id);
+        table.insert(9, "nine");
+
+        {
+            mdbxc::Transaction txn =
+                conn->transaction(mdbxc::TransactionMode::WRITABLE);
+            MDBX_dbi dbi = 0;
+            MDBXC_TEST_ASSERT(
+                mdbx_dbi_open(txn.handle(), dbi_name.c_str(),
+                              MDBX_DUPSORT | mdbxc::get_mdbx_flags<int>(),
+                              &dbi) == MDBX_SUCCESS);
+
+            mdbxc::SerializeScratch key_scratch;
+            MDBX_val key = mdbxc::serialize_key<
+                mdbxc::DefaultTableOptions::safe_integer_key>(
+                    9, key_scratch);
+            std::uint8_t corrupt_value_byte = 0xFFu;
+            MDBX_val corrupt_value = {&corrupt_value_byte, 1u};
+            MDBXC_TEST_ASSERT(
+                mdbx_put(txn.handle(), dbi, &key, &corrupt_value,
+                         MDBX_UPSERT) == MDBX_SUCCESS);
+            txn.commit();
+        }
+
+        std::unique_ptr<IntStringMultiAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        bool caught = false;
+        try {
+            session->erase(9, "nine");
+        } catch (const std::runtime_error&) {
+            caught = true;
+        }
+        MDBXC_TEST_ASSERT(caught);
+        MDBXC_TEST_ASSERT(session->pending_size() == 0u);
+
+        std::vector<mdbxc::sync::LogicalChange> changes;
+        bool commit_rejected = false;
+        try {
+            session->commit(changes);
+        } catch (const std::logic_error&) {
+            commit_rejected = true;
+        }
+        MDBXC_TEST_ASSERT(commit_rejected);
+        MDBXC_TEST_ASSERT(changes.empty());
+    }
+
+    conn->disconnect();
+    conn = mdbxc::Connection::create(cfg);
+    mdbxc::KeyMultiValueTable<int, std::string> reopened_table(conn, dbi_name);
+    MDBXC_TEST_ASSERT(reopened_table.count(9) == 2u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_multi_value_logical_frame_replicates_capture_session() {
     const std::string source_path =
         "test_key_multi_value_logical_frame_source.mdbx";
@@ -4198,6 +4274,7 @@ int main() {
     test_key_multi_value_logical_capture_session_commits_typed_writes();
     test_key_multi_value_logical_capture_session_commits_to_outbox();
     test_key_multi_value_logical_capture_session_rolls_back_on_outbox_failure();
+    test_key_multi_value_logical_capture_session_rolls_back_partial_erase();
     test_key_multi_value_logical_frame_replicates_capture_session();
     test_key_table_logical_capture_session_commits_typed_local_writes();
     test_key_table_logical_frame_replicates_capture_session();

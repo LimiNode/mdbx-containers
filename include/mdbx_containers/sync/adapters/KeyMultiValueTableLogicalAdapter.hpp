@@ -116,6 +116,9 @@ namespace sync {
         /// capture for its mutations. It captures only unordered multiset
         /// operations exposed by this class; direct table calls, bulk
         /// reconciliation, and range erasure remain local-only operations.
+        /// The adapter, table, and connection referenced by the adapter must
+        /// outlive the session. If a mutation throws after it begins, the
+        /// session rolls back its transaction and becomes inactive.
         class LogicalCaptureSession {
         public:
             explicit LogicalCaptureSession(
@@ -166,7 +169,7 @@ namespace sync {
                     }
                     return removed;
                 } catch (...) {
-                    m_pending.resize(previous_size);
+                    abort_after_mutation_failure(previous_size);
                     throw;
                 }
             }
@@ -187,7 +190,7 @@ namespace sync {
                     }
                     return removed;
                 } catch (...) {
-                    m_pending.resize(previous_size);
+                    abort_after_mutation_failure(previous_size);
                     throw;
                 }
             }
@@ -263,9 +266,23 @@ namespace sync {
                         *m_adapter.m_table.connection(), m_txn.handle());
                     mutation();
                 } catch (...) {
-                    m_pending.resize(previous_size);
+                    abort_after_mutation_failure(previous_size);
                     throw;
                 }
+            }
+
+            void abort_after_mutation_failure(
+                    std::size_t previous_size) noexcept {
+                try {
+                    m_pending.resize(previous_size);
+                } catch (...) {
+                    m_pending.clear();
+                }
+                try {
+                    m_txn.rollback();
+                } catch (...) {
+                }
+                m_active = false;
             }
 
             void ensure_active() const {
