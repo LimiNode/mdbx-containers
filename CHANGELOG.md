@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added an ordered-delivery requirement to the logical adapter contract.
+  Existing adapters keep the default unrestricted behavior; append-history
+  adapters can reject direct logical frames and unordered delivery before
+  preflight or mutation.
 - Fixed `LogicalDeliveryStore` probing of absent optional DBIs. It now checks
   the main DB before attempting a read-only named-DBI open, so a missing
   logical-delivery watermark remains a normal legacy-layout condition in both

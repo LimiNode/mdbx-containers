@@ -79,8 +79,9 @@ These table families intentionally emit no `ChangeOp` in v0.1:
   general multi-writer destructive convergence. The explicit unordered logical
   adapter covers only insert, key erase, all-matching-value erase, and clear for one writer
   or causally serialized updates.
-- `KeyOrderedMultiValueTable`, until its ordered multi-value sync wire contract
-  and round-trip tests are implemented.
+- `KeyOrderedMultiValueTable` raw capture and destructive operations. Its
+  append-only logical contract requires one ordered origin stream; adapter,
+  capture, and round-trip support are tracked separately from raw v0.1 sync.
 - `HashedKeyValueStore`, until the relationship between logical key bytes,
   physical storage keys, and hash-index entries is specified.
 
@@ -136,8 +137,8 @@ tables.
   `SnapshotRequired` as automatically recoverable by sync itself.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
   multi-writer convergence for `KeyMultiValueTable`.
-- Add sync capture/apply for `KeyOrderedMultiValueTable<K, V>` only after its
-  ordered-history wire identity and conflict semantics are specified.
+- Keep `KeyOrderedMultiValueTable<K, V>` append-only until persistent element
+  identity and tombstone semantics are designed for destructive operations.
 - Evaluate whether any `KeyMultiValueTable` framing ideas carry over to
   `AnyValueTable` and `HashedKeyValueStore`.
 

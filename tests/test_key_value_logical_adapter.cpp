@@ -136,6 +136,17 @@ mdbxc::sync::LogicalSchemaRecord make_key_multi_value_record(
     return record;
 }
 
+mdbxc::sync::LogicalSchemaRecord make_key_ordered_multi_value_record(
+        const std::string& dbi_name,
+        std::uint32_t version = 1) {
+    mdbxc::sync::LogicalSchemaRecord record;
+    record.dbi_name = dbi_name;
+    record.kind = mdbxc::sync::LogicalTableKind::KeyOrderedMultiValue;
+    record.schema_version = version;
+    record.dbi_names.push_back(dbi_name);
+    return record;
+}
+
 mdbxc::sync::LogicalChangeFrame make_outbox_test_frame(
         const std::string& schema_id,
         std::uint8_t payload_byte) {
@@ -289,6 +300,60 @@ public:
 
 private:
     mdbxc::KeyValueTable<int, std::string>& m_table;
+    std::string m_schema_id;
+};
+
+class OrderedDeliveryRequiredAdapter
+        : public mdbxc::sync::ILogicalTableAdapter {
+public:
+    OrderedDeliveryRequiredAdapter(const std::string& dbi_name,
+                                   const std::string& schema_id)
+        : m_dbi_name(dbi_name),
+          m_schema_id(schema_id),
+          apply_calls(0u) {}
+
+    mdbxc::sync::LogicalSchemaRef schema_ref() const override {
+        return mdbxc::sync::LogicalSchemaRef(
+            m_schema_id,
+            mdbxc::sync::LogicalTableKind::KeyOrderedMultiValue,
+            1u);
+    }
+
+    std::string primary_dbi() const override {
+        return m_dbi_name;
+    }
+
+    std::vector<std::string> affected_dbis() const override {
+        std::vector<std::string> out;
+        out.push_back(m_dbi_name);
+        return out;
+    }
+
+    bool requires_ordered_delivery() const override {
+        return true;
+    }
+
+    mdbxc::sync::LogicalApplyResult preflight(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) const override {
+        (void)txn;
+        (void)change;
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+    mdbxc::sync::LogicalApplyResult apply(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) override {
+        (void)txn;
+        (void)change;
+        ++apply_calls;
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+    std::size_t apply_calls;
+
+private:
+    std::string m_dbi_name;
     std::string m_schema_id;
 };
 
@@ -850,6 +915,68 @@ void test_key_table_logical_adapter_rejects_malformed_payload() {
     MDBXC_TEST_ASSERT(!result.ok);
     MDBXC_TEST_ASSERT(result.error.find("payload") != std::string::npos);
     MDBXC_TEST_ASSERT(!table.contains(5));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_logical_adapter_can_require_ordered_delivery() {
+    const std::string path =
+        "test_logical_adapter_requires_ordered_delivery.mdbx";
+    const std::string dbi_name = "logical_ordered_delivery_required";
+    const std::string schema_id = "app.logical_ordered_delivery_required.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x6Au);
+    const mdbxc::sync::NodeId remote_node = make_node(0x6Bu);
+    const mdbxc::sync::DbId db_uuid = make_node(0xDAu);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, db_uuid);
+    engine.register_logical_schema(
+        schema_id, make_key_ordered_multi_value_record(dbi_name));
+
+    mdbxc::KeyValueTable<int, std::string> table(conn, dbi_name);
+    OrderedDeliveryRequiredAdapter adapter(dbi_name, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalChange change;
+    change.schema = adapter.schema_ref();
+    change.opcode = 1u;
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(change);
+
+    const mdbxc::sync::LogicalApplyResult direct =
+        engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(!direct.ok);
+    MDBXC_TEST_ASSERT(direct.error.find("ordered delivery") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 0u);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = remote_node;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "ordered-required";
+    envelope.frame.changes = changes;
+
+    const mdbxc::sync::LogicalApplyResult unordered =
+        engine.apply_logical_delivery_envelope(envelope);
+    MDBXC_TEST_ASSERT(!unordered.ok);
+    MDBXC_TEST_ASSERT(unordered.error.find("ordered delivery") !=
+                      std::string::npos);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 0u);
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement ordered =
+        engine.apply_ordered_logical_delivery_envelope(envelope);
+    MDBXC_TEST_ASSERT(ordered.ok);
+    MDBXC_TEST_ASSERT(ordered.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
 
     conn->disconnect();
     cleanup(path);
@@ -4372,6 +4499,7 @@ int main() {
     test_key_value_logical_adapter_applies_through_sync_engine();
     test_key_table_logical_adapter_applies_through_sync_engine();
     test_key_table_logical_adapter_rejects_malformed_payload();
+    test_logical_adapter_can_require_ordered_delivery();
     test_key_multi_value_logical_adapter_applies_multiset_operations();
     test_key_multi_value_logical_adapter_rejects_invalid_payload();
     test_key_multi_value_logical_capture_session_commits_typed_writes();

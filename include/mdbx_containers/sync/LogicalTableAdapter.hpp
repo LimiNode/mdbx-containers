@@ -61,6 +61,15 @@ namespace sync {
             return names.size() == 1u ? names[0] : std::string();
         }
 
+        /// \brief Returns whether this adapter requires ordered delivery.
+        /// \details The default preserves existing logical adapters. Adapters
+        /// whose public state depends on append history override this method so
+        /// direct logical frames and unordered delivery fail before preflight
+        /// or mutation.
+        virtual bool requires_ordered_delivery() const {
+            return false;
+        }
+
         /// \brief Validates a logical change without mutating user tables.
         virtual LogicalApplyResult preflight(
                 MDBX_txn* txn,
@@ -120,7 +129,8 @@ namespace sync {
         /// registry cannot roll back a transaction it does not own.
         LogicalApplyResult preflight_then_apply(
                 MDBX_txn* txn,
-                const std::vector<LogicalChange>& changes) const {
+                const std::vector<LogicalChange>& changes,
+                bool has_ordered_delivery = false) const {
             std::vector<AdapterRegistration> registrations;
             registrations.reserve(changes.size());
 
@@ -134,6 +144,11 @@ namespace sync {
                 const LogicalApplyResult validation =
                     validate_change(it->second, changes[i]);
                 if (!validation.ok) return validation;
+                if (it->second.adapter->requires_ordered_delivery() &&
+                    !has_ordered_delivery) {
+                    return LogicalApplyResult::failure(
+                        "Logical adapter requires ordered delivery");
+                }
                 registrations.push_back(it->second);
             }
 

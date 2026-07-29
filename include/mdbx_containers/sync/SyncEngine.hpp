@@ -275,7 +275,7 @@ namespace sync {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_conn, txn.handle());
                     result = m_logical_registry.preflight_then_apply(
-                        txn.handle(), changes);
+                        txn.handle(), changes, false);
                 }
                 if (!result.ok) {
                     txn.rollback();
@@ -400,7 +400,7 @@ namespace sync {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_conn, txn.handle());
                     result = m_logical_registry.preflight_then_apply(
-                        txn.handle(), changes);
+                        txn.handle(), changes, false);
                 }
                 if (!result.ok) {
                     txn.rollback();
@@ -572,7 +572,7 @@ namespace sync {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_conn, txn.handle());
                     apply_result = m_logical_registry.preflight_then_apply(
-                        txn.handle(), changes);
+                        txn.handle(), changes, true);
                 }
                 if (!apply_result.ok) {
                     set_logical_delivery_acknowledgement_failure(
