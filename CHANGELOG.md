@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
 - Added a schema-version-2 destructive logical adapter for
   `KeyOrderedMultiValueTable`, with transactional append/erase, durable
   element identity, batch duplicate rejection, and per-key parity checks.
+- Added typed destructive ordered capture that coalesces local append/erase
+  pairs and commits table state with an ordered logical outbox envelope.
 - Added `KeyOrderedMultiValueTableLogicalAdapter` for append-only logical
   apply through ordered delivery. It preserves repeated values and per-key
   append order for the schema marker's authoritative origin. Its typed capture

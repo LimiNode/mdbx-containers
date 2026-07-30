@@ -186,10 +186,75 @@ void test_destructive_preflight_rejects_foreign_append_id() {
     cleanup(path);
 }
 
+void test_destructive_capture_coalesces_and_commits_to_outbox() {
+    const std::string path = "test_key_ordered_multi_value_destructive_capture.mdbx";
+    const std::string primary = "ordered_capture_values";
+    const std::string state = "ordered_capture_state";
+    const std::string by_key = "ordered_capture_by_key";
+    const std::string schema = "app.ordered_capture.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x61u);
+    const mdbxc::sync::DbId local_db = make_node(0xA1u);
+    const mdbxc::sync::DbId destination = make_node(0xB1u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::OrderedElementId id = session->append(9, "transient");
+        session->erase(id);
+        if (session->pending_size() != 0u) {
+            throw std::runtime_error("append/erase was not coalesced");
+        }
+        const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+            session->commit_to_outbox(engine, destination);
+        if (envelope.origin_sequence != 1u ||
+            !envelope.frame.changes.empty()) {
+            throw std::runtime_error("empty destructive delivery is incorrect");
+        }
+    }
+    if (!table.find(9).empty()) {
+        throw std::runtime_error("coalesced local element remained physical");
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::OrderedElementId id = session->append(9, "durable");
+        if (id.sequence != 2u || session->pending_size() != 1u) {
+            throw std::runtime_error("ordered capture id allocation is incorrect");
+        }
+        const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+            session->commit_to_outbox(engine, destination);
+        if (envelope.origin_sequence != 2u ||
+            envelope.frame.changes.size() != 1u) {
+            throw std::runtime_error("destructive outbox delivery is incorrect");
+        }
+    }
+    if (table.find(9).size() != 1u || table.find(9)[0] != "durable") {
+        throw std::runtime_error("durable local ordered value is missing");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 } // namespace
 
 int main() {
     test_destructive_append_erase_and_batch_preflight();
     test_destructive_preflight_rejects_foreign_append_id();
+    test_destructive_capture_coalesces_and_commits_to_outbox();
     return 0;
 }
