@@ -478,13 +478,13 @@ virtual LogicalApplyResult preflight_batch(
 Its default implementation invokes the existing `preflight()` for every change
 in the supplied order, so existing adapters remain source-compatible.
 `LogicalChangeBatchView` is a synchronous, non-owning view of references to the
-original decoded frame changes; adapters must not retain the view, its iterators,
-or its elements after `preflight_batch()` returns. The registry first validates
-all schema references, then constructs one stable-order view per registered
-adapter, runs `preflight_batch()` for every view, and only then calls any
-`apply()` callback in the original frame order. This avoids copying bounded but
-potentially large logical payloads while guaranteeing that a batch-level failure
-cannot follow another adapter's mutation.
+caller-provided changes; adapters must not retain the view or references to its
+elements after `preflight_batch()` returns. The registry first validates all
+schema references, then constructs one stable-order view per registered adapter,
+runs `preflight_batch()` for every view, and only then calls any `apply()`
+callback in the original frame order. This avoids copying bounded but potentially
+large logical payloads while guaranteeing that a batch-level failure cannot
+follow another adapter's mutation.
 
 For destructive schema version 2, one batch contains every change for one exact
 registered `LogicalSchemaRef`. `OrderedElementId` must be unique within that
