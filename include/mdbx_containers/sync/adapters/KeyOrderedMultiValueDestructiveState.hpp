@@ -6,6 +6,7 @@
 /// \brief Persistent state primitives for destructive ordered logical schemas.
 
 #include <cstddef>
+#include <cstring>
 #include <cstdint>
 #include <limits>
 #include <stdexcept>
@@ -138,6 +139,7 @@ namespace sync {
                 throw std::invalid_argument("Ordered element origin is zero");
             }
             const MDBX_dbi state = open_state(txn);
+            verify_introduced_high_water(txn, origin);
             const std::vector<std::uint8_t> key = make_counter_key(origin);
             const std::uint64_t allocated = read_sequence(
                 txn, state, key, "Ordered element counter");
@@ -188,6 +190,60 @@ namespace sync {
                 txn, "OrderedElementStateStore::verify_existing");
             open_state(txn);
             open_by_key(txn);
+            verify_all_introduced_high_water(txn);
+        }
+
+        /// \brief Verifies the introduced high-water mark for one origin.
+        /// \details Every persisted Live or Tombstone id must be at or below
+        /// the durable high-water mark. This prevents a damaged marker from
+        /// admitting a lower id that would disagree with DUPSORT id order.
+        void verify_introduced_high_water(
+                MDBX_txn* txn,
+                const NodeId& origin) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::verify_introduced_high_water");
+            if (compare_node_id(origin, make_zero_node()) == 0) {
+                throw std::invalid_argument("Ordered element origin is zero");
+            }
+            const MDBX_dbi state = open_state(txn);
+            const std::vector<std::uint8_t> prefix = make_element_prefix(origin);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, state, &cursor),
+                       "Ordered element state high-water cursor open failed");
+            std::uint64_t highest_persisted = 0u;
+            try {
+                MDBX_val raw_key = make_val(prefix);
+                MDBX_val raw_value;
+                int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
+                                         MDBX_SET_RANGE);
+                while (rc == MDBX_SUCCESS && has_prefix(raw_key, prefix)) {
+                    const OrderedElementId id = decode_element_key(raw_key);
+                    decode_state_value(raw_value);
+                    if (id.sequence > highest_persisted) {
+                        highest_persisted = id.sequence;
+                    }
+                    rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
+                                         MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND && rc != MDBX_SUCCESS) {
+                    check_mdbx(rc,
+                               "Ordered element state high-water cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+
+            if (highest_persisted == 0u) return;
+            std::uint64_t introduced = 0u;
+            if (!read_sequence_if_present(
+                    txn, state, make_introduced_key(origin), introduced,
+                    "Ordered element introduced high-water mark") ||
+                introduced < highest_persisted) {
+                throw std::runtime_error(
+                    "Ordered element introduced high-water mark is corrupt");
+            }
         }
 
         /// \brief Returns the largest sequence ever introduced for one origin.
@@ -203,13 +259,13 @@ namespace sync {
             return read_sequence(txn, state, make_introduced_key(origin),
                                  "Ordered element introduced high-water mark");
         }
-
         void put_live(MDBX_txn* txn,
                       const OrderedElementId& id,
                       const std::vector<std::uint8_t>& key,
                       const std::vector<std::uint8_t>& value) const {
             txn = checked_txn(txn, "OrderedElementStateStore::put_live");
             require_id(id);
+            verify_introduced_high_water(txn, id.origin);
             OrderedElementStateRecord existing;
             if (get(txn, id, existing)) {
                 throw std::runtime_error("Ordered element id already exists");
@@ -433,6 +489,75 @@ namespace sync {
             return open_named_create(txn, m_by_key_dbi_name, MDBX_DUPSORT);
         }
 
+        static bool has_prefix(const MDBX_val& value,
+                               const std::vector<std::uint8_t>& prefix) {
+            const std::uint8_t* data =
+                static_cast<const std::uint8_t*>(value.iov_base);
+            return data != nullptr && value.iov_len >= prefix.size() &&
+                   std::memcmp(data, &prefix[0], prefix.size()) == 0;
+        }
+
+        static bool contains_origin(const std::vector<NodeId>& origins,
+                                    const NodeId& origin) {
+            for (std::size_t i = 0u; i < origins.size(); ++i) {
+                if (compare_node_id(origins[i], origin) == 0) return true;
+            }
+            return false;
+        }
+
+        void verify_all_introduced_high_water(MDBX_txn* txn) const {
+            const MDBX_dbi state = open_state(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, state, &cursor),
+                       "Ordered element state verification cursor open failed");
+            std::vector<NodeId> origins;
+            try {
+                MDBX_val raw_key;
+                MDBX_val raw_value;
+                int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
+                                         MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    const std::uint8_t* bytes =
+                        static_cast<const std::uint8_t*>(raw_key.iov_base);
+                    if (bytes == nullptr || raw_key.iov_len == 0u) {
+                        throw std::runtime_error(
+                            "Ordered element state key is invalid");
+                    }
+                    if (bytes[0] == counter_tag() ||
+                        bytes[0] == introduced_tag()) {
+                        if (raw_key.iov_len != 1u + NodeId().size() ||
+                            raw_value.iov_len != 8u ||
+                            compare_node_id(make_node_id(bytes + 1u),
+                                            make_zero_node()) == 0) {
+                            throw std::runtime_error(
+                                "Ordered element counter record is corrupt");
+                        }
+                    } else if (bytes[0] == element_tag()) {
+                        const OrderedElementId id = decode_element_key(raw_key);
+                        decode_state_value(raw_value);
+                        if (!contains_origin(origins, id.origin)) {
+                            origins.push_back(id.origin);
+                        }
+                    } else {
+                        throw std::runtime_error(
+                            "Ordered element state key tag is invalid");
+                    }
+                    rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
+                                         MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc, "Ordered element state verification cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            for (std::size_t i = 0u; i < origins.size(); ++i) {
+                verify_introduced_high_water(txn, origins[i]);
+            }
+        }
+
         static MDBX_val make_val(const std::vector<std::uint8_t>& bytes) {
             MDBX_val out = {
                 const_cast<std::uint8_t*>(bytes.empty() ? nullptr : &bytes[0]),
@@ -464,16 +589,28 @@ namespace sync {
                 MDBX_dbi dbi,
                 const std::vector<std::uint8_t>& key,
                 const char* context) {
+            std::uint64_t out = 0u;
+            read_sequence_if_present(txn, dbi, key, out, context);
+            return out;
+        }
+
+        static bool read_sequence_if_present(
+                MDBX_txn* txn,
+                MDBX_dbi dbi,
+                const std::vector<std::uint8_t>& key,
+                std::uint64_t& out,
+                const char* context) {
             MDBX_val raw_key = make_val(key);
             MDBX_val raw_value;
             const int rc = mdbx_get(txn, dbi, &raw_key, &raw_value);
-            if (rc == MDBX_NOTFOUND) return 0u;
+            if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, context);
             if (raw_value.iov_len != 8u || raw_value.iov_base == nullptr) {
                 throw std::runtime_error(std::string(context) + " is corrupt");
             }
-            return detail::read_u64_le(
+            out = detail::read_u64_le(
                 static_cast<const std::uint8_t*>(raw_value.iov_base));
+            return true;
         }
 
         static void write_sequence(
@@ -551,11 +688,18 @@ namespace sync {
 
         static std::vector<std::uint8_t> make_element_key(
                 const OrderedElementId& id) {
-            std::vector<std::uint8_t> out;
-            out.push_back(element_tag());
+            std::vector<std::uint8_t> out = make_element_prefix(id.origin);
             const std::vector<std::uint8_t> encoded =
                 encode_ordered_element_id_index(id);
-            out.insert(out.end(), encoded.begin(), encoded.end());
+            out.insert(out.end(), encoded.begin() + id.origin.size(), encoded.end());
+            return out;
+        }
+
+        static std::vector<std::uint8_t> make_element_prefix(
+                const NodeId& origin) {
+            std::vector<std::uint8_t> out;
+            out.push_back(element_tag());
+            out.insert(out.end(), origin.begin(), origin.end());
             return out;
         }
 
