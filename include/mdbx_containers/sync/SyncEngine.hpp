@@ -214,11 +214,13 @@ namespace sync {
             txn.commit();
         }
 
-        /// \brief Initializes adapter storage and commits its schema marker.
+        /// \brief Initializes fresh adapter storage or verifies marked storage.
         /// \details Adapters with auxiliary DBIs override
-        /// \c ILogicalTableAdapter::initialize_storage(). Both their storage
-        /// setup and the persistent marker belong to this one transaction, so
-        /// an apply path never treats missing auxiliary state as empty.
+        /// \c ILogicalTableAdapter::initialize_storage() and
+        /// \c ILogicalTableAdapter::verify_storage(). Fresh setup and the
+        /// persistent marker belong to one transaction. Existing markers only
+        /// verify their storage, so an apply path never treats missing
+        /// auxiliary state as empty.
         void initialize_logical_adapter_schema(
                 const ILogicalTableAdapter& adapter,
                 const LogicalSchemaRecord& record) {
@@ -231,9 +233,17 @@ namespace sync {
             }
             auto txn = m_conn->transaction(TransactionMode::WRITABLE);
             initialize_system_stores(txn.handle());
-            adapter.initialize_storage(txn.handle());
             SchemaRegistryStore schemas(m_conn->env_handle());
-            schemas.register_or_verify(txn.handle(), ref.schema_id, record);
+            LogicalSchemaRecord existing;
+            if (schemas.get(txn.handle(), ref.schema_id, existing)) {
+                // An existing marker describes durable layout. Verify it first
+                // and never recreate an auxiliary DBI as implicit recovery.
+                schemas.register_or_verify(txn.handle(), ref.schema_id, record);
+                adapter.verify_storage(txn.handle());
+            } else {
+                adapter.initialize_storage(txn.handle());
+                schemas.register_or_verify(txn.handle(), ref.schema_id, record);
+            }
             const LogicalApplyResult marker_result =
                 validate_logical_adapter_marker(
                     txn.handle(), m_conn->env_handle(), adapter);

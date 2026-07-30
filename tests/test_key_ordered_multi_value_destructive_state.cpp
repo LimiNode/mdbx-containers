@@ -164,10 +164,76 @@ void test_ordered_element_state_requires_initialized_compatible_dbis() {
     cleanup(path);
 }
 
+void test_ordered_element_state_survives_reopen() {
+    const std::string path = "test_ordered_element_state_reopen.mdbx";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const mdbxc::sync::NodeId origin = make_node(0x61u);
+    const std::vector<std::uint8_t> key(1u, 0xBAu);
+    const std::vector<std::uint8_t> value(1u, 0xDCu);
+    mdbxc::sync::OrderedElementId first;
+    mdbxc::sync::OrderedElementId second;
+
+    {
+        const std::shared_ptr<mdbxc::Connection> connection =
+            mdbxc::Connection::create(config);
+        mdbxc::sync::OrderedElementStateStore store(
+            connection->env_handle(), "reopen_state", "reopen_by_key");
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        store.initialize_empty(transaction.handle());
+        first = store.allocate_id(transaction.handle(), origin);
+        second = store.allocate_id(transaction.handle(), origin);
+        store.put_live(transaction.handle(), first, key, value);
+        store.put_live(transaction.handle(), second, key, value);
+        store.tombstone(transaction.handle(), first);
+        transaction.commit();
+        connection->disconnect();
+    }
+
+    {
+        const std::shared_ptr<mdbxc::Connection> connection =
+            mdbxc::Connection::create(config);
+        mdbxc::sync::OrderedElementStateStore store(
+            connection->env_handle(), "reopen_state", "reopen_by_key");
+        {
+            mdbxc::Transaction transaction =
+                connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+            store.verify_existing(transaction.handle());
+            mdbxc::sync::OrderedElementStateRecord record;
+            if (!store.get(transaction.handle(), first, record) || record.live ||
+                !store.get(transaction.handle(), second, record) || !record.live) {
+                throw std::runtime_error(
+                    "ordered element state did not survive environment reopen");
+            }
+            transaction.rollback();
+        }
+        {
+            mdbxc::Transaction transaction =
+                connection->transaction(mdbxc::TransactionMode::WRITABLE);
+            const mdbxc::sync::OrderedElementId third =
+                store.allocate_id(transaction.handle(), origin);
+            if (third.sequence != 3u) {
+                throw std::runtime_error(
+                    "ordered element counter did not survive environment reopen");
+            }
+            transaction.commit();
+        }
+        connection->disconnect();
+    }
+
+    cleanup(path);
+}
+
 } // namespace
 
 int main() {
     test_ordered_element_state_persists_live_and_tombstone_records();
     test_ordered_element_state_requires_initialized_compatible_dbis();
+    test_ordered_element_state_survives_reopen();
     return 0;
 }

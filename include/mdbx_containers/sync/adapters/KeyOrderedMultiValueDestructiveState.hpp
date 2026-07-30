@@ -112,7 +112,8 @@ namespace sync {
     };
 
     /// \brief Transactional store for destructive ordered element state.
-    /// \details The state DBI stores origin counters and Live/Tombstone records.
+    /// \details The state DBI stores origin allocation counters, introduced
+    /// sequence high-water marks, and Live/Tombstone records.
     /// The DUPSORT index maps canonical logical key bytes to immutable ids.
     /// Every public operation participates in the caller-owned transaction.
     class OrderedElementStateStore {
@@ -138,28 +139,17 @@ namespace sync {
             }
             const MDBX_dbi state = open_state(txn);
             const std::vector<std::uint8_t> key = make_counter_key(origin);
-            MDBX_val raw_key = make_val(key);
-            MDBX_val raw_value;
-            std::uint64_t previous = 0u;
-            const int rc = mdbx_get(txn, state, &raw_key, &raw_value);
-            if (rc == MDBX_SUCCESS) {
-                if (raw_value.iov_len != 8u) {
-                    throw std::runtime_error("Ordered element counter is corrupt");
-                }
-                previous = detail::read_u64_le(
-                    static_cast<const std::uint8_t*>(raw_value.iov_base));
-            } else if (rc != MDBX_NOTFOUND) {
-                check_mdbx(rc, "Ordered element counter read failed");
-            }
+            const std::uint64_t allocated = read_sequence(
+                txn, state, key, "Ordered element counter");
+            const std::uint64_t introduced = highest_introduced(txn, origin);
+            const std::uint64_t previous = allocated > introduced ?
+                allocated : introduced;
             if (previous == (std::numeric_limits<std::uint64_t>::max)()) {
                 throw std::overflow_error("Ordered element counter overflow");
             }
             const std::uint64_t next = previous + 1u;
-            std::vector<std::uint8_t> encoded;
-            detail::append_u64_le(encoded, next);
-            MDBX_val raw_next = make_val(encoded);
-            check_mdbx(mdbx_put(txn, state, &raw_key, &raw_next, MDBX_UPSERT),
-                       "Ordered element counter write failed");
+            write_sequence(txn, state, key, next,
+                           "Ordered element counter write failed");
             OrderedElementId out;
             out.origin = origin;
             out.sequence = next;
@@ -182,6 +172,38 @@ namespace sync {
             open_by_key_create(txn);
         }
 
+        /// \brief Creates auxiliary DBIs only for a fresh, empty schema.
+        void initialize_empty(MDBX_txn* txn) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::initialize_empty");
+            const MDBX_dbi state = open_state_create(txn);
+            const MDBX_dbi by_key = open_by_key_create(txn);
+            require_empty(txn, state, "Ordered element state DBI is not empty");
+            require_empty(txn, by_key, "Ordered element key index DBI is not empty");
+        }
+
+        /// \brief Verifies already-marked auxiliary DBIs without creating them.
+        void verify_existing(MDBX_txn* txn) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::verify_existing");
+            open_state(txn);
+            open_by_key(txn);
+        }
+
+        /// \brief Returns the largest sequence ever introduced for one origin.
+        std::uint64_t highest_introduced(
+                MDBX_txn* txn,
+                const NodeId& origin) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::highest_introduced");
+            if (compare_node_id(origin, make_zero_node()) == 0) {
+                throw std::invalid_argument("Ordered element origin is zero");
+            }
+            const MDBX_dbi state = open_state(txn);
+            return read_sequence(txn, state, make_introduced_key(origin),
+                                 "Ordered element introduced high-water mark");
+        }
+
         void put_live(MDBX_txn* txn,
                       const OrderedElementId& id,
                       const std::vector<std::uint8_t>& key,
@@ -195,6 +217,11 @@ namespace sync {
 
             const MDBX_dbi state = open_state(txn);
             const MDBX_dbi by_key = open_by_key(txn);
+            const std::uint64_t introduced = highest_introduced(txn, id.origin);
+            if (id.sequence <= introduced) {
+                throw std::runtime_error(
+                    "Ordered element id is not above the introduced high-water mark");
+            }
             const std::vector<std::uint8_t> state_key = make_element_key(id);
             const std::vector<std::uint8_t> state_value = make_live_value(key, value);
             MDBX_val raw_state_key = make_val(state_key);
@@ -210,6 +237,9 @@ namespace sync {
             check_mdbx(mdbx_put(txn, by_key, &raw_key, &raw_index_value,
                                 MDBX_NODUPDATA),
                        "Ordered element key index write failed");
+            write_sequence(txn, state, make_introduced_key(id.origin),
+                           id.sequence,
+                           "Ordered element introduced high-water write failed");
         }
 
         void tombstone(MDBX_txn* txn, const OrderedElementId& id) const {
@@ -342,7 +372,8 @@ namespace sync {
                         throw std::runtime_error(
                             "Ordered element state key is invalid");
                     }
-                    if (bytes[0] == counter_tag()) {
+                    if (bytes[0] == counter_tag() ||
+                        bytes[0] == introduced_tag()) {
                         if (raw_key.iov_len != 1u + NodeId().size() ||
                             raw_value.iov_len != 8u) {
                             throw std::runtime_error(
@@ -376,6 +407,7 @@ namespace sync {
     private:
         static std::uint8_t counter_tag() { return 0x00u; }
         static std::uint8_t element_tag() { return 0x01u; }
+        static std::uint8_t introduced_tag() { return 0x02u; }
         static std::uint8_t live_tag() { return 0x01u; }
         static std::uint8_t tombstone_tag() { return 0x02u; }
 
@@ -407,6 +439,55 @@ namespace sync {
                 bytes.size()
             };
             return out;
+        }
+
+        static void require_empty(MDBX_txn* txn,
+                                  MDBX_dbi dbi,
+                                  const char* message) {
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, dbi, &cursor),
+                       "Ordered element state empty check cursor open failed");
+            MDBX_val key;
+            MDBX_val value;
+            const int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+            mdbx_cursor_close(cursor);
+            if (rc == MDBX_SUCCESS) {
+                throw std::runtime_error(message);
+            }
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "Ordered element state empty check failed");
+            }
+        }
+
+        static std::uint64_t read_sequence(
+                MDBX_txn* txn,
+                MDBX_dbi dbi,
+                const std::vector<std::uint8_t>& key,
+                const char* context) {
+            MDBX_val raw_key = make_val(key);
+            MDBX_val raw_value;
+            const int rc = mdbx_get(txn, dbi, &raw_key, &raw_value);
+            if (rc == MDBX_NOTFOUND) return 0u;
+            check_mdbx(rc, context);
+            if (raw_value.iov_len != 8u || raw_value.iov_base == nullptr) {
+                throw std::runtime_error(std::string(context) + " is corrupt");
+            }
+            return detail::read_u64_le(
+                static_cast<const std::uint8_t*>(raw_value.iov_base));
+        }
+
+        static void write_sequence(
+                MDBX_txn* txn,
+                MDBX_dbi dbi,
+                const std::vector<std::uint8_t>& key,
+                std::uint64_t value,
+                const char* context) {
+            std::vector<std::uint8_t> encoded;
+            detail::append_u64_le(encoded, value);
+            MDBX_val raw_key = make_val(key);
+            MDBX_val raw_value = make_val(encoded);
+            check_mdbx(mdbx_put(txn, dbi, &raw_key, &raw_value, MDBX_UPSERT),
+                       context);
         }
 
         MDBX_dbi open_named_existing(MDBX_txn* txn,
@@ -456,6 +537,14 @@ namespace sync {
         static std::vector<std::uint8_t> make_counter_key(const NodeId& origin) {
             std::vector<std::uint8_t> out;
             out.push_back(counter_tag());
+            out.insert(out.end(), origin.begin(), origin.end());
+            return out;
+        }
+
+        static std::vector<std::uint8_t> make_introduced_key(
+                const NodeId& origin) {
+            std::vector<std::uint8_t> out;
+            out.push_back(introduced_tag());
             out.insert(out.end(), origin.begin(), origin.end());
             return out;
         }

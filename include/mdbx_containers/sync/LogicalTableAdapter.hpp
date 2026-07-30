@@ -109,6 +109,16 @@ namespace sync {
             (void)txn;
         }
 
+        /// \brief Verifies adapter-owned persistent storage without creating it.
+        /// \details Setup calls this only after it has found an existing,
+        /// matching schema marker. The default keeps existing single-DBI
+        /// adapters source-compatible. Adapters with auxiliary DBIs override
+        /// this method to fail closed when already-marked storage is missing
+        /// or incompatible.
+        virtual void verify_storage(MDBX_txn* txn) const {
+            (void)txn;
+        }
+
         /// \brief Validates a logical change without mutating user tables.
         virtual LogicalApplyResult preflight(
                 MDBX_txn* txn,
