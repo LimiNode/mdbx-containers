@@ -25,6 +25,8 @@ typedef mdbxc::sync::KeyTableLogicalAdapter<int, IntKeyCodec>
     IntKeyTableAdapter;
 typedef mdbxc::sync::KeyMultiValueTableLogicalAdapter<
     int, std::string, IntKeyCodec, StringValueCodec> IntStringMultiAdapter;
+typedef mdbxc::sync::KeyOrderedMultiValueTableLogicalAdapter<
+    int, std::string, IntKeyCodec, StringValueCodec> IntStringOrderedAdapter;
 
 static_assert(mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
                   std::int32_t>::value,
@@ -1204,6 +1206,118 @@ void test_ordered_logical_delivery_exact_retry_survives_origin_migration() {
 
     conn->disconnect();
     cleanup(path);
+}
+
+void test_key_ordered_multi_value_logical_adapter_replays_append_history() {
+    const std::string source_path =
+        "test_key_ordered_multi_value_logical_source.mdbx";
+    const std::string replica_path =
+        "test_key_ordered_multi_value_logical_replica.mdbx";
+    const std::string dbi_name = "logical_key_ordered_multi_value";
+    const std::string schema_id = "app.logical_key_ordered_multi_value.v1";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    mdbxc::Config source_cfg;
+    source_cfg.pathname = source_path;
+    source_cfg.max_dbs = 16;
+    source_cfg.no_subdir = true;
+    mdbxc::Config replica_cfg = source_cfg;
+    replica_cfg.pathname = replica_path;
+
+    std::shared_ptr<mdbxc::Connection> source =
+        mdbxc::Connection::create(source_cfg);
+    std::shared_ptr<mdbxc::Connection> replica =
+        mdbxc::Connection::create(replica_cfg);
+
+    const mdbxc::sync::NodeId source_node = make_node(0x6Cu);
+    const mdbxc::sync::NodeId replica_node = make_node(0x6Du);
+    const mdbxc::sync::DbId source_db_uuid = make_node(0xDBu);
+    const mdbxc::sync::DbId replica_db_uuid = make_node(0xDCu);
+    mdbxc::sync::SyncEngine source_engine(source);
+    mdbxc::sync::SyncEngine replica_engine(replica);
+    source_engine.initialize_local_identity(source_node, source_db_uuid);
+    replica_engine.initialize_local_identity(replica_node, replica_db_uuid);
+    mdbxc::sync::LogicalSchemaRecord record =
+        make_key_ordered_multi_value_record(dbi_name);
+    record.ordered_delivery_origin_node_id = source_node;
+    source_engine.register_logical_schema(schema_id, record);
+    replica_engine.register_logical_schema(schema_id, record);
+
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> source_table(
+        source, dbi_name);
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> replica_table(
+        replica, dbi_name);
+    IntStringOrderedAdapter source_adapter(source_table, schema_id);
+    IntStringOrderedAdapter replica_adapter(replica_table, schema_id);
+    replica_engine.register_logical_adapter(replica_adapter);
+
+    source_table.append(7, "created");
+    source_table.append(7, "created");
+    source_table.insert(7, "sent");
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = replica_db_uuid;
+    envelope.origin_node_id = source_node;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "ordered-append-history";
+    envelope.frame.changes.push_back(
+        source_adapter.make_append(7, "created"));
+    envelope.frame.changes.push_back(
+        source_adapter.make_append(7, "created"));
+    envelope.frame.changes.push_back(
+        source_adapter.make_insert(7, "sent"));
+
+    const mdbxc::sync::LogicalApplyResult unordered =
+        replica_engine.apply_logical_delivery_envelope(envelope);
+    MDBXC_TEST_ASSERT(!unordered.ok);
+    MDBXC_TEST_ASSERT(replica_table.empty());
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement applied =
+        replica_engine.apply_ordered_logical_delivery_envelope(envelope);
+    MDBXC_TEST_ASSERT(applied.ok);
+    MDBXC_TEST_ASSERT(applied.acknowledged_through == 1u);
+    const std::vector<std::string> values = replica_table.find(7);
+    MDBXC_TEST_ASSERT(values.size() == 3u);
+    MDBXC_TEST_ASSERT(values[0] == "created");
+    MDBXC_TEST_ASSERT(values[1] == "created");
+    MDBXC_TEST_ASSERT(values[2] == "sent");
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement duplicate =
+        replica_engine.apply_ordered_logical_delivery_envelope(envelope);
+    MDBXC_TEST_ASSERT(duplicate.ok);
+    MDBXC_TEST_ASSERT(duplicate.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(replica_table.count(7) == 3u);
+
+    mdbxc::sync::LogicalDeliveryEnvelope malformed = envelope;
+    malformed.origin_sequence = 2u;
+    malformed.frame_id = "ordered-append-malformed";
+    malformed.frame.changes.clear();
+    mdbxc::sync::LogicalChange malformed_change =
+        source_adapter.make_append(8, "bad");
+    malformed_change.payload.push_back(0xffu);
+    malformed.frame.changes.push_back(malformed_change);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement rejected =
+        replica_engine.apply_ordered_logical_delivery_envelope(malformed);
+    MDBXC_TEST_ASSERT(!rejected.ok);
+    MDBXC_TEST_ASSERT(replica_table.count(8) == 0u);
+
+    mdbxc::sync::LogicalDeliveryEnvelope second = envelope;
+    second.origin_sequence = 2u;
+    second.frame_id = "ordered-append-second";
+    second.frame.changes.clear();
+    second.frame.changes.push_back(source_adapter.make_append(8, "next"));
+    const mdbxc::sync::LogicalDeliveryAcknowledgement second_applied =
+        replica_engine.apply_ordered_logical_delivery_envelope(second);
+    MDBXC_TEST_ASSERT(second_applied.ok);
+    MDBXC_TEST_ASSERT(second_applied.acknowledged_through == 2u);
+    MDBXC_TEST_ASSERT(replica_table.find(8).size() == 1u);
+    MDBXC_TEST_ASSERT(replica_table.find(8)[0] == "next");
+
+    source->disconnect();
+    replica->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
 }
 
 void test_key_multi_value_logical_adapter_applies_multiset_operations() {
@@ -4736,6 +4850,7 @@ int main() {
     test_ordered_logical_delivery_origin_binding_survives_reopen();
     test_ordered_logical_delivery_exact_retry_survives_reopen_without_adapter();
     test_ordered_logical_delivery_exact_retry_survives_origin_migration();
+    test_key_ordered_multi_value_logical_adapter_replays_append_history();
     test_key_multi_value_logical_adapter_applies_multiset_operations();
     test_key_multi_value_logical_adapter_rejects_invalid_payload();
     test_key_multi_value_logical_capture_session_commits_typed_writes();

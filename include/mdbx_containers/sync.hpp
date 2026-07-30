@@ -27,6 +27,7 @@
 #include "sync/adapters/KeyValueTableLogicalAdapter.hpp"
 #include "sync/adapters/KeyTableLogicalAdapter.hpp"
 #include "sync/adapters/KeyMultiValueTableLogicalAdapter.hpp"
+#include "sync/adapters/KeyOrderedMultiValueTableLogicalAdapter.hpp"
 #include "sync/CodecBounds.hpp"
 #include "sync/ChangeBatch.hpp"
 #include "sync/ChangeBatchCodec.hpp"

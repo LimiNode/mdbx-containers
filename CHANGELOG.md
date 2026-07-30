@@ -3,6 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added `KeyOrderedMultiValueTableLogicalAdapter` for append-only logical
+  apply through ordered delivery. It preserves repeated values and per-key
+  append order for the schema marker's authoritative origin; typed capture and
+  destructive operations remain deferred.
 - Ordered logical schemas now persist an explicit authoritative origin in
   `_mdbxc_sync_schema`. Ordered delivery validates that binding before replay
   marker insertion or adapter callbacks, so independent origins cannot append

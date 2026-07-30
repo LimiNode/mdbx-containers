@@ -93,10 +93,11 @@
   одном writer'е либо причинно сериализованных обновлениях. Raw-вызовы,
   `append`, `reconcile` и удаление диапазона остаются за пределами scope этого
   adapter-а. См. `sync/DESIGN.md`.
-  `KeyOrderedMultiValueTable` является order-sensitive table API, но её
-  sync capture/apply контракт остаётся выключенным, пока не появятся capture и
-  round-trip tests. Для `AnyValueTable` и `HashedKeyValueStore` ещё нужны
-  дизайны type tags и hash-index identity.
+  `KeyOrderedMultiValueTableLogicalAdapter` даёт opt-in append-only apply
+  через ordered logical delivery для одного origin stream. Direct logical frame
+  и unordered delivery отклоняются; typed capture и destructive ordered
+  операции остаются deferred. Для `AnyValueTable` и `HashedKeyValueStore` ещё
+  нужны дизайны type tags и hash-index identity.
 - Для поддерживаемых таблиц прикладной CRUD-код не нужно оборачивать
   отдельными sync-вызовами на каждый метод. Прикрепите
   `ThreadLocalChangeAccumulator` к пишущему `Connection`; используйте
