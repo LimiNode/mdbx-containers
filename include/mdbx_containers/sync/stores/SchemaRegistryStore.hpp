@@ -30,6 +30,9 @@ namespace sync {
         std::uint32_t schema_version = 0;     ///< Application schema version.
         std::uint32_t flags = 0;              ///< Reserved flags; must be zero for now.
         std::vector<std::string> dbi_names;   ///< All physical DBIs owned by the schema.
+        /// Authoritative origin for an ordered-delivery adapter, or zero when
+        /// the schema does not require ordered delivery.
+        NodeId ordered_delivery_origin_node_id = make_zero_node();
     };
 
     /// \brief Thin wrapper around \c _mdbxc_sync_schema.
@@ -244,7 +247,9 @@ namespace sync {
                    ca.kind == cb.kind &&
                    ca.schema_version == cb.schema_version &&
                    ca.flags == cb.flags &&
-                   ca.dbi_names == cb.dbi_names;
+                   ca.dbi_names == cb.dbi_names &&
+                   compare_node_id(ca.ordered_delivery_origin_node_id,
+                                   cb.ordered_delivery_origin_node_id) == 0;
         }
 
         static void append_string(std::vector<std::uint8_t>& out,
@@ -297,6 +302,9 @@ namespace sync {
             for (std::size_t i = 0; i < canonical.dbi_names.size(); ++i) {
                 append_string(out, canonical.dbi_names[i]);
             }
+            out.insert(out.end(),
+                       canonical.ordered_delivery_origin_node_id.begin(),
+                       canonical.ordered_delivery_origin_node_id.end());
         }
 
         static void decode_record(const MDBX_val& value,
@@ -335,6 +343,16 @@ namespace sync {
             for (std::uint32_t i = 0; i < count; ++i) {
                 decoded.dbi_names.push_back(read_string(data, total, pos));
             }
+            if (pos == total) {
+                validate_record(schema_id, decoded);
+                out = canonical_record(decoded);
+                return;
+            }
+            if (total - pos != decoded.ordered_delivery_origin_node_id.size()) {
+                throw std::runtime_error("SchemaRegistryStore trailing bytes");
+            }
+            decoded.ordered_delivery_origin_node_id = make_node_id(data + pos);
+            pos += decoded.ordered_delivery_origin_node_id.size();
             if (pos != total) {
                 throw std::runtime_error("SchemaRegistryStore trailing bytes");
             }

@@ -260,12 +260,15 @@ Neither order-sensitive iteration nor concurrent destructive-update convergence
 is guaranteed for general multi-writer `KeyMultiValueTable` replication. The
 sequence prefix remains a local storage detail and is not a cross-node identity.
 
-### Deferred `KeyOrderedMultiValueTable` sync design
+### `KeyOrderedMultiValueTable` ordered-delivery contract
 
 `KeyOrderedMultiValueTable<K, V>` exists as a local table API for replicated
 per-key histories, event timelines, queues, and other local models where
-per-key append order is part of the contract. Sync support for it remains
-deferred. The local storage format is:
+per-key append order is part of the contract. Its first logical adapter will be
+append-only and will accept changes only through
+`SyncEngine::apply_ordered_logical_delivery_envelope()`. Direct logical frames
+and unordered delivery must fail before adapter callbacks or table mutation.
+The local storage format is:
 
 ```text
 MDBX key                 = serialized-key
@@ -273,8 +276,20 @@ ordered duplicate value  = local-order-prefix || serialized-value
 local-order-prefix       = per-key uint64_t assigned by the destination DBI
 ```
 
-The local-order prefix is a storage detail, not a cross-node identity. A future
-sync format must carry an explicit globally stable order identity, for example:
+The local-order prefix is a storage detail, not a cross-node identity. The
+append-only adapter obtains its stable history order from one ordered delivery
+stream: envelope origin sequence followed by logical-change position within the
+frame. The persistent logical schema marker binds an ordered adapter to one
+non-zero authoritative origin. A caller must register that binding before
+capture or delivery; a missing or mismatched origin fails before marker
+insertion, adapter callbacks, or table mutation. Existing ordered markers
+without the binding require an explicit schema-marker migration. The receiver
+replays changes in that stream order and assigns local prefixes while preserving
+the observable per-key append order.
+
+Multiple independent origins writing the same ordered dataset are not supported
+by this contract. A future multi-writer format must carry an explicit globally
+stable element order identity, for example:
 
 ```text
 ordered duplicate value = global-order-key || serialized-value
@@ -287,22 +302,27 @@ fields above, this is only a deterministic presentation order: lexicographic
 comparison groups operations by `origin-node-id` before the origin-local
 sequence. It is not wall-clock insertion time and does not express causal order
 between nodes. A causally meaningful distributed history would need an explicit
-Lamport/HLC-style component or another causal-ordering model. The ordered table
-will need its own storage format, delete semantics, conflict semantics, and
-round-trip tests; it is not part of `KeyMultiValueTable` v0.1/v0.2 multiset
-sync.
+Lamport/HLC-style component or another causal-ordering model.
+
+The initial adapter supports only `append(key, value)`. `insert` is an alias for
+that operation and may use the same capture method. `erase`, `erase_at`,
+`clear`, and `replace_with` remain local-only until a persistent element
+identity, delete/tombstone semantics, and a new round-trip contract are
+specified.
 
 Required tests before enabling capture:
 
 - codec tests proving unknown multivalue operation bits/subtypes are rejected by
   older or capability-limited decoders;
-- sink-level tests for `insert()`, `append()`, `erase(key)`,
-  `erase(key, value)`, `erase_range()`, `clear()`, and `reconcile()`;
-- round-trip tests that preserve repeated identical `(key, value)`
-  multiplicity under a single writer and under causally serialized updates;
-- multi-writer same-key tests that prove order-sensitive APIs and destructive
-  update conflicts are not claimed to converge unless the scenario uses one
-  authoritative writer or another explicit conflict policy;
+- sink-level tests for append and its `insert` alias;
+- ordered-delivery round-trip tests that preserve repeated identical `(key,
+  value)` pairs and per-key append order for one origin stream;
+- negative tests proving direct logical frames and unordered delivery reject
+  ordered-table changes before adapter callbacks;
+- rollback, retry, and restart tests for append-only capture and ordered
+  delivery;
+- multi-writer same-key tests that prove independent origins are not claimed to
+  converge unless a future explicit conflict policy is selected;
 - pagination and restart tests, including persisted applied cursor behavior;
 - idempotent replay checks for already-applied batches;
 - negative tests proving unsupported `AnyValueTable` and `HashedKeyValueStore`
@@ -593,14 +613,19 @@ backward-compatible raw-sync-only.
 `SyncEngine::apply_ordered_logical_delivery_envelope()` is the receiver-side
 implementation of `OrderedDelivery`. `_mdbxc_logical_delivery_order` stores the
 highest committed contiguous sequence for each remote origin. A sequence at or
-below that frontier is a successful no-op. It acknowledges through the attempted
-sequence by default, or through the persisted frontier when the sender advertises
-`CumulativeAcknowledgement`. Only the exact next sequence reaches schema
-validation and adapters; a gap is a retryable acknowledgement and leaves both
-user data and markers untouched. The generic unordered delivery API remains
-separate, so applications do not acquire ordering merely by changing a call site.
-Order-state advance, replay marker, and adapter mutations commit in one
-transaction.
+below that frontier is a successful no-op only when its exact persisted delivery
+marker matches the incoming frame. A reused sequence with a different frame or
+payload, or a replay whose marker has been pruned, fails closed. Exact replay
+validation happens before runtime adapter or schema-origin validation, so a
+committed delivery can acknowledge a lost-ACK retry after restart or an
+administrative ordered-origin migration. A valid duplicate acknowledges through
+the attempted sequence by default, or through the persisted frontier when the
+sender advertises `CumulativeAcknowledgement`. Only the exact next sequence
+reaches schema validation and adapters; a gap is a retryable acknowledgement and
+leaves both user data and markers untouched. The generic unordered delivery API
+remains separate, so applications do not acquire ordering merely by changing a
+call site. Order-state advance, replay marker, and adapter mutations commit in
+one transaction.
 
 `ILogicalDeliveryPeer` and `DirectLogicalDeliveryPeer` provide the capability-
 gated dispatch boundary. `SyncEngine::deliver_pending_logical_deliveries()`

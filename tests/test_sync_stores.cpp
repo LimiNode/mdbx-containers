@@ -695,6 +695,7 @@ void test_schema_registry_store() {
     ordered.kind = LogicalTableKind::KeyOrderedMultiValue;
     ordered.schema_version = 1;
     ordered.dbi_names.push_back("events");
+    ordered.ordered_delivery_origin_node_id = make_node(0xC1u);
 
     LogicalSchemaRecord vector_like;
     vector_like.dbi_name = "vectors";
@@ -727,7 +728,9 @@ void test_schema_registry_store() {
         if (out.dbi_name != ordered.dbi_name ||
             out.kind != ordered.kind ||
             out.schema_version != ordered.schema_version ||
-            out.dbi_names != ordered.dbi_names) {
+            out.dbi_names != ordered.dbi_names ||
+            compare_node_id(out.ordered_delivery_origin_node_id,
+                            ordered.ordered_delivery_origin_node_id) != 0) {
             throw std::runtime_error("schema registry record mismatch");
         }
 
