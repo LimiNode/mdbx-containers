@@ -11,6 +11,7 @@
 
 #include <mdbx.h>
 
+#include "LogicalDeliveryEnvelope.hpp"
 #include "LogicalTableAdapter.hpp"
 #include "stores/MetaStore.hpp"
 #include "stores/SchemaRegistryStore.hpp"
