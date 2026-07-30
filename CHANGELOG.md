@@ -3,6 +3,8 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+- Added persistent `OrderedElementId` and state-store primitives for the
+  planned destructive `KeyOrderedMultiValueTable` logical schema v2.
 - Added `KeyOrderedMultiValueTableLogicalAdapter` for append-only logical
   apply through ordered delivery. It preserves repeated values and per-key
   append order for the schema marker's authoritative origin. Its typed capture
