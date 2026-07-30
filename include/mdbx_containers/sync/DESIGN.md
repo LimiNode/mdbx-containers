@@ -351,28 +351,107 @@ Lamport/HLC-style component or another causal-ordering model.
 The initial adapter supports only `append(key, value)`. `insert` is an alias for
 that operation and uses the same typed capture method. Its capture session owns
 one writable transaction and can atomically commit local appends plus an ordered
-outbox envelope through `commit_to_outbox()`. `erase`, `erase_at`,
-`clear`, and `replace_with` remain local-only until a persistent element
-identity, delete/tombstone semantics, and a new round-trip contract are
-specified.
+outbox envelope through `commit_to_outbox()`.
 
-Further ordered-history extensions require:
+#### Planned destructive ordered-history contract
 
-- codec tests proving unknown multivalue operation bits/subtypes are rejected by
-  older or capability-limited decoders;
-- sink-level tests for append and its `insert` alias;
-- ordered-delivery round-trip tests that preserve repeated identical `(key,
-  value)` pairs and per-key append order for one origin stream;
-- negative tests proving direct logical frames and unordered delivery reject
-  ordered-table changes before adapter callbacks;
-- rollback, retry, and restart tests for append-only capture and ordered
-  delivery;
-- multi-writer same-key tests that prove independent origins are not claimed to
-  converge unless a future explicit conflict policy is selected;
-- pagination and restart tests, including persisted applied cursor behavior;
-- idempotent replay checks for already-applied batches;
-- negative tests proving unsupported `AnyValueTable` and `HashedKeyValueStore`
-  still emit no `ChangeOp` until their own wire formats are defined.
+This is a versioned design for a later adapter extension. It does not change
+the current append-only adapter, does not enable raw `ChangeOp` capture, and
+does not make multiple independent writers converge.
+
+The existing local duplicate prefix cannot identify an element across nodes:
+
+```text
+stored duplicate = local-order-prefix || serialized-value
+```
+
+The prefix is allocated independently by every replica, and identical public
+values may occur more than once under a key. A delete that carries only a key,
+a value, or a local index can therefore remove a different occurrence on another
+replica. The destructive extension must use an immutable logical element id:
+
+```text
+OrderedElementId = origin-node-id || origin-element-sequence
+```
+
+`origin-element-sequence` is a non-zero monotonically increasing `uint64_t`
+allocated by the authoritative origin inside the same writable transaction as
+the local append. It is not the outbox delivery sequence: one frame can contain
+many changes, and an element id must exist before `commit_to_outbox()` allocates
+its envelope sequence. A new origin after a completed cutover uses its own node
+id and its own persistent element sequence; old element ids remain unchanged.
+
+The extension owns two additional application-named DBIs in the logical schema
+marker alongside the existing ordered table DBI:
+
+```text
+element-state: OrderedElementId -> Live(canonical key, serialized value,
+               local-order-prefix) | Tombstone(deletion metadata)
+elements-by-key: canonical serialized key ->
+                 local-order-prefix || OrderedElementId (live entries only)
+```
+
+The `element-state` DBI also stores each origin's next element sequence under a
+reserved internal record keyed by origin id. Capture reads the record for the
+current authoritative origin. `elements-by-key` is a DUPSORT DBI whose values
+begin with the local prefix, so it enumerates one key in the same order exposed
+by the table without a full-state scan. The adapter's primary DBI remains the
+ordered table; both state DBIs are explicit members of `affected_dbis()` and
+must match the persistent multi-DBI schema marker. They are not `_mdbxc_`
+system DBIs and must be named by the application when it registers the versioned
+schema.
+
+After a destructive schema marker is installed, every table mutation must use
+the typed adapter session. Mixing direct `KeyOrderedMultiValueTable` mutators
+with the adapter would create data without matching element state and is outside
+the schema contract. The later implementation must fail closed when a selected
+live-state record does not match the physical table record; it must not infer or
+synthesize an element id for a raw row during a replicated destructive write.
+
+The table's public representation remains `local-order-prefix || serialized-
+value`. The later implementation must add a narrow table primitive that erases
+one physical duplicate by serialized key plus local-order-prefix. It must not
+implement replicated deletion through `erase_at()` because an index is local and
+can shift after another deletion. An adapter resolves the element through its
+state record, removes that exact local duplicate and the matching key-index
+entry, and changes the state record to a tombstone in the same MDBX transaction.
+
+The versioned logical operations are:
+
+| Operation | Required payload | Apply semantics |
+|-----------|------------------|-----------------|
+| `AppendElement` | element id, serialized key, serialized public value | Reject a reused id; append once, allocate the replica-local prefix, and persist matching live-state and key-index records. |
+| `EraseElement` | element id | Delete the exact live occurrence addressed by the state record, remove its key-index record, and persist its tombstone. Replaying an existing tombstone is a successful no-op; an unknown id or a missing physical live record fails closed. |
+
+`erase(key, value)`, `erase(key)`, `erase_at(key, index)`, `clear()`, and
+`replace_with()` are not independent broad wire operations in the first
+extension. Typed capture resolves the current local live elements, then emits
+one `EraseElement` for each selected immutable id, in the same ordered frame as
+any replacement `AppendElement` operations. This preserves the current public
+semantics while making every remote deletion addressable. Frame and codec bounds
+remain authoritative: a destructive operation that cannot fit in one bounded
+transaction/frame fails before commit rather than silently becoming partial.
+
+Tombstones are retained indefinitely in the first destructive implementation.
+They must not be pruned by time or by a local outbox acknowledgement. Safe
+compaction needs a separately specified global delivery/recovery horizon that
+covers every participating replica and any snapshot/bootstrap path; it is not
+part of this extension.
+
+The destructive format requires a new logical schema version and an explicit
+persistent-marker migration. Existing append-only data has no stable element
+ids, so there is no automatic in-place upgrade. An application must either start
+a fresh destructive schema/table or use a separately designed authoritative
+baseline migration that assigns ids once and installs identical state on every
+replica. A local scan that independently invents ids on each replica is invalid.
+
+Before implementation, add tests for repeated identical values, exact
+`erase_at` targeting, `erase(key, value)`, key erase, clear, replace, duplicate
+and tombstoned ids, unknown destructive opcodes, state/data corruption,
+transaction and outbox rollback, restart/retry, cutover with pre-existing ids,
+and rejection of v1/v2 marker or DBI-set mismatches. Direct logical frames and
+unordered delivery must continue to reject every ordered-table destructive
+change before adapter callbacks.
 
 ## Planned before v0.1 release (NOT YET implemented)
 
@@ -389,7 +468,8 @@ anchors, see the
 - `KeyMultiValueTable` — DUPSORT duplicate values need the unordered multiset
   model described above before capture can be enabled.
 - `KeyOrderedMultiValueTable` — destructive ordered-history operations remain
-  deferred until a persistent element identity and tombstone contract exists.
+  deferred until the planned persistent element-identity and tombstone contract
+  is implemented and covered by round-trip tests.
 - `AnyValueTable` — heterogeneous values need type-tag propagation on the wire.
 - `IdentityProvider` integration in `BaseTable` — declared in v0.1, no
   write path until HashedKeyValueStore.
