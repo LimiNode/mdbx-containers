@@ -287,6 +287,50 @@ without the binding require an explicit schema-marker migration. The receiver
 replays changes in that stream order and assigns local prefixes while preserving
 the observable per-key append order.
 
+#### Controlled authoritative-origin cutover
+
+Changing the authoritative origin is an application-coordinated operational
+cutover, not an automatic failover mechanism. The schema-marker migration
+changes only the admission rule for future ordered deliveries; it does not
+move table data, sender outbox entries, receiver frontiers, or replay markers.
+Applications must use this sequence:
+
+1. Quiesce new capture at the old origin, drain its ordered outbox through
+   controlled dispatch to every participating replica, and then stop old-origin
+   dispatch before marker migration. The application chooses the delivery
+   acknowledgement boundary because the engine has no global peer registry or
+   distributed cutover coordinator.
+2. Keep replay markers for the old origin through the application retry
+   horizon. After marker migration, a committed exact old-origin delivery can
+   still acknowledge as a no-op, but a new old-origin sequence is rejected.
+   Pruning the exact marker ends that retry guarantee.
+3. On every participating database environment, including the old origin, new
+   origin, and all replicas, call `migrate_logical_schema()` with the exact old
+   record and a replacement record whose
+   `ordered_delivery_origin_node_id` names the new origin. The replacement must
+   keep the same schema kind, version, and owned DBI set unless this is a
+   separately designed schema migration. The old origin must receive the same
+   replacement marker so a restarted or stale writer fails capture locally.
+4. Before enabling new-origin capture, verify that every participating marker
+   names the new origin, the old origin has no active capture session or pending
+   ordered outbox entry, and old-origin replay-marker retention covers the
+   chosen retry horizon. Keep both origins quiesced while marker values are
+   mixed; this migration is not a distributed transaction.
+5. Only then may the new origin start typed capture and enqueue ordered
+   deliveries. Its stream is independent from the retired origin stream and
+   therefore starts from its own persisted outbox sequence.
+
+A simple reverse marker migration is safe only before a new-origin
+`LogicalCaptureSession::commit()` or `commit_to_outbox()` has succeeded. An
+uncommitted session may be rolled back or destroyed normally. After either
+commit succeeds, the new origin already has durable local ordered data, and
+`commit_to_outbox()` also has a durable sender entry, even if no delivery has
+been sent. Marker rollback alone is then insufficient. Recovery must stop new
+capture and dispatch, preserve or isolate its pending outbox entries, and use a
+separate application-specific plan to reconcile or compensate the local ordered
+data before the old origin is enabled again. The protocol intentionally does
+not accept concurrent old and new origins as a shortcut for availability.
+
 Multiple independent origins writing the same ordered dataset are not supported
 by this contract. A future multi-writer format must carry an explicit globally
 stable element order identity, for example:

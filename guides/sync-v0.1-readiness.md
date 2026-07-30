@@ -109,7 +109,10 @@ The logical sync scaffolding is preparatory only:
 - `KeyOrderedMultiValueTableLogicalAdapter` applies append-only logical changes
   only through ordered delivery for one origin stream. Its typed capture
   session can atomically commit local appends and an ordered outbox envelope;
-  destructive ordered-table operations remain deferred.
+  destructive ordered-table operations remain deferred. Transferring that
+  authoritative origin is an application-coordinated schema-marker cutover;
+  it is not automatic failover and requires old-outbox drain plus replay-marker
+  retention through the chosen retry horizon.
 - Logical delivery replay markers can be pruned through a persisted per-origin
   watermark. The watermark DBI is created lazily on the first pruning call, so
   deployments that use pruning must reserve one additional named-DBI slot in
