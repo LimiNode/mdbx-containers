@@ -84,6 +84,55 @@ namespace sync {
             }
         }
 
+        /// \brief Opens the primary table with marker-aware creation policy.
+        /// \details A fresh schema preserves the caller's \c MDBX_CREATE flag.
+        /// If its persistent schema marker already exists, this helper removes
+        /// \c MDBX_CREATE before constructing the table accessor. A missing
+        /// primary DBI is then reported as corruption instead of silently being
+        /// recreated. Use this helper for every schema-v2 reopen; direct table
+        /// construction is the ordinary non-schema-bound table API.
+        static std::shared_ptr<table_type> open_primary_for_schema(
+                const std::shared_ptr<Connection>& connection,
+                const std::string& schema_id,
+                const std::string& primary_dbi_name,
+                MDBX_db_flags_t flags = MDBX_DB_DEFAULTS | MDBX_CREATE) {
+            if (!connection || schema_id.empty() || primary_dbi_name.empty()) {
+                throw std::invalid_argument(
+                    "KeyOrderedMultiValue destructive primary configuration is invalid");
+            }
+
+            bool marker_exists = false;
+            {
+                Transaction txn = connection->transaction(TransactionMode::READ_ONLY);
+                MDBX_dbi schema_dbi = 0;
+                const int open_rc = mdbx_dbi_open(
+                    txn.handle(), "_mdbxc_sync_schema",
+                    static_cast<MDBX_db_flags_t>(0), &schema_dbi);
+                if (open_rc != MDBX_NOTFOUND) {
+                    check_mdbx(open_rc,
+                               "KeyOrderedMultiValue destructive schema registry open failed");
+                    SchemaRegistryStore schemas(connection->env_handle());
+                    LogicalSchemaRecord marker;
+                    if (schemas.get(txn.handle(), schema_id, marker)) {
+                        if (marker.kind != LogicalTableKind::KeyOrderedMultiValue ||
+                            marker.schema_version != 2u ||
+                            marker.dbi_name != primary_dbi_name) {
+                            throw std::runtime_error(
+                                "KeyOrderedMultiValue destructive schema marker does not match primary DBI");
+                        }
+                        marker_exists = true;
+                    }
+                }
+                txn.rollback();
+            }
+
+            const MDBX_db_flags_t effective_flags = marker_exists
+                ? static_cast<MDBX_db_flags_t>(flags & ~MDBX_CREATE)
+                : flags;
+            return std::shared_ptr<table_type>(
+                new table_type(connection, primary_dbi_name, effective_flags));
+        }
+
         LogicalSchemaRef schema_ref() const override {
             return LogicalSchemaRef(m_schema_id,
                                     LogicalTableKind::KeyOrderedMultiValue,
@@ -172,11 +221,6 @@ namespace sync {
                         OrderedElementIdLess>::const_iterator prior =
                         seen.find(decoded.id);
                     if (prior != seen.end()) {
-                        if (decoded.is_append && prior->second.is_append &&
-                            decoded.key_bytes == prior->second.key_bytes &&
-                            decoded.value_bytes == prior->second.value_bytes) {
-                            continue;
-                        }
                         return LogicalApplyResult::failure(
                             "Duplicate OrderedElementId in destructive logical batch");
                     }
@@ -398,6 +442,7 @@ namespace sync {
                     txn, m_table.connection()->env_handle(), *this);
             if (!marker_result.ok) return marker_result;
             if (decoded.is_append) {
+                m_state.verify_introduced_high_water(txn, decoded.id.origin);
                 SchemaRegistryStore schemas(m_table.connection()->env_handle());
                 LogicalSchemaRecord marker;
                 if (!schemas.get(txn, m_schema_id, marker) ||
