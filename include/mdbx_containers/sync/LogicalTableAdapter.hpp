@@ -100,6 +100,15 @@ namespace sync {
             return false;
         }
 
+        /// \brief Initializes adapter-owned persistent storage in setup.
+        /// \details The default keeps existing adapters source-compatible.
+        /// Implementations that own auxiliary DBIs create and validate them in
+        /// this caller-owned transaction before their schema marker is
+        /// committed.
+        virtual void initialize_storage(MDBX_txn* txn) const {
+            (void)txn;
+        }
+
         /// \brief Validates a logical change without mutating user tables.
         virtual LogicalApplyResult preflight(
                 MDBX_txn* txn,

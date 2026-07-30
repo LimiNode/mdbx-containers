@@ -41,6 +41,7 @@ void test_ordered_element_state_persists_live_and_tombstone_records() {
     {
         mdbxc::Transaction transaction =
             connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        store.initialize(transaction.handle());
         first = store.allocate_id(transaction.handle(), origin);
         second = store.allocate_id(transaction.handle(), origin);
         if (first.sequence != 1u || second.sequence != 2u ||
@@ -82,9 +83,91 @@ void test_ordered_element_state_persists_live_and_tombstone_records() {
     cleanup(path);
 }
 
+void test_ordered_element_state_requires_initialized_compatible_dbis() {
+    const std::string path = "test_ordered_element_state_setup.mdbx";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    mdbxc::sync::OrderedElementStateStore missing(
+        connection->env_handle(), "missing_state", "missing_by_key");
+    mdbxc::sync::OrderedElementStateRecord record;
+    mdbxc::sync::OrderedElementId id;
+    id.origin = make_node(0x51u);
+    id.sequence = 1u;
+
+    bool rejected_missing = false;
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+        try {
+            missing.get(transaction.handle(), id, record);
+        } catch (const std::exception&) {
+            rejected_missing = true;
+        }
+        transaction.rollback();
+    }
+    if (!rejected_missing) {
+        throw std::runtime_error("missing ordered state DBI was treated as empty");
+    }
+
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi dbi = 0;
+        const int rc = mdbx_dbi_open(
+            transaction.handle(), "missing_state",
+            static_cast<MDBX_db_flags_t>(0), &dbi);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "missing ordered state DBI was created by a normal read");
+        }
+        transaction.rollback();
+    }
+
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi state = 0;
+        MDBX_dbi by_key = 0;
+        mdbxc::check_mdbx(mdbx_dbi_open(
+            transaction.handle(), "wrong_state", MDBX_CREATE | MDBX_DUPSORT,
+            &state), "wrong ordered state setup failed");
+        mdbxc::check_mdbx(mdbx_dbi_open(
+            transaction.handle(), "wrong_by_key", MDBX_CREATE, &by_key),
+            "wrong ordered index setup failed");
+        transaction.commit();
+    }
+
+    mdbxc::sync::OrderedElementStateStore incompatible(
+        connection->env_handle(), "wrong_state", "wrong_by_key");
+    bool rejected_flags = false;
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        try {
+            incompatible.initialize(transaction.handle());
+        } catch (const std::exception&) {
+            rejected_flags = true;
+        }
+        transaction.rollback();
+    }
+    if (!rejected_flags) {
+        throw std::runtime_error("incompatible ordered state DBI flags accepted");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 } // namespace
 
 int main() {
     test_ordered_element_state_persists_live_and_tombstone_records();
+    test_ordered_element_state_requires_initialized_compatible_dbis();
     return 0;
 }
