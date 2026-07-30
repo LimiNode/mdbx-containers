@@ -255,15 +255,16 @@ Operational rules:
 - Nested `SyncCaptureScope` objects are a stack discipline: detach or destroy
   the innermost scope first. Do not replace the connection capture sink through
   raw attach/detach while a scope owns it.
-- `HashedKeyValueStore`, `KeyMultiValueTable`,
-  `KeyOrderedMultiValueTable`, and `AnyValueTable` are not replicated in v0.1.
-  `KeyMultiValueTable` has a deferred unordered multiset design for
-  single-writer or causally serialized updates in `sync/DESIGN.md`.
-  `KeyOrderedMultiValueTable` exists as a local ordered table API, but its
-  distributed ordered-history wire contract is still deferred.
-  `HashedKeyValueStore` and `AnyValueTable` still need their own wire-format
-  designs. Do not add `record_op()` paths for any unsupported table without
-  capture/apply code and round-trip tests in the same change.
+- `KeyMultiValueTable` and `KeyOrderedMultiValueTable` emit no raw v0.1
+  `ChangeOp`. Each has a limited opt-in logical adapter: the former preserves
+  unordered multiset operations for one writer or causally serialized updates;
+  the latter provides append-only ordered delivery from one authoritative
+  origin. Their unsupported bulk, destructive-convergence, and ordered-history
+  extensions remain deferred in `sync/DESIGN.md`.
+- `HashedKeyValueStore` and `AnyValueTable` are not replicated in v0.1 and
+  still need their own wire-format designs. Do not add `record_op()` paths for
+  either unsupported table without capture/apply code and round-trip tests in
+  the same change.
 - Unsupported specialized tables must keep emitting no `ChangeOp` while sync
   capture is attached until their wire-format semantics are designed and tested.
 

@@ -48,6 +48,9 @@ namespace sync {
                                    ValueT>::value,
                       "KeyOrderedMultiValueTableLogicalAdapter value codec local type must match ValueT");
 
+        /// \brief Creates the append-only schema-version-1 adapter.
+        /// \details The optional argument is retained for source compatibility,
+        /// but this adapter owns only the version-1 append payload contract.
         KeyOrderedMultiValueTableLogicalAdapter(
                 table_type& table,
                 const std::string& schema_id,
@@ -63,9 +66,9 @@ namespace sync {
                 throw std::invalid_argument(
                     "KeyOrderedMultiValueTableLogicalAdapter DBI name is empty");
             }
-            if (m_schema_version == 0u) {
+            if (m_schema_version != 1u) {
                 throw std::invalid_argument(
-                    "KeyOrderedMultiValueTableLogicalAdapter schema version is zero");
+                    "KeyOrderedMultiValueTableLogicalAdapter supports only schema version 1");
             }
         }
 

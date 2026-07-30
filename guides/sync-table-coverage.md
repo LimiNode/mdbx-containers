@@ -115,14 +115,11 @@ sub-operations and receiver-side logical apply helpers before capture can be
 enabled.
 
 `KeyOrderedMultiValueTable<K, V>` has an append-only ordered logical adapter.
-The following coverage is intentionally deferred until the next ordered-adapter
-extension; it does not widen the current append-only contract:
-
-- malformed ordered pair payloads: truncated key or value, oversized declared
-  lengths, and trailing bytes;
-- destruction rollback of an active ordered capture session;
-- native transaction commit failure after ordered capture preparation;
-- missing, stale, or DBI-mismatched schema markers for ordered capture sessions.
+Malformed ordered pair payloads, active-session destruction rollback, and
+missing, stale, or DBI-mismatched schema markers are covered by the current
+append-only adapter regression tests. A native MDBX commit failure after ordered
+capture preparation remains deferred coverage; the existing pre-commit failure
+test does not model a native commit failure.
 
 `AnyValueTable<K>` needs value type-tag propagation or another explicit
 compatibility policy. The current sync wire operation only carries raw value
