@@ -95,10 +95,11 @@ public:
 
     mdbxc::sync::LogicalApplyResult preflight_batch(
             MDBX_txn* txn,
-            const std::vector<mdbxc::sync::LogicalChange>& changes) const override {
+            const mdbxc::sync::LogicalChangeBatchView& changes) const override {
         (void)txn;
         ++m_preflight_batch_calls;
         for (std::size_t i = 0u; i < changes.size(); ++i) {
+            m_batch_changes.push_back(&changes[i]);
             m_batch_opcodes.push_back(changes[i].opcode);
             for (std::size_t previous = 0u; previous < i; ++previous) {
                 if (changes[previous].opcode == changes[i].opcode) {
@@ -123,6 +124,7 @@ public:
     }
 
     mutable std::size_t m_preflight_batch_calls = 0;
+    mutable std::vector<const mdbxc::sync::LogicalChange*> m_batch_changes;
     mutable std::vector<std::uint32_t> m_batch_opcodes;
 
 private:
@@ -288,8 +290,11 @@ void test_batch_preflight_receives_schema_local_changes() {
         first.m_batch_opcodes.size() != 2u ||
         first.m_batch_opcodes[0] != 1u ||
         first.m_batch_opcodes[1] != 3u ||
+        first.m_batch_changes[0] != &changes[0] ||
+        first.m_batch_changes[1] != &changes[2] ||
         second.m_batch_opcodes.size() != 1u ||
         second.m_batch_opcodes[0] != 2u ||
+        second.m_batch_changes[0] != &changes[1] ||
         first.m_events.size() != 2u ||
         second.m_events.size() != 1u ||
         first.m_events[0] != "A1" ||

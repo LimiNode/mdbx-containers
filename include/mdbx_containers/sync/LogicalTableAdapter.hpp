@@ -38,6 +38,35 @@ namespace sync {
         }
     };
 
+    class LogicalTableRegistry;
+
+    /// \brief Transient, non-owning view of one schema-local logical batch.
+    /// \details The view is valid only for the duration of the synchronous
+    /// \c preflight_batch() callback. It references changes owned by the
+    /// caller-provided change vector and never copies their payload bytes.
+    class LogicalChangeBatchView {
+    public:
+        /// \brief Returns the number of changes in this schema-local batch.
+        std::size_t size() const { return m_changes.size(); }
+
+        /// \brief Returns whether this schema-local batch has no changes.
+        bool empty() const { return m_changes.empty(); }
+
+        /// \brief Returns one change in its relative frame order.
+        const LogicalChange& operator[](std::size_t index) const {
+            return *m_changes[index];
+        }
+
+    private:
+        explicit LogicalChangeBatchView(
+                const std::vector<const LogicalChange*>& changes)
+            : m_changes(changes) {}
+
+        const std::vector<const LogicalChange*>& m_changes;
+
+        friend class LogicalTableRegistry;
+    };
+
     /// \brief Type-erased adapter for one logical table schema.
     /// \details Implementations own table-specific decoding and apply logic.
     /// The sync core must validate every schema-local batch in a transaction
@@ -84,7 +113,7 @@ namespace sync {
         /// before any adapter \c apply() call.
         virtual LogicalApplyResult preflight_batch(
                 MDBX_txn* txn,
-                const std::vector<LogicalChange>& changes) const {
+                const LogicalChangeBatchView& changes) const {
             for (std::size_t i = 0u; i < changes.size(); ++i) {
                 const LogicalApplyResult result = preflight(txn, changes[i]);
                 if (!result.ok) return result;
@@ -151,7 +180,7 @@ namespace sync {
             std::vector<AdapterRegistration> registrations;
             registrations.reserve(changes.size());
             std::vector<AdapterRegistration> batch_registrations;
-            std::vector<std::vector<LogicalChange> > batches;
+            std::vector<std::vector<const LogicalChange*> > batches;
             std::map<std::string, std::size_t> batch_indices;
 
             for (std::size_t i = 0; i < changes.size(); ++i) {
@@ -176,15 +205,15 @@ namespace sync {
                     std::make_pair(changes[i].schema.schema_id, batches.size()));
                 if (inserted.second) {
                     batch_registrations.push_back(it->second);
-                    batches.push_back(std::vector<LogicalChange>());
+                    batches.push_back(std::vector<const LogicalChange*>());
                 }
-                batches[inserted.first->second].push_back(changes[i]);
+                batches[inserted.first->second].push_back(&changes[i]);
             }
 
             for (std::size_t i = 0u; i < batches.size(); ++i) {
                 const LogicalApplyResult result =
                     batch_registrations[i].adapter->preflight_batch(
-                        txn, batches[i]);
+                        txn, LogicalChangeBatchView(batches[i]));
                 if (!result.ok) return result;
             }
 
