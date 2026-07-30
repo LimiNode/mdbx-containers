@@ -932,8 +932,9 @@ void test_ordered_delivery_survives_environment_reopen() {
     {
         const std::shared_ptr<mdbxc::Connection> connection =
             mdbxc::Connection::create(config);
-        table_type table(connection, primary);
-        adapter_type adapter(table, schema, state, by_key);
+        const std::shared_ptr<table_type> table =
+            adapter_type::open_primary_for_schema(connection, schema, primary);
+        adapter_type adapter(*table, schema, state, by_key);
         mdbxc::sync::SyncEngine engine(connection);
         engine.initialize_local_identity(receiver, db_id);
         engine.initialize_logical_adapter_schema(
@@ -942,7 +943,7 @@ void test_ordered_delivery_survives_environment_reopen() {
         const mdbxc::sync::LogicalDeliveryAcknowledgement replay =
             engine.apply_ordered_logical_delivery_envelope(envelope);
         if (!replay.ok || replay.acknowledged_through != 1u ||
-            table.find(42).size() != 1u) {
+            table->find(42).size() != 1u) {
             throw std::runtime_error(
                 "ordered delivery replay was not durable across environment reopen");
         }

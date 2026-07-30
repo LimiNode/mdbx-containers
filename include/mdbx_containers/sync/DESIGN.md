@@ -419,8 +419,11 @@ schema version.
 
 The destructive marker has one non-zero `ordered_delivery_origin_node_id`.
 Before allocating an element id, typed capture verifies that the local sync
-`node_id` equals that marker origin. Every received `AppendElement` verifies,
-before adapter mutation, that all three origins are identical:
+`node_id` equals that marker origin. For a received `AppendElement`, the sync
+core first validates `delivery-envelope.origin_node_id` against the marker
+before adapter preflight. Destructive-adapter preflight then validates
+`element-id.origin` against that same marker before mutation. Together these
+checks require all three origins to be identical:
 
 ```text
 element-id.origin == delivery-envelope.origin_node_id
@@ -547,11 +550,12 @@ persisted element sequence. Existing-schema verification, local allocation and
 admission of a new append check this invariant before mutation; a missing or
 lower high-water record is corruption, not an implicit zero value.
 
-For every `AppendElement`, the id origin must equal both the ordered envelope
-origin and the marker's `ordered_delivery_origin_node_id`; this is checked in
-adapter preflight before state or table mutation. `EraseElement` deliberately
-does not impose that admission check: it addresses an already persisted id and
-must remain able to remove legacy elements during a controlled migration.
+For every `AppendElement`, the sync core validates the ordered envelope origin
+against the marker before adapter preflight, and destructive-adapter preflight
+validates the id origin against the marker before state or table mutation.
+`EraseElement` deliberately does not impose that admission check: it addresses
+an already persisted id and must remain able to remove legacy elements during a
+controlled migration.
 
 `element-state` uses ascending bytewise keys. It rejects `MDBX_REVERSEKEY`,
 `MDBX_DUPSORT`, `MDBX_INTEGERKEY`, `MDBX_INTEGERDUP`, `MDBX_REVERSEDUP`, and
