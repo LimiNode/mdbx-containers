@@ -400,6 +400,14 @@ envelope must therefore commit or abort in the same caller-owned writable MDBX
 transaction. This prevents a process crash between introducing an immutable id
 locally and durably publishing its `AppendElement` frame.
 
+When all operations of one destructive session coalesce locally, the session
+still commits one ordered outbox envelope containing an empty
+`LogicalChangeFrame`. The already allocated element counter advance and the
+empty envelope commit atomically; the envelope consumes one ordered delivery
+sequence and is replayed as a no-op without adapter callbacks. This keeps every
+destructive capture commit on the same outbox-backed lifecycle rather than
+introducing a special local-only commit path.
+
 The first destructive implementation uses one authoritative origin and ordered
 delivery, as the append-only adapter does. It does not provide a later baseline
 recovery path for a locally committed but unpublished destructive frame. The
@@ -445,13 +453,16 @@ EraseElement  = NodeId[16] || sequence-le64
 The codecs used by this schema must be canonical: decoding and re-encoding an
 accepted byte sequence produces the same byte sequence. Decoding validates every
 size before arithmetic or allocation, enforces the applicable `CodecBounds` and
-frame bounds, and consumes the payload exactly. Unknown opcodes, unsupported
-change flags, a zero id component, truncated fields, oversized fields, integer
-overflow, non-canonical codec bytes, and trailing bytes fail before an adapter
-callback or MDBX mutation. Empty key or value bytes are valid only when the
-relevant codec accepts that value. Version-1 opcode `1` can never be interpreted
-as version-2 opcode `1`, because the fixed adapter and marker/schema checks
-precede adapter dispatch.
+frame bounds, and consumes the payload exactly. Missing adapters, schema-ref
+mismatches, reserved generic change flags, and unsupported delivery modes fail
+in the sync core before any adapter preflight callback. The payload is
+adapter-local, so unknown opcodes, a zero id component, truncated or oversized
+fields, integer overflow, non-canonical codec bytes, and trailing bytes fail in
+the adapter's `preflight()` or `preflight_batch()` before any `apply()` callback
+or MDBX mutation. Empty key or value bytes are valid only when the relevant codec
+accepts that value. Version-1 opcode `1` can never be interpreted as version-2
+opcode `1`, because the fixed adapter and marker/schema checks precede adapter
+preflight.
 
 ##### Batch preflight and duplicate identities
 
@@ -461,15 +472,19 @@ must gain a source-compatible non-pure batch hook:
 ```cpp
 virtual LogicalApplyResult preflight_batch(
     MDBX_txn* txn,
-    const std::vector<LogicalChange>& changes) const;
+    const LogicalChangeBatchView& changes) const;
 ```
 
 Its default implementation invokes the existing `preflight()` for every change
-in the supplied order, so existing adapters remain source-compatible. The
-registry first validates all schema references, then constructs one stable-order
-batch per registered adapter, runs `preflight_batch()` for every batch, and only
-then calls any `apply()` callback in the original frame order. This guarantees
-that a batch-level failure cannot follow another adapter's mutation.
+in the supplied order, so existing adapters remain source-compatible.
+`LogicalChangeBatchView` is a synchronous, non-owning view of references to the
+original decoded frame changes; adapters must not retain the view, its iterators,
+or its elements after `preflight_batch()` returns. The registry first validates
+all schema references, then constructs one stable-order view per registered
+adapter, runs `preflight_batch()` for every view, and only then calls any
+`apply()` callback in the original frame order. This avoids copying bounded but
+potentially large logical payloads while guaranteeing that a batch-level failure
+cannot follow another adapter's mutation.
 
 For destructive schema version 2, one batch contains every change for one exact
 registered `LogicalSchemaRef`. `OrderedElementId` must be unique within that
@@ -482,9 +497,10 @@ committed frame and remains idempotent.
 Typed local capture has the complementary rule. When it appends a newly
 allocated `OrderedElementId` and erases that same new element before its
 `commit_to_outbox()`, it coalesces both physical mutations and both pending
-logical operations to a local no-op. The per-origin counter remains advanced:
-element sequences are never reused and need not be contiguous. A capture that
-erases an element which existed before the session emits only `EraseElement`.
+logical operations to an empty ordered envelope. The per-origin counter remains
+advanced, and the empty envelope consumes one delivery sequence: element
+sequences are never reused and need not be contiguous. A capture that erases an
+element which existed before the session emits only `EraseElement`.
 
 ##### Persistent layout and DBI ownership
 
@@ -653,11 +669,13 @@ Before implementation, add tests for:
   append-then-erase remote duplicate pair, and unknown destructive opcodes;
 - batch preflight rejects all duplicate-id cases before every `apply()` callback
   while preserving original cross-schema apply order after all batches succeed;
-  local append-then-erase of one new id coalesces to no frame operation without
-  reusing its allocated sequence;
+  local append-then-erase of one new id commits an empty ordered envelope,
+  advances the delivery sequence, replays as a no-op after restart, and does not
+  reuse its allocated element sequence;
 - fixed schema-v2 encode/decode vectors for both opcodes; wrong schema version,
-  unknown opcode, unsupported flags, truncated/oversized fields, arithmetic
-  overflow and trailing payload bytes, all rejected before adapter callbacks or
+  missing adapter, unsupported delivery mode and reserved flags rejected before
+  adapter preflight; unknown opcode, truncated/oversized fields, arithmetic
+  overflow and trailing payload bytes rejected by preflight before `apply()` or
   mutation;
 - the append-only adapter rejects every schema version other than 1, the
   destructive adapter rejects every version other than 2, and v1/v2 payloads
@@ -1020,8 +1038,12 @@ delivery is a stale no-op.
 
 - `ILogicalTableAdapter::preflight()` validates one logical change without
   mutating user tables.
+- `ILogicalTableAdapter::preflight_batch()` receives a transient, non-owning
+  `LogicalChangeBatchView` for one registered schema. Its default invokes
+  per-change `preflight()` in view order; an adapter must not retain the view or
+  references to its changes after the callback returns.
 - `ILogicalTableAdapter::apply()` mutates user tables only after every logical
-  change in the same apply transaction passed preflight.
+  batch in the same apply transaction passed preflight.
 - `ILogicalTableAdapter::primary_dbi()` names the stable primary physical DBI
   for the logical schema. It defaults to the only affected DBI for
   source-compatible single-DBI adapters. Multi-DBI adapters must override it
@@ -1030,12 +1052,13 @@ delivery is a stale no-op.
   `LogicalSchemaRef::schema_id`, but dispatch validates the full
   `(schema_id, kind, schema_version)` tuple and rejects non-zero reserved
   logical flags before any adapter callback.
-- `LogicalTableRegistry::preflight_then_apply()` runs validation for every
-  change before any preflight, then runs every preflight before any apply. If
-  an adapter reports failure from `apply()` or throws after mutating data, the
-  helper returns failure and the caller that owns the MDBX write transaction
-  must abort that transaction; the registry cannot roll back a transaction it
-  does not own.
+- `LogicalTableRegistry::preflight_then_apply()` runs core validation for every
+  change before any adapter preflight, then runs every schema-local batch
+  preflight before any apply. Adapter-local payload validation therefore happens
+  in preflight, before apply or MDBX mutation. If an adapter reports failure from
+  `apply()` or throws after mutating data, the helper returns failure and the
+  caller that owns the MDBX write transaction must abort that transaction; the
+  registry cannot roll back a transaction it does not own.
 
 `adapters/KeyValueTableLogicalAdapter.hpp` and
 `adapters/KeyTableLogicalAdapter.hpp` provide the first concrete adapter
