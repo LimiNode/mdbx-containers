@@ -295,8 +295,9 @@ changes only the admission rule for future ordered deliveries; it does not
 move table data, sender outbox entries, receiver frontiers, or replay markers.
 Applications must use this sequence:
 
-1. Quiesce new capture and dispatch at the old origin, then drain its ordered
-   outbox to every participating replica. The application chooses the delivery
+1. Quiesce new capture at the old origin, drain its ordered outbox through
+   controlled dispatch to every participating replica, and then stop old-origin
+   dispatch before marker migration. The application chooses the delivery
    acknowledgement boundary because the engine has no global peer registry or
    distributed cutover coordinator.
 2. Keep replay markers for the old origin through the application retry
