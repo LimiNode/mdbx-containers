@@ -381,32 +381,103 @@ many changes, and an element id must exist before `commit_to_outbox()` allocates
 its envelope sequence. A new origin after a completed cutover uses its own node
 id and its own persistent element sequence; old element ids remain unchanged.
 
-The extension owns two additional application-named DBIs in the logical schema
-marker alongside the existing ordered table DBI:
+##### Durable destructive capture
+
+The destructive schema has a stricter local capture rule than the current
+append-only helper: it may commit only through `commit_to_outbox()`. Its typed
+session must not expose `commit(out)` or any equivalent path that commits table
+state and returns an unpublished frame to the caller. The local physical append,
+element-state and key-index updates, counter advance, and one ordered outbox
+envelope must therefore commit or abort in the same caller-owned writable MDBX
+transaction. This prevents a process crash between introducing an immutable id
+locally and durably publishing its `AppendElement` frame.
+
+The first destructive implementation uses one authoritative origin and ordered
+delivery, as the append-only adapter does. It does not provide a later baseline
+recovery path for a locally committed but unpublished destructive frame. The
+existing append-only `LogicalCaptureSession::commit(out)` remains available only
+for its existing append-only schema and must not be reused by the destructive
+schema version.
+
+##### Persistent layout and DBI ownership
+
+The version-1 marker owns exactly three application-named DBIs: the existing
+ordered table is the primary DBI, followed by `element-state` and
+`elements-by-key`. Their names are chosen by the application, must be unique to
+this logical schema, and are canonical members of `affected_dbis()`. They are
+not `_mdbxc_` system DBIs and cannot be shared with another logical schema. The
+marker primary remains the ordered table; the marker must contain precisely this
+canonical three-name set.
+
+`OrderedElementId` has two encodings. Its logical wire encoding is exactly
+`NodeId[16] || sequence-le64`. Its bytewise ordered DBI-key suffix is
+`NodeId[16] || sequence-be64`; the fixed-width `NodeId` bytes precede the
+big-endian sequence so records of one origin retain numeric sequence order.
+The all-zero `NodeId` and `sequence == 0` are invalid. A counter stores the last
+allocated sequence, starts at zero, allocates one through `UINT64_MAX`, and
+fails before mutation on overflow. Remote delivery does not allocate or advance
+the local origin's counter; a baseline migration initializes every origin
+counter to at least the largest assigned id for that origin before the origin is
+allowed to write again.
+
+`element-state` uses bytewise keys and no DUPSORT or integer-key flags. Its
+reserved key namespace and version-1 values are:
 
 ```text
-element-state: OrderedElementId -> Live(canonical key, serialized value,
-               local-order-prefix) | Tombstone(deletion metadata)
-elements-by-key: canonical serialized key ->
-                 local-order-prefix || OrderedElementId (live entries only)
+0x00 || NodeId[16]                         -> last-allocated-sequence-le64
+0x01 || NodeId[16] || sequence-be64        -> Live:
+                                                0x01 || key-size-le32 || key-bytes
+                                                     || value-size-le32 || value-bytes
+                                                     || local-prefix-be64
+                                             Tombstone:
+                                                0x02
 ```
 
-The `element-state` DBI also stores each origin's next element sequence under a
-reserved internal record keyed by origin id. Capture reads the record for the
-current authoritative origin. `elements-by-key` is a DUPSORT DBI whose values
-begin with the local prefix, so it enumerates one key in the same order exposed
-by the table without a full-state scan. The adapter's primary DBI remains the
-ordered table; both state DBIs are explicit members of `affected_dbis()` and
-must match the persistent multi-DBI schema marker. They are not `_mdbxc_`
-system DBIs and must be named by the application when it registers the versioned
-schema.
+The `0x00` counter and `0x01` element namespaces must never be interpreted as
+one another. A counter value must be exactly eight bytes. An element key of any
+other length or tag, a zero node/sequence, a truncated length/value field, or
+trailing bytes is corruption and fails closed.
+Version-1 tombstones deliberately contain no deletion metadata: their only
+meaning is permanent non-resurrection of the immutable id. Deletion metadata,
+pruning and compaction require a later schema version with a separately designed
+global recovery horizon.
+
+`elements-by-key` is a DUPSORT DBI. Its key is the exact canonical serialized
+`KeyT` byte representation used by the primary ordered table; its fixed-format
+duplicate is:
+
+```text
+local-prefix-be64 || NodeId[16] || sequence-be64
+```
+
+This makes duplicate enumeration match the table's local presentation order
+without a full-state scan. The DBI must use `MDBX_DUPSORT` with bytewise
+ascending duplicate comparison and must reject `MDBX_INTEGERDUP`,
+`MDBX_REVERSEDUP`, and `MDBX_DUPFIXED`. Its key comparator configuration must
+match the primary table's canonical `KeyT` encoding, including its validated
+`MDBX_INTEGERKEY` mode when applicable. Creation/open must validate the exact
+required flags through the normal MDBX/ACCEDE path; an existing incompatible DBI
+is a schema error, not a layout to reinterpret. Every index duplicate must be
+exactly 32 bytes and contain a non-zero element id.
 
 After a destructive schema marker is installed, every table mutation must use
 the typed adapter session. Mixing direct `KeyOrderedMultiValueTable` mutators
-with the adapter would create data without matching element state and is outside
-the schema contract. The later implementation must fail closed when a selected
-live-state record does not match the physical table record; it must not infer or
-synthesize an element id for a raw row during a replicated destructive write.
+with the adapter is outside the schema contract. The implementation cannot
+intercept an arbitrary direct raw write at the instant it occurs, but it must
+fail closed before a later destructive mutation can ignore it. For every touched
+key, preflight and post-mutation validation require exact parity:
+
+```text
+physical duplicate (key, local-prefix)
+    <=> one Live element-state record with the same key/value/prefix
+    <=> one elements-by-key duplicate with the same prefix and element id
+```
+
+An orphan physical row, key-index entry, or Live state record is corruption.
+`clear()` and baseline migration must validate the complete three-DBI parity;
+version 1 does not substitute an unchecked count, generation, or hash shortcut.
+The adapter must never infer or synthesize an element id for a raw row during a
+replicated destructive write.
 
 The table's public representation remains `local-order-prefix || serialized-
 value`. The later implementation must add a narrow table primitive that erases
@@ -420,7 +491,7 @@ The versioned logical operations are:
 
 | Operation | Required payload | Apply semantics |
 |-----------|------------------|-----------------|
-| `AppendElement` | element id, serialized key, serialized public value | Reject a reused id; append once, allocate the replica-local prefix, and persist matching live-state and key-index records. |
+| `AppendElement` | element id, serialized key, serialized public value | A new id appends once, allocates the replica-local prefix, and persists matching live-state and key-index records. A retry with an existing Live id and byte-identical key/value is a successful no-op after parity validation. The same id with different bytes, or an id already tombstoned, is a permanent conflict. |
 | `EraseElement` | element id | Delete the exact live occurrence addressed by the state record, remove its key-index record, and persist its tombstone. Replaying an existing tombstone is a successful no-op; an unknown id or a missing physical live record fails closed. |
 
 `erase(key, value)`, `erase(key)`, `erase_at(key, index)`, `clear()`, and
@@ -441,17 +512,52 @@ part of this extension.
 The destructive format requires a new logical schema version and an explicit
 persistent-marker migration. Existing append-only data has no stable element
 ids, so there is no automatic in-place upgrade. An application must either start
-a fresh destructive schema/table or use a separately designed authoritative
-baseline migration that assigns ids once and installs identical state on every
-replica. A local scan that independently invents ids on each replica is invalid.
+a fresh destructive schema/table or use this authoritative baseline procedure:
 
-Before implementation, add tests for repeated identical values, exact
-`erase_at` targeting, `erase(key, value)`, key erase, clear, replace, duplicate
-and tombstoned ids, unknown destructive opcodes, state/data corruption,
-transaction and outbox rollback, restart/retry, cutover with pre-existing ids,
-and rejection of v1/v2 marker or DBI-set mismatches. Direct logical frames and
-unordered delivery must continue to reject every ordered-table destructive
-change before adapter callbacks.
+1. Quiesce new append-only capture at the old origin, drain its ordered outbox
+   through controlled dispatch to every participating replica, then stop that
+   dispatch and record the retained retry/recovery horizon.
+2. Freeze the old writer and obtain one authoritative logical baseline. Assign
+   each immutable id exactly once in that baseline; a local scan on each replica
+   must not independently invent ids.
+3. On every replica, use one writable transaction to build its primary ordered
+   table, element-state and elements-by-key DBIs from that canonical baseline,
+   validate full parity, initialize counters, and install the new persistent
+   marker. The logical `id -> key/value` mapping is identical everywhere, but
+   each replica allocates its own local prefixes and therefore its Live values
+   and key-index duplicates need not be byte-identical to another replica.
+4. Verify the marker, canonical id/key/value count or hash, local three-DBI
+   parity and per-origin high-water counters on every participant. Only then
+   enable the destructive writer and its `commit_to_outbox()` path.
+
+Changing the authoritative origin and changing this schema version are separate
+controlled operations. They may be combined only by a separately specified
+protocol that preserves both the old ordered outbox horizon and every immutable
+id. After the first committed destructive envelope, replacing the marker with
+the append-only version cannot roll back durable element ids or outbox state; it
+requires recovery or re-baselining instead.
+
+Before implementation, add tests for:
+
+- repeated identical values and exact `erase_at` targeting; `erase(key, value)`,
+  key erase, clear and replace semantics;
+- a duplicate `AppendElement` with identical bytes, the same id with different
+  bytes, append of a tombstoned id, duplicate ids in one frame, and unknown
+  destructive opcodes;
+- zero, overflowed and malformed-length ids, corrupt counter records, malformed
+  state values and trailing bytes;
+- direct raw append and erase after the v2 marker, plus orphan physical rows,
+  orphan key-index entries and orphan Live state records;
+- missing state/index DBIs and incompatible flags, plus v1/v2 marker or DBI-set
+  mismatches, all rejected before adapter callbacks or mutation;
+- bounded clear/replace payloads that fail without changing any of the three
+  DBIs or the outbox; transaction, native commit and outbox rollback; and
+  restart/retry after the durable outbox commit;
+- restart between baseline construction and marker activation, migration parity
+  and high-water verification, and a later origin cutover with pre-existing ids.
+
+Direct logical frames and unordered delivery must continue to reject every
+ordered-table destructive change before adapter callbacks.
 
 ## Planned before v0.1 release (NOT YET implemented)
 
