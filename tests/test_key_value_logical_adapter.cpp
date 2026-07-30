@@ -1649,6 +1649,14 @@ void test_key_ordered_multi_value_logical_adapter_rejects_malformed_payloads() {
         MDBXC_TEST_ASSERT(!rejected.ok);
         MDBXC_TEST_ASSERT(!rejected.retryable);
         MDBXC_TEST_ASSERT(table.empty());
+        {
+            mdbxc::Transaction txn =
+                conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+            mdbxc::sync::LogicalDeliveryStore delivery(conn->env_handle());
+            delivery.open(txn.handle());
+            MDBXC_TEST_ASSERT(!delivery.contains(txn.handle(), envelope));
+            txn.rollback();
+        }
     }
 
     mdbxc::sync::LogicalDeliveryEnvelope valid_envelope;
