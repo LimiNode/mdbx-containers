@@ -489,10 +489,10 @@ follow another adapter's mutation.
 For destructive schema version 2, one batch contains every change for one exact
 registered `LogicalSchemaRef`. `OrderedElementId` must be unique within that
 batch: a remote frame containing the same id in more than one operation is
-rejected before any callback or mutation, including an `AppendElement(X)` plus
-`EraseElement(X)` pair. The uniqueness scope is not the entire frame across
-independent schemas. An exact retry is a separately delivered, already
-committed frame and remains idempotent.
+rejected by `preflight_batch()` before any `apply()` callback or MDBX mutation,
+including an `AppendElement(X)` plus `EraseElement(X)` pair. The uniqueness
+scope is not the entire frame across independent schemas. An exact retry is a
+separately delivered, already committed frame and remains idempotent.
 
 Typed local capture has the complementary rule. When it appends a newly
 allocated `OrderedElementId` and erases that same new element before its
