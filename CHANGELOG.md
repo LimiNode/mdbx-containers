@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 - Added persistent `OrderedElementId` and state-store primitives for the
-  planned destructive `KeyOrderedMultiValueTable` logical schema v2.
+  initial destructive `KeyOrderedMultiValueTable` logical schema v2.
 - Added a schema-version-2 destructive logical adapter for
   `KeyOrderedMultiValueTable`, with transactional append/erase, durable
   element identity, batch duplicate rejection, and per-key parity checks.
@@ -14,7 +14,7 @@ All notable changes to this project will be documented in this file.
   apply through ordered delivery. It preserves repeated values and per-key
   append order for the schema marker's authoritative origin. Its typed capture
   session atomically commits local appends plus an ordered outbox envelope;
-  destructive operations remain deferred.
+  destructive operations use the separate schema-v2 adapter.
 - Restricted `KeyOrderedMultiValueTableLogicalAdapter` to its fixed
   schema-version-1 append payload contract. Future destructive ordered
   semantics require a separate versioned adapter.

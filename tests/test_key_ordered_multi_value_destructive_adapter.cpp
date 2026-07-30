@@ -61,6 +61,122 @@ void apply_changes(mdbxc::sync::LogicalTableRegistry& registry,
     }
 }
 
+MDBX_val make_raw_val(const std::vector<std::uint8_t>& bytes) {
+    MDBX_val value = {
+        const_cast<std::uint8_t*>(bytes.empty() ? nullptr : &bytes[0]),
+        bytes.size()
+    };
+    return value;
+}
+
+std::vector<std::uint8_t> make_state_key(
+        const mdbxc::sync::OrderedElementId& id) {
+    std::vector<std::uint8_t> key(1u, 0x01u);
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::encode_ordered_element_id_index(id);
+    key.insert(key.end(), encoded.begin(), encoded.end());
+    return key;
+}
+
+std::vector<std::uint8_t> make_introduced_key(
+        const mdbxc::sync::NodeId& origin) {
+    std::vector<std::uint8_t> key(1u, 0x02u);
+    key.insert(key.end(), origin.begin(), origin.end());
+    return key;
+}
+
+void delete_raw_introduced_high_water(
+        const std::shared_ptr<mdbxc::Connection>& connection,
+        const std::string& state_name,
+        const mdbxc::sync::NodeId& origin) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::WRITABLE);
+    MDBX_dbi state = 0;
+    mdbxc::check_mdbx(mdbx_dbi_open(
+        transaction.handle(), state_name.c_str(),
+        static_cast<MDBX_db_flags_t>(0), &state),
+        "test state DBI open failed");
+    const std::vector<std::uint8_t> key = make_introduced_key(origin);
+    MDBX_val raw_key = make_raw_val(key);
+    mdbxc::check_mdbx(mdbx_del(transaction.handle(), state, &raw_key, nullptr),
+                      "test introduced high-water delete failed");
+    transaction.commit();
+}
+
+void delete_raw_state_record(
+        const std::shared_ptr<mdbxc::Connection>& connection,
+        const std::string& state_name,
+        const mdbxc::sync::OrderedElementId& id) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::WRITABLE);
+    MDBX_dbi state = 0;
+    mdbxc::check_mdbx(mdbx_dbi_open(
+        transaction.handle(), state_name.c_str(),
+        static_cast<MDBX_db_flags_t>(0), &state),
+        "test state DBI open failed");
+    const std::vector<std::uint8_t> key = make_state_key(id);
+    MDBX_val raw_key = make_raw_val(key);
+    mdbxc::check_mdbx(mdbx_del(transaction.handle(), state, &raw_key, nullptr),
+                      "test state record delete failed");
+    transaction.commit();
+}
+
+void insert_raw_index_record(
+        const std::shared_ptr<mdbxc::Connection>& connection,
+        const std::string& by_key_name,
+        const std::vector<std::uint8_t>& key,
+        const mdbxc::sync::OrderedElementId& id) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::WRITABLE);
+    MDBX_dbi by_key = 0;
+    mdbxc::check_mdbx(mdbx_dbi_open(
+        transaction.handle(), by_key_name.c_str(), MDBX_DUPSORT, &by_key),
+        "test state index DBI open failed");
+    const std::vector<std::uint8_t> value =
+        mdbxc::sync::encode_ordered_element_id_index(id);
+    MDBX_val raw_key = make_raw_val(key);
+    MDBX_val raw_value = make_raw_val(value);
+    mdbxc::check_mdbx(mdbx_put(transaction.handle(), by_key,
+                                &raw_key, &raw_value, MDBX_NODUPDATA),
+                      "test state index write failed");
+    transaction.commit();
+}
+
+void delete_raw_index_record(
+        const std::shared_ptr<mdbxc::Connection>& connection,
+        const std::string& by_key_name,
+        const std::vector<std::uint8_t>& key,
+        const mdbxc::sync::OrderedElementId& id) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::WRITABLE);
+    MDBX_dbi by_key = 0;
+    mdbxc::check_mdbx(mdbx_dbi_open(
+        transaction.handle(), by_key_name.c_str(), MDBX_DUPSORT, &by_key),
+        "test state index DBI open failed");
+    const std::vector<std::uint8_t> value =
+        mdbxc::sync::encode_ordered_element_id_index(id);
+    MDBX_val raw_key = make_raw_val(key);
+    MDBX_val raw_value = make_raw_val(value);
+    mdbxc::check_mdbx(mdbx_del(transaction.handle(), by_key,
+                                &raw_key, &raw_value),
+                      "test state index delete failed");
+    transaction.commit();
+}
+
+void drop_named_dbi(const std::shared_ptr<mdbxc::Connection>& connection,
+                    const std::string& name,
+                    MDBX_db_flags_t flags) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::WRITABLE);
+    MDBX_dbi dbi = 0;
+    mdbxc::check_mdbx(mdbx_dbi_open(
+        transaction.handle(), name.c_str(), flags, &dbi),
+        "test named DBI open failed");
+    mdbxc::check_mdbx(mdbx_drop(transaction.handle(), dbi, true),
+                      "test named DBI drop failed");
+    transaction.commit();
+}
+
 void test_destructive_append_erase_and_batch_preflight() {
     const std::string path = "test_key_ordered_multi_value_destructive_adapter.mdbx";
     cleanup(path);
@@ -250,11 +366,683 @@ void test_destructive_capture_coalesces_and_commits_to_outbox() {
     cleanup(path);
 }
 
+void test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates() {
+    const std::string path = "test_key_ordered_multi_value_destructive_replay.mdbx";
+    const std::string primary = "ordered_replay_values";
+    const std::string state = "ordered_replay_state";
+    const std::string by_key = "ordered_replay_by_key";
+    const std::string schema = "app.ordered_replay.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId receiver_node = make_node(0x71u);
+    const mdbxc::sync::NodeId origin = make_node(0x81u);
+    const mdbxc::sync::DbId receiver_db = make_node(0xC1u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(receiver_node, receiver_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::OrderedElementId id;
+    id.origin = origin;
+    id.sequence = 1u;
+    const mdbxc::sync::LogicalChange valid_change =
+        adapter.make_append(id, 17, "seventeen");
+    mdbxc::sync::LogicalDeliveryEnvelope malformed;
+    malformed.destination_db_uuid = receiver_db;
+    malformed.origin_node_id = origin;
+    malformed.origin_sequence = 1u;
+    malformed.frame_id = "ordered-v2-frame-1";
+    malformed.frame.changes.push_back(valid_change);
+    malformed.frame.changes[0].payload.resize(3u);
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement failed =
+        engine.apply_ordered_logical_delivery_envelope(malformed);
+    if (failed.ok || failed.acknowledged_through != 0u || !table.find(17).empty()) {
+        throw std::runtime_error("malformed v2 delivery changed durable state");
+    }
+
+    mdbxc::sync::LogicalDeliveryEnvelope valid = malformed;
+    valid.frame.changes[0] = valid_change;
+    const mdbxc::sync::LogicalDeliveryAcknowledgement applied =
+        engine.apply_ordered_logical_delivery_envelope(valid);
+    if (!applied.ok || applied.acknowledged_through != 1u ||
+        table.find(17).size() != 1u || table.find(17)[0] != "seventeen") {
+        throw std::runtime_error("valid v2 delivery did not apply after rollback");
+    }
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement replay =
+        engine.apply_ordered_logical_delivery_envelope(valid);
+    if (!replay.ok || replay.acknowledged_through != 1u ||
+        table.find(17).size() != 1u) {
+        throw std::runtime_error("exact v2 replay was not a no-op");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_preflight_rejects_untracked_physical_value() {
+    const std::string path = "test_key_ordered_multi_value_destructive_parity.mdbx";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const std::string primary = "ordered_parity_values";
+    const std::string state = "ordered_parity_state";
+    const std::string by_key = "ordered_parity_by_key";
+    const std::string schema = "app.ordered_parity.v2";
+    const mdbxc::sync::NodeId origin = make_node(0x91u);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(make_node(0x92u), make_node(0x93u));
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    mdbxc::sync::LogicalTableRegistry registry;
+    registry.register_adapter(&adapter);
+    table.append(5, "raw");
+
+    mdbxc::sync::OrderedElementId id;
+    id.origin = origin;
+    id.sequence = 1u;
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(adapter.make_append(id, 5, "logical"));
+    apply_changes(registry, connection, changes, false);
+    const std::vector<std::string> values = table.find(5);
+    if (values.size() != 1u || values[0] != "raw") {
+        throw std::runtime_error("parity preflight changed raw physical data");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_preflight_rejects_state_index_corruption() {
+    const std::string path = "test_key_ordered_multi_value_destructive_state_parity.mdbx";
+    const std::string primary = "state_parity_values";
+    const std::string state = "state_parity_state";
+    const std::string by_key = "state_parity_by_key";
+    const std::string schema = "app.state_parity.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0xA1u);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(make_node(0xA2u), make_node(0xA3u));
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    mdbxc::sync::LogicalTableRegistry registry;
+    registry.register_adapter(&adapter);
+
+    const std::vector<std::uint8_t> key1 = IntKeyCodec::encode(1);
+    const std::vector<std::uint8_t> key2 = IntKeyCodec::encode(2);
+    const std::vector<std::uint8_t> key3 = IntKeyCodec::encode(3);
+    const std::vector<std::uint8_t> key4 = IntKeyCodec::encode(4);
+    const std::vector<std::uint8_t> key5 = IntKeyCodec::encode(5);
+    const std::vector<std::uint8_t> key6 = IntKeyCodec::encode(6);
+    const std::vector<std::uint8_t> value = StringValueCodec::encode("state");
+    mdbxc::sync::OrderedElementId ids[5];
+    for (std::size_t i = 0u; i < 5u; ++i) {
+        ids[i].origin = origin;
+        ids[i].sequence = i + 1u;
+    }
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        adapter.state_store().put_live(transaction.handle(), ids[0], key1, value);
+        adapter.state_store().put_live(transaction.handle(), ids[1], key2, value);
+        adapter.state_store().put_live(transaction.handle(), ids[2], key3, value);
+        adapter.state_store().put_live(transaction.handle(), ids[3], key5, value);
+        adapter.state_store().put_live(transaction.handle(), ids[4], key6, value);
+        adapter.state_store().tombstone(transaction.handle(), ids[2]);
+        transaction.commit();
+    }
+    delete_raw_index_record(connection, by_key, key1, ids[0]);
+    delete_raw_state_record(connection, state, ids[1]);
+    insert_raw_index_record(connection, by_key, key3, ids[2]);
+    insert_raw_index_record(connection, by_key, key4, ids[3]);
+
+    const int keys[5] = { 1, 2, 3, 4, 6 };
+    for (std::size_t i = 0u; i < 5u; ++i) {
+        mdbxc::sync::OrderedElementId candidate;
+        candidate.origin = origin;
+        candidate.sequence = 10u + i;
+        std::vector<mdbxc::sync::LogicalChange> changes;
+        changes.push_back(adapter.make_append(candidate, keys[i], "candidate"));
+        apply_changes(registry, connection, changes, false);
+    }
+    if (!table.empty()) {
+        throw std::runtime_error("state/index corruption changed the table");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_ordered_delivery_rejects_missing_auxiliary_dbis() {
+    const int cases[3] = { 0, 1, 2 };
+    for (std::size_t i = 0u; i < 3u; ++i) {
+        const bool drop_state = cases[i] == 0 || cases[i] == 2;
+        const bool drop_index = cases[i] == 1 || cases[i] == 2;
+        const std::string path =
+            std::string("test_key_ordered_multi_value_destructive_missing_") +
+            (cases[i] == 0 ? "state.mdbx" :
+             (cases[i] == 1 ? "index.mdbx" : "both.mdbx"));
+        const std::string primary = "missing_aux_values";
+        const std::string state = "missing_aux_state";
+        const std::string by_key = "missing_aux_by_key";
+        const std::string schema = "app.missing_aux.v2";
+        cleanup(path);
+
+        mdbxc::Config config;
+        config.pathname = path;
+        config.max_dbs = 16;
+        config.no_subdir = true;
+        const std::shared_ptr<mdbxc::Connection> connection =
+            mdbxc::Connection::create(config);
+        const mdbxc::sync::NodeId receiver = make_node(0xB1u);
+        const mdbxc::sync::NodeId origin = make_node(0xC1u);
+        const mdbxc::sync::DbId db_id = make_node(0xD1u);
+        table_type table(connection, primary);
+        adapter_type adapter(table, schema, state, by_key);
+        mdbxc::sync::SyncEngine engine(connection);
+        engine.initialize_local_identity(receiver, db_id);
+        const mdbxc::sync::LogicalSchemaRecord record =
+            make_v2_record(primary, state, by_key, origin);
+        engine.initialize_logical_adapter_schema(adapter, record);
+        engine.register_logical_adapter(adapter);
+        if (drop_state) {
+            drop_named_dbi(connection, state,
+                           static_cast<MDBX_db_flags_t>(0));
+        }
+        if (drop_index) {
+            drop_named_dbi(connection, by_key, MDBX_DUPSORT);
+        }
+
+        mdbxc::sync::OrderedElementId id;
+        id.origin = origin;
+        id.sequence = 1u;
+        mdbxc::sync::LogicalDeliveryEnvelope envelope;
+        envelope.destination_db_uuid = db_id;
+        envelope.origin_node_id = origin;
+        envelope.origin_sequence = 1u;
+        envelope.frame_id = cases[i] == 0 ? "missing-state" :
+                            (cases[i] == 1 ? "missing-index" : "missing-both");
+        envelope.frame.changes.push_back(adapter.make_append(id, 21, "value"));
+        const mdbxc::sync::LogicalDeliveryAcknowledgement failed =
+            engine.apply_ordered_logical_delivery_envelope(envelope);
+        if (failed.ok || !table.empty()) {
+            throw std::runtime_error(
+                "missing destructive auxiliary DBI was treated as empty");
+        }
+
+        bool setup_rejected = false;
+        try {
+            engine.initialize_logical_adapter_schema(adapter, record);
+        } catch (const std::exception&) {
+            setup_rejected = true;
+        }
+        if (!setup_rejected) {
+            throw std::runtime_error(
+                "existing marker recreated a missing auxiliary DBI");
+        }
+
+        const std::string& missing_name = drop_state ? state : by_key;
+        const MDBX_db_flags_t missing_flags =
+            drop_state ? static_cast<MDBX_db_flags_t>(0) : MDBX_DUPSORT;
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi missing_dbi = 0;
+        const int rc = mdbx_dbi_open(transaction.handle(), missing_name.c_str(),
+                                     missing_flags, &missing_dbi);
+        transaction.rollback();
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "failed setup recreated a missing destructive auxiliary DBI");
+        }
+
+        connection->disconnect();
+        cleanup(path);
+    }
+}
+
+void test_destructive_schema_setup_requires_empty_primary() {
+    const std::string path = "test_key_ordered_multi_value_destructive_setup.mdbx";
+    const std::string primary = "setup_values";
+    const std::string state = "setup_state";
+    const std::string by_key = "setup_by_key";
+    const std::string schema = "app.setup.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0xD1u);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(make_node(0xD2u), make_node(0xD3u));
+    table.append(1, "untracked");
+
+    bool rejected = false;
+    try {
+        engine.initialize_logical_adapter_schema(
+            adapter, make_v2_record(primary, state, by_key, origin));
+    } catch (const std::exception&) {
+        rejected = true;
+    }
+    if (!rejected || table.find(1).size() != 1u) {
+        throw std::runtime_error(
+            "destructive schema setup accepted a non-empty primary DBI");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_schema_reopen_rejects_missing_primary() {
+    const std::string path = "test_key_ordered_multi_value_destructive_missing_primary.mdbx";
+    const std::string primary = "missing_primary_values";
+    const std::string state = "missing_primary_state";
+    const std::string by_key = "missing_primary_by_key";
+    const std::string schema = "app.missing_primary.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const mdbxc::sync::NodeId origin = make_node(0xD3u);
+    {
+        const std::shared_ptr<mdbxc::Connection> connection =
+            mdbxc::Connection::create(config);
+        const std::shared_ptr<table_type> table =
+            adapter_type::open_primary_for_schema(connection, schema, primary);
+        adapter_type adapter(*table, schema, state, by_key);
+        mdbxc::sync::SyncEngine engine(connection);
+        engine.initialize_local_identity(make_node(0xD4u), make_node(0xD5u));
+        engine.initialize_logical_adapter_schema(
+            adapter, make_v2_record(primary, state, by_key, origin));
+        drop_named_dbi(connection, primary, static_cast<MDBX_db_flags_t>(0));
+        connection->disconnect();
+    }
+
+    {
+        const std::shared_ptr<mdbxc::Connection> connection =
+            mdbxc::Connection::create(config);
+        bool rejected = false;
+        try {
+            adapter_type::open_primary_for_schema(connection, schema, primary);
+        } catch (const std::exception&) {
+            rejected = true;
+        }
+        if (!rejected) {
+            throw std::runtime_error(
+                "destructive schema reopen recreated a missing primary DBI");
+        }
+
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi dbi = 0;
+        const int rc = mdbx_dbi_open(transaction.handle(), primary.c_str(),
+                                     static_cast<MDBX_db_flags_t>(0), &dbi);
+        transaction.rollback();
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "failed destructive schema reopen recreated primary DBI");
+        }
+        connection->disconnect();
+    }
+    cleanup(path);
+}
+
+void test_destructive_preflight_rejects_corrupt_introduced_high_water() {
+    const std::string path = "test_key_ordered_multi_value_destructive_high_water.mdbx";
+    const std::string primary = "high_water_values";
+    const std::string state = "high_water_state";
+    const std::string by_key = "high_water_by_key";
+    const std::string schema = "app.high_water.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0xD6u);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(make_node(0xD7u), make_node(0xD8u));
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    mdbxc::sync::LogicalTableRegistry registry;
+    registry.register_adapter(&adapter);
+
+    mdbxc::sync::OrderedElementId id2;
+    id2.origin = origin;
+    id2.sequence = 2u;
+    mdbxc::sync::OrderedElementId id1;
+    id1.origin = origin;
+    id1.sequence = 1u;
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(adapter.make_append(id2, 9, "same"));
+    apply_changes(registry, connection, changes, true);
+
+    delete_raw_introduced_high_water(connection, state, origin);
+    changes.clear();
+    changes.push_back(adapter.make_append(id1, 9, "same"));
+    apply_changes(registry, connection, changes, false);
+    const std::vector<std::string> values = table.find(9);
+    if (values.size() != 1u || values[0] != "same") {
+        throw std::runtime_error(
+            "corrupt introduced high-water changed the physical ordered table");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_ordering_and_duplicate_append_contract() {
+    const std::string path = "test_key_ordered_multi_value_destructive_ordering.mdbx";
+    const std::string primary = "ordering_values";
+    const std::string state = "ordering_state";
+    const std::string by_key = "ordering_by_key";
+    const std::string schema = "app.ordering.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0xD4u);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(make_node(0xD5u), make_node(0xD6u));
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    mdbxc::sync::LogicalTableRegistry registry;
+    registry.register_adapter(&adapter);
+
+    mdbxc::sync::OrderedElementId id2;
+    id2.origin = origin;
+    id2.sequence = 2u;
+    mdbxc::sync::OrderedElementId id1;
+    id1.origin = origin;
+    id1.sequence = 1u;
+    mdbxc::sync::OrderedElementId id5;
+    id5.origin = origin;
+    id5.sequence = 5u;
+    mdbxc::sync::OrderedElementId id8;
+    id8.origin = origin;
+    id8.sequence = 8u;
+    mdbxc::sync::OrderedElementId id7;
+    id7.origin = origin;
+    id7.sequence = 7u;
+    mdbxc::sync::OrderedElementId id9;
+    id9.origin = origin;
+    id9.sequence = 9u;
+    mdbxc::sync::OrderedElementId id10;
+    id10.origin = origin;
+    id10.sequence = 10u;
+    mdbxc::sync::OrderedElementId id11;
+    id11.origin = origin;
+    id11.sequence = 11u;
+
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(adapter.make_append(id2, 7, "same"));
+    apply_changes(registry, connection, changes, true);
+    changes.clear();
+    changes.push_back(adapter.make_append(id1, 7, "same"));
+    apply_changes(registry, connection, changes, false);
+    if (table.find(7).size() != 1u || table.find(7)[0] != "same") {
+        throw std::runtime_error(
+            "out-of-order ordered element changed the physical table");
+    }
+
+    changes.clear();
+    changes.push_back(adapter.make_append(id5, 7, "five"));
+    apply_changes(registry, connection, changes, true);
+    changes.clear();
+    changes.push_back(adapter.make_append(id8, 7, "eight"));
+    apply_changes(registry, connection, changes, true);
+    changes.clear();
+    changes.push_back(adapter.make_append(id8, 7, "eight"));
+    apply_changes(registry, connection, changes, true);
+    if (table.find(7).size() != 3u) {
+        throw std::runtime_error("idempotent ordered append duplicated a row");
+    }
+
+    changes.clear();
+    changes.push_back(adapter.make_append(id8, 7, "conflict"));
+    apply_changes(registry, connection, changes, false);
+    changes.clear();
+    changes.push_back(adapter.make_erase(id5));
+    apply_changes(registry, connection, changes, true);
+    changes.clear();
+    changes.push_back(adapter.make_append(id5, 7, "five"));
+    apply_changes(registry, connection, changes, false);
+    changes.clear();
+    changes.push_back(adapter.make_append(id7, 7, "seven"));
+    apply_changes(registry, connection, changes, false);
+
+    changes.clear();
+    changes.push_back(adapter.make_append(id9, 7, "nine"));
+    changes.push_back(adapter.make_append(id9, 7, "nine"));
+    apply_changes(registry, connection, changes, false);
+    if (table.find(7).size() != 2u) {
+        throw std::runtime_error("duplicate append in one batch changed a row");
+    }
+
+    changes.clear();
+    changes.push_back(adapter.make_append(id11, 7, "eleven"));
+    changes.push_back(adapter.make_append(id10, 7, "ten"));
+    apply_changes(registry, connection, changes, false);
+    if (table.find(7).size() != 2u) {
+        throw std::runtime_error(
+            "out-of-order destructive batch changed the physical table");
+    }
+
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        const mdbxc::sync::OrderedElementId allocated =
+            adapter.state_store().allocate_id(transaction.handle(), origin);
+        if (allocated.sequence != 9u) {
+            throw std::runtime_error(
+                "local allocator did not advance past remote introduced ids");
+        }
+        transaction.commit();
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_ordered_delivery_survives_environment_reopen() {
+    const std::string path = "test_key_ordered_multi_value_destructive_delivery_reopen.mdbx";
+    const std::string primary = "delivery_reopen_values";
+    const std::string state = "delivery_reopen_state";
+    const std::string by_key = "delivery_reopen_by_key";
+    const std::string schema = "app.delivery_reopen.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const mdbxc::sync::NodeId receiver = make_node(0xE1u);
+    const mdbxc::sync::NodeId origin = make_node(0xE2u);
+    const mdbxc::sync::DbId db_id = make_node(0xE3u);
+    mdbxc::sync::OrderedElementId id;
+    id.origin = origin;
+    id.sequence = 1u;
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_id;
+    envelope.origin_node_id = origin;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "ordered-v2-reopen";
+
+    {
+        const std::shared_ptr<mdbxc::Connection> connection =
+            mdbxc::Connection::create(config);
+        table_type table(connection, primary);
+        adapter_type adapter(table, schema, state, by_key);
+        mdbxc::sync::SyncEngine engine(connection);
+        engine.initialize_local_identity(receiver, db_id);
+        engine.initialize_logical_adapter_schema(
+            adapter, make_v2_record(primary, state, by_key, origin));
+        engine.register_logical_adapter(adapter);
+        envelope.frame.changes.push_back(adapter.make_append(id, 42, "persisted"));
+        const mdbxc::sync::LogicalDeliveryAcknowledgement applied =
+            engine.apply_ordered_logical_delivery_envelope(envelope);
+        if (!applied.ok || applied.acknowledged_through != 1u) {
+            throw std::runtime_error("ordered delivery did not commit before reopen");
+        }
+        connection->disconnect();
+    }
+
+    {
+        const std::shared_ptr<mdbxc::Connection> connection =
+            mdbxc::Connection::create(config);
+        table_type table(connection, primary);
+        adapter_type adapter(table, schema, state, by_key);
+        mdbxc::sync::SyncEngine engine(connection);
+        engine.initialize_local_identity(receiver, db_id);
+        engine.initialize_logical_adapter_schema(
+            adapter, make_v2_record(primary, state, by_key, origin));
+        engine.register_logical_adapter(adapter);
+        const mdbxc::sync::LogicalDeliveryAcknowledgement replay =
+            engine.apply_ordered_logical_delivery_envelope(envelope);
+        if (!replay.ok || replay.acknowledged_through != 1u ||
+            table.find(42).size() != 1u) {
+            throw std::runtime_error(
+                "ordered delivery replay was not durable across environment reopen");
+        }
+        {
+            mdbxc::Transaction transaction =
+                connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+            mdbxc::sync::LogicalDeliveryOrderStore order(connection->env_handle());
+            if (order.last_applied(transaction.handle(), origin) != 1u) {
+                throw std::runtime_error(
+                    "ordered delivery frontier did not survive environment reopen");
+            }
+            transaction.rollback();
+        }
+        connection->disconnect();
+    }
+
+    cleanup(path);
+}
+
+void test_ordered_delivery_rejects_incompatible_auxiliary_dbi() {
+    const std::string path = "test_key_ordered_multi_value_destructive_bad_index.mdbx";
+    const std::string primary = "bad_index_values";
+    const std::string state = "bad_index_state";
+    const std::string by_key = "bad_index_by_key";
+    const std::string schema = "app.bad_index.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId receiver = make_node(0xB4u);
+    const mdbxc::sync::NodeId origin = make_node(0xC4u);
+    const mdbxc::sync::DbId db_id = make_node(0xD4u);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(receiver, db_id);
+    const mdbxc::sync::LogicalSchemaRecord record =
+        make_v2_record(primary, state, by_key, origin);
+    engine.initialize_logical_adapter_schema(adapter, record);
+    engine.register_logical_adapter(adapter);
+    drop_named_dbi(connection, by_key, MDBX_DUPSORT);
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi bad_index = 0;
+        mdbxc::check_mdbx(mdbx_dbi_open(
+            transaction.handle(), by_key.c_str(), MDBX_CREATE, &bad_index),
+            "test incompatible index DBI creation failed");
+        transaction.commit();
+    }
+
+    mdbxc::sync::OrderedElementId id;
+    id.origin = origin;
+    id.sequence = 1u;
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_id;
+    envelope.origin_node_id = origin;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "bad-index";
+    envelope.frame.changes.push_back(adapter.make_append(id, 22, "value"));
+    const mdbxc::sync::LogicalDeliveryAcknowledgement failed =
+        engine.apply_ordered_logical_delivery_envelope(envelope);
+    if (failed.ok || !table.empty()) {
+        throw std::runtime_error(
+            "incompatible destructive auxiliary DBI was accepted");
+    }
+
+    bool setup_rejected = false;
+    try {
+        engine.initialize_logical_adapter_schema(adapter, record);
+    } catch (const std::exception&) {
+        setup_rejected = true;
+    }
+    if (!setup_rejected) {
+        throw std::runtime_error("incompatible auxiliary DBI passed setup");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 } // namespace
 
 int main() {
     test_destructive_append_erase_and_batch_preflight();
     test_destructive_preflight_rejects_foreign_append_id();
     test_destructive_capture_coalesces_and_commits_to_outbox();
+    test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates();
+    test_destructive_preflight_rejects_untracked_physical_value();
+    test_destructive_preflight_rejects_state_index_corruption();
+    test_ordered_delivery_rejects_missing_auxiliary_dbis();
+    test_ordered_delivery_rejects_incompatible_auxiliary_dbi();
+    test_destructive_schema_setup_requires_empty_primary();
+    test_destructive_schema_reopen_rejects_missing_primary();
+    test_destructive_preflight_rejects_corrupt_introduced_high_water();
+    test_destructive_ordering_and_duplicate_append_contract();
+    test_ordered_delivery_survives_environment_reopen();
     return 0;
 }
