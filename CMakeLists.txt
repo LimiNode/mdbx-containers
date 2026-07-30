@@ -454,6 +454,7 @@ if(MDBXC_BUILD_TESTS)
           mdbx_containers/sync/adapters/KeyMultiValueTableLogicalAdapter.hpp
           mdbx_containers/sync/adapters/KeyOrderedMultiValueTableLogicalAdapter.hpp
           mdbx_containers/sync/adapters/KeyOrderedMultiValueDestructiveState.hpp
+          mdbx_containers/sync/adapters/KeyOrderedMultiValueTableDestructiveLogicalAdapter.hpp
         mdbx_containers/sync/ChangeBatch.hpp
         mdbx_containers/sync/ChangeBatchCodec.hpp
         mdbx_containers/sync/SyncApplyObserver.hpp
