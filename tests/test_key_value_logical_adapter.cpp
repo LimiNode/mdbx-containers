@@ -1585,6 +1585,266 @@ void test_key_ordered_multi_value_logical_capture_rolls_back_outbox_failure() {
     cleanup(path);
 }
 
+void test_key_ordered_multi_value_logical_adapter_rejects_malformed_payloads() {
+    const std::string path =
+        "test_key_ordered_multi_value_logical_adapter_malformed.mdbx";
+    const std::string dbi_name =
+        "logical_key_ordered_multi_value_malformed";
+    const std::string schema_id =
+        "app.logical_key_ordered_multi_value_malformed.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x75u);
+    const mdbxc::sync::NodeId remote_node = make_node(0x76u);
+    const mdbxc::sync::DbId db_uuid = make_node(0xE4u);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, db_uuid);
+    mdbxc::sync::LogicalSchemaRecord record =
+        make_key_ordered_multi_value_record(dbi_name);
+    record.ordered_delivery_origin_node_id = remote_node;
+    engine.register_logical_schema(schema_id, record);
+
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> table(conn, dbi_name);
+    IntStringOrderedAdapter adapter(table, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    const mdbxc::sync::LogicalChange valid =
+        adapter.make_append(9, "valid");
+    std::vector<mdbxc::sync::LogicalChange> malformed;
+
+    mdbxc::sync::LogicalChange truncated_length = valid;
+    truncated_length.payload.resize(3u);
+    malformed.push_back(truncated_length);
+
+    mdbxc::sync::LogicalChange truncated_value = valid;
+    truncated_value.payload.pop_back();
+    malformed.push_back(truncated_value);
+
+    mdbxc::sync::LogicalChange oversized_blob = valid;
+    oversized_blob.payload[0] = 0xffu;
+    oversized_blob.payload[1] = 0xffu;
+    oversized_blob.payload[2] = 0xffu;
+    oversized_blob.payload[3] = 0xffu;
+    malformed.push_back(oversized_blob);
+
+    mdbxc::sync::LogicalChange trailing_bytes = valid;
+    trailing_bytes.payload.push_back(0xffu);
+    malformed.push_back(trailing_bytes);
+
+    for (std::size_t i = 0; i < malformed.size(); ++i) {
+        mdbxc::sync::LogicalDeliveryEnvelope envelope;
+        envelope.destination_db_uuid = db_uuid;
+        envelope.origin_node_id = remote_node;
+        envelope.origin_sequence = 1u;
+        envelope.frame_id = "ordered-malformed-" + std::to_string(i);
+        envelope.frame.changes.push_back(malformed[i]);
+        const mdbxc::sync::LogicalDeliveryAcknowledgement rejected =
+            engine.apply_ordered_logical_delivery_envelope(envelope);
+        MDBXC_TEST_ASSERT(!rejected.ok);
+        MDBXC_TEST_ASSERT(!rejected.retryable);
+        MDBXC_TEST_ASSERT(table.empty());
+    }
+
+    mdbxc::sync::LogicalDeliveryEnvelope valid_envelope;
+    valid_envelope.destination_db_uuid = db_uuid;
+    valid_envelope.origin_node_id = remote_node;
+    valid_envelope.origin_sequence = 1u;
+    valid_envelope.frame_id = "ordered-malformed-valid";
+    valid_envelope.frame.changes.push_back(valid);
+    const mdbxc::sync::LogicalDeliveryAcknowledgement applied =
+        engine.apply_ordered_logical_delivery_envelope(valid_envelope);
+    MDBXC_TEST_ASSERT(applied.ok);
+    MDBXC_TEST_ASSERT(applied.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(table.find(9).size() == 1u);
+    MDBXC_TEST_ASSERT(table.find(9)[0] == "valid");
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_ordered_multi_value_logical_capture_discards_destructor_rollback() {
+    const std::string path =
+        "test_key_ordered_multi_value_logical_capture_destructor_rollback.mdbx";
+    const std::string dbi_name =
+        "logical_key_ordered_multi_value_capture_destructor";
+    const std::string schema_id =
+        "app.logical_key_ordered_multi_value_capture_destructor.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId node = make_node(0x77u);
+    const mdbxc::sync::DbId destination = make_node(0xE5u);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(node, make_node(0xE6u));
+    mdbxc::sync::LogicalSchemaRecord record =
+        make_key_ordered_multi_value_record(dbi_name);
+    record.ordered_delivery_origin_node_id = node;
+    engine.register_logical_schema(schema_id, record);
+
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> table(conn, dbi_name);
+    IntStringOrderedAdapter adapter(table, schema_id);
+    {
+        std::unique_ptr<IntStringOrderedAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(10, "discarded");
+        MDBXC_TEST_ASSERT(session->pending_size() == 1u);
+    }
+
+    MDBXC_TEST_ASSERT(table.empty());
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(destination).empty());
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_ordered_multi_value_logical_capture_rolls_back_precommit_failure() {
+    const std::string path =
+        "test_key_ordered_multi_value_logical_capture_precommit_failure.mdbx";
+    const std::string dbi_name =
+        "logical_key_ordered_multi_value_capture_precommit";
+    const std::string schema_id =
+        "app.logical_key_ordered_multi_value_capture_precommit.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId node = make_node(0x78u);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(node, make_node(0xE7u));
+    mdbxc::sync::LogicalSchemaRecord record =
+        make_key_ordered_multi_value_record(dbi_name);
+    record.ordered_delivery_origin_node_id = node;
+    engine.register_logical_schema(schema_id, record);
+
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> table(conn, dbi_name);
+    IntStringOrderedAdapter adapter(table, schema_id);
+    ThrowingFlushSink sink;
+    conn->attach_sync_capture(&sink);
+
+    bool commit_failed = false;
+    bool retry_rejected = false;
+    {
+        std::unique_ptr<IntStringOrderedAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(11, "rolled-back");
+        std::vector<mdbxc::sync::LogicalChange> changes;
+        try {
+            session->commit(changes);
+        } catch (const std::runtime_error&) {
+            commit_failed = true;
+        }
+        MDBXC_TEST_ASSERT(changes.empty());
+        MDBXC_TEST_ASSERT(session->pending_size() == 0u);
+        try {
+            session->commit(changes);
+        } catch (const std::logic_error&) {
+            retry_rejected = true;
+        }
+    }
+    conn->detach_sync_capture();
+
+    MDBXC_TEST_ASSERT(commit_failed);
+    MDBXC_TEST_ASSERT(retry_rejected);
+    MDBXC_TEST_ASSERT(table.empty());
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_ordered_multi_value_logical_capture_rejects_invalid_marker() {
+    const std::string path =
+        "test_key_ordered_multi_value_logical_capture_invalid_marker.mdbx";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId node = make_node(0x79u);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(node, make_node(0xE8u));
+
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> missing_table(
+        conn, "logical_key_ordered_multi_value_marker_missing");
+    IntStringOrderedAdapter missing_adapter(
+        missing_table, "app.logical_key_ordered_multi_value_marker_missing.v1");
+    bool missing_rejected = false;
+    try {
+        std::unique_ptr<IntStringOrderedAdapter::LogicalCaptureSession> session =
+            missing_adapter.begin_capture_session();
+    } catch (const std::runtime_error&) {
+        missing_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(missing_rejected);
+    MDBXC_TEST_ASSERT(missing_table.empty());
+
+    const std::string stale_dbi = "logical_key_ordered_multi_value_marker_stale";
+    const std::string stale_schema =
+        "app.logical_key_ordered_multi_value_marker_stale.v1";
+    mdbxc::sync::LogicalSchemaRecord stale_v1 =
+        make_key_ordered_multi_value_record(stale_dbi, 1u);
+    stale_v1.ordered_delivery_origin_node_id = node;
+    mdbxc::sync::LogicalSchemaRecord stale_v2 = stale_v1;
+    stale_v2.schema_version = 2u;
+    engine.register_logical_schema(stale_schema, stale_v1);
+    engine.migrate_logical_schema(stale_schema, stale_v1, stale_v2);
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> stale_table(
+        conn, stale_dbi);
+    IntStringOrderedAdapter stale_adapter(stale_table, stale_schema, 1u);
+    bool stale_rejected = false;
+    try {
+        std::unique_ptr<IntStringOrderedAdapter::LogicalCaptureSession> session =
+            stale_adapter.begin_capture_session();
+    } catch (const std::runtime_error&) {
+        stale_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(stale_rejected);
+    MDBXC_TEST_ASSERT(stale_table.empty());
+
+    const std::string actual_dbi =
+        "logical_key_ordered_multi_value_marker_actual";
+    const std::string marker_dbi =
+        "logical_key_ordered_multi_value_marker_other";
+    const std::string mismatch_schema =
+        "app.logical_key_ordered_multi_value_marker_mismatch.v1";
+    mdbxc::sync::LogicalSchemaRecord mismatch =
+        make_key_ordered_multi_value_record(marker_dbi);
+    mismatch.ordered_delivery_origin_node_id = node;
+    engine.register_logical_schema(mismatch_schema, mismatch);
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> mismatch_table(
+        conn, actual_dbi);
+    IntStringOrderedAdapter mismatch_adapter(mismatch_table, mismatch_schema);
+    bool mismatch_rejected = false;
+    try {
+        std::unique_ptr<IntStringOrderedAdapter::LogicalCaptureSession> session =
+            mismatch_adapter.begin_capture_session();
+    } catch (const std::runtime_error&) {
+        mismatch_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(mismatch_rejected);
+    MDBXC_TEST_ASSERT(mismatch_table.empty());
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_multi_value_logical_adapter_applies_multiset_operations() {
     const std::string path =
         "test_key_multi_value_logical_adapter_engine.mdbx";
@@ -5120,6 +5380,10 @@ int main() {
     test_key_ordered_multi_value_logical_capture_delivers_and_replays();
     test_key_ordered_multi_value_logical_capture_rejects_wrong_origin();
     test_key_ordered_multi_value_logical_capture_rolls_back_outbox_failure();
+    test_key_ordered_multi_value_logical_adapter_rejects_malformed_payloads();
+    test_key_ordered_multi_value_logical_capture_discards_destructor_rollback();
+    test_key_ordered_multi_value_logical_capture_rolls_back_precommit_failure();
+    test_key_ordered_multi_value_logical_capture_rejects_invalid_marker();
     test_key_multi_value_logical_adapter_applies_multiset_operations();
     test_key_multi_value_logical_adapter_rejects_invalid_payload();
     test_key_multi_value_logical_capture_session_commits_typed_writes();
