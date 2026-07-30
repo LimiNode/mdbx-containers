@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -15,6 +16,7 @@
 #include <vector>
 
 #include "../../KeyOrderedMultiValueTable.hpp"
+#include "../ILogicalDeliveryOutbox.hpp"
 #include "KeyValueTableLogicalAdapter.hpp"
 
 namespace mdbxc {
@@ -100,6 +102,160 @@ namespace sync {
         LogicalChange make_insert(const KeyT& key, const ValueT& value) const {
             return make_append(key, value);
         }
+
+        /// \brief Transaction-bound typed capture session for append history.
+        /// \details The session owns one writable transaction, suppresses raw
+        /// capture, and records only \c append and its \c insert alias. A
+        /// failure after physical mutation, outbox enqueue, or native commit
+        /// processing begins rolls back and deactivates the session.
+        class LogicalCaptureSession {
+        public:
+            explicit LogicalCaptureSession(
+                    const KeyOrderedMultiValueTableLogicalAdapter& adapter)
+                : m_adapter(adapter),
+                  m_txn(adapter.m_table.connection()->transaction(
+                      TransactionMode::WRITABLE)),
+                  m_active(true) {
+                const LogicalApplyResult marker_result =
+                    validate_logical_adapter_marker(
+                        m_txn.handle(),
+                        adapter.m_table.connection()->env_handle(),
+                        adapter);
+                if (!marker_result.ok) {
+                    throw std::runtime_error(marker_result.error);
+                }
+                const LogicalApplyResult origin_result =
+                    validate_ordered_logical_adapter_origin(
+                        m_txn.handle(),
+                        adapter.m_table.connection()->env_handle(),
+                        adapter);
+                if (!origin_result.ok) {
+                    throw std::runtime_error(origin_result.error);
+                }
+            }
+
+            ~LogicalCaptureSession() noexcept {
+                rollback();
+            }
+
+            LogicalCaptureSession(const LogicalCaptureSession&) = delete;
+            LogicalCaptureSession& operator=(
+                    const LogicalCaptureSession&) = delete;
+
+            void append(const KeyT& key, const ValueT& value) {
+                ensure_active();
+                append_then_mutate(m_adapter.make_append(key, value),
+                    [this, &key, &value]() {
+                        m_adapter.m_table.append(key, value, m_txn.handle());
+                    });
+            }
+
+            void insert(const KeyT& key, const ValueT& value) {
+                append(key, value);
+            }
+
+            /// \brief Commits local appends and returns their logical changes.
+            /// \warning Returned changes are not atomically published. Use
+            /// \c commit_to_outbox() when durable delivery is required.
+            void commit(std::vector<LogicalChange>& out) {
+                ensure_active();
+                const std::size_t old_size = out.size();
+                out.insert(out.end(), m_pending.begin(), m_pending.end());
+                try {
+                    m_txn.commit();
+                } catch (...) {
+                    out.erase(out.begin() +
+                              static_cast<std::ptrdiff_t>(old_size),
+                              out.end());
+                    rollback_and_deactivate();
+                    throw;
+                }
+                m_pending.clear();
+                m_active = false;
+            }
+
+            /// \brief Commits appends and an ordered delivery atomically.
+            LogicalDeliveryEnvelope commit_to_outbox(
+                    ILogicalDeliveryOutbox& outbox,
+                    const DbId& destination,
+                    const CodecBounds* bounds = nullptr) {
+                ensure_active();
+                LogicalChangeFrame frame;
+                frame.changes = m_pending;
+                try {
+                    const LogicalDeliveryEnvelope envelope =
+                        outbox.enqueue_logical_delivery(
+                            m_txn.handle(), destination, frame, bounds);
+                    m_txn.commit();
+                    m_pending.clear();
+                    m_active = false;
+                    return envelope;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            void rollback() noexcept {
+                if (!m_active) {
+                    return;
+                }
+                rollback_and_deactivate();
+            }
+
+            std::size_t pending_size() const {
+                return m_pending.size();
+            }
+
+        private:
+            template<class Mutation>
+            void append_then_mutate(const LogicalChange& change,
+                                    const Mutation& mutation) {
+                m_pending.push_back(change);
+                try {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_adapter.m_table.connection(), m_txn.handle());
+                    mutation();
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            void rollback_and_deactivate() noexcept {
+                try {
+                    m_pending.clear();
+                } catch (...) {
+                }
+                try {
+                    m_txn.rollback();
+                } catch (...) {
+                }
+                m_active = false;
+            }
+
+            void ensure_active() const {
+                if (!m_active) {
+                    throw std::logic_error(
+                        "KeyOrderedMultiValue logical capture session is not active");
+                }
+            }
+
+            const KeyOrderedMultiValueTableLogicalAdapter& m_adapter;
+            Transaction m_txn;
+            std::vector<LogicalChange> m_pending;
+            bool m_active;
+        };
+
+        /// \brief Starts a capture session bound to this adapter instance.
+        /// \details The session stores an adapter reference, so construction is
+        /// restricted to an lvalue adapter that outlives the session.
+        std::unique_ptr<LogicalCaptureSession> begin_capture_session() const & {
+            return std::unique_ptr<LogicalCaptureSession>(
+                new LogicalCaptureSession(*this));
+        }
+
+        std::unique_ptr<LogicalCaptureSession> begin_capture_session() const && = delete;
 
         LogicalApplyResult preflight(
                 MDBX_txn* txn,

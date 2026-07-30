@@ -107,7 +107,8 @@ The logical sync scaffolding is preparatory only:
   path for its limited unordered multiset operation set. It does not enable raw
   `ChangeOp` capture for the table wrapper.
 - `KeyOrderedMultiValueTableLogicalAdapter` applies append-only logical changes
-  only through ordered delivery for one origin stream. Typed capture and all
+  only through ordered delivery for one origin stream. Its typed capture
+  session can atomically commit local appends and an ordered outbox envelope;
   destructive ordered-table operations remain deferred.
 - Logical delivery replay markers can be pruned through a persisted per-origin
   watermark. The watermark DBI is created lazily on the first pruning call, so

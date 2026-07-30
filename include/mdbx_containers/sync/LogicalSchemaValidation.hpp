@@ -11,7 +11,9 @@
 
 #include <mdbx.h>
 
+#include "LogicalDeliveryEnvelope.hpp"
 #include "LogicalTableAdapter.hpp"
+#include "stores/MetaStore.hpp"
 #include "stores/SchemaRegistryStore.hpp"
 
 namespace mdbxc {
@@ -76,6 +78,50 @@ namespace sync {
         if (record.dbi_name != primary_dbi) {
             return LogicalApplyResult::failure(
                 "Persistent logical schema marker primary DBI does not match adapter");
+        }
+
+        return LogicalApplyResult::success();
+    }
+
+    /// \brief Verifies that an ordered adapter is bound to this local origin.
+    /// \details Capture must not create an ordered outbox envelope that its
+    /// receiver will reject because the persistent schema marker names another
+    /// authoritative origin.
+    inline LogicalApplyResult validate_ordered_logical_adapter_origin(
+            MDBX_txn* txn,
+            MDBX_env* env,
+            const ILogicalTableAdapter& adapter) {
+        const LogicalApplyResult marker_result =
+            validate_logical_adapter_marker(txn, env, adapter);
+        if (!marker_result.ok) {
+            return marker_result;
+        }
+
+        if (!adapter.requires_ordered_delivery()) {
+            return LogicalApplyResult::failure(
+                "Logical adapter does not require ordered delivery");
+        }
+
+        const LogicalSchemaRef ref = adapter.schema_ref();
+        SchemaRegistryStore schemas(env);
+        LogicalSchemaRecord record;
+        if (!schemas.get(txn, ref.schema_id, record)) {
+            return LogicalApplyResult::failure(
+                "Persistent logical schema marker is missing");
+        }
+        if (is_zero_sync_id(record.ordered_delivery_origin_node_id)) {
+            return LogicalApplyResult::failure(
+                "Persistent logical schema marker has no ordered delivery origin");
+        }
+
+        MetaStore meta(env);
+        meta.open(txn);
+        const NodeId local_node_id = meta.get_node_id(txn);
+        if (is_zero_sync_id(local_node_id) ||
+            compare_node_id(record.ordered_delivery_origin_node_id,
+                            local_node_id) != 0) {
+            return LogicalApplyResult::failure(
+                "Local node does not match ordered logical schema origin");
         }
 
         return LogicalApplyResult::success();

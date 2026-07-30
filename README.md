@@ -68,7 +68,8 @@
   erase remain outside that adapter scope. See `sync/DESIGN.md`.
   `KeyOrderedMultiValueTableLogicalAdapter` provides opt-in append-only apply
   through ordered logical delivery for one origin stream. Direct logical frames
-  and unordered delivery are rejected; typed capture and destructive ordered
+  and unordered delivery are rejected. Its typed capture session atomically
+  commits local appends plus an ordered outbox envelope; destructive ordered
   operations remain deferred. `AnyValueTable` and `HashedKeyValueStore` still
   need type-tag and hash-index identity designs.
 - Application CRUD code does not need per-method sync wrappers for supported

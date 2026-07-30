@@ -95,9 +95,10 @@
   adapter-а. См. `sync/DESIGN.md`.
   `KeyOrderedMultiValueTableLogicalAdapter` даёт opt-in append-only apply
   через ordered logical delivery для одного origin stream. Direct logical frame
-  и unordered delivery отклоняются; typed capture и destructive ordered
-  операции остаются deferred. Для `AnyValueTable` и `HashedKeyValueStore` ещё
-  нужны дизайны type tags и hash-index identity.
+  и unordered delivery отклоняются. Его typed capture session атомарно
+  коммитит локальные append вместе с ordered outbox envelope; destructive
+  ordered операции остаются deferred. Для `AnyValueTable` и
+  `HashedKeyValueStore` ещё нужны дизайны type tags и hash-index identity.
 - Для поддерживаемых таблиц прикладной CRUD-код не нужно оборачивать
   отдельными sync-вызовами на каждый метод. Прикрепите
   `ThreadLocalChangeAccumulator` к пишущему `Connection`; используйте

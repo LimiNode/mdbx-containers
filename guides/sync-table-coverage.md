@@ -21,7 +21,7 @@ values during transport, and remote apply replays the captured physical
 | `VectorStore` | Indirectly supported | Captured through its internal `SequenceTable` and `KeyValueTable` members. | The internal table operations are replicated; `VectorStore` has no separate wire type. This raw path requires one authoritative or externally serialized writer per collection. Already-open instances compare `Connection::sync_apply_generation()` and lazily rebuild their RAM index before index-dependent operations after remote apply. A connection apply/read barrier serializes remote `handle_push()` apply commits with cache-backed `VectorStore` operations. Each `VectorStore` instance serializes its own methods; C++17 builds let different readers share the connection read side, while C++11 builds use an exclusive connection mutex fallback. | `test_sync_capture`, `test_sync_replication` |
 | `AnyValueTable<K>` | Deferred | No `ChangeOp` in v0.1. | Not applied by sync as a typed heterogeneous table. | `test_sync_capture` negative coverage |
 | `KeyMultiValueTable<K, V>` | Limited logical adapter | No raw `ChangeOp` in v0.1. | `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear for one writer or causally serialized updates. Raw calls, append, reconcile, range erase, and general multi-writer destructive convergence remain deferred. | `test_key_value_logical_adapter`, `test_sync_capture` negative coverage |
-| `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapter | No raw `ChangeOp` in v0.1. | Append-only logical changes require one ordered origin stream; direct logical frames and unordered delivery fail closed. Typed capture is pending; destructive operations remain deferred pending persistent element identity and tombstones. | `test_key_value_logical_adapter`; capture regressions pending |
+| `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapter | No raw `ChangeOp` in v0.1. | Append-only logical changes require one ordered origin stream; direct logical frames and unordered delivery fail closed. Typed capture atomically commits local appends plus an ordered outbox envelope; destructive operations remain deferred pending persistent element identity and tombstones. | `test_key_value_logical_adapter` |
 | `HashedKeyValueStore<K, V, H, Layout>` | Deferred | No `ChangeOp` in v0.1. | Hash-index identity and logical-key mapping are deferred. | `test_sync_capture` negative coverage |
 
 ## Supported Capture Contract
@@ -112,9 +112,17 @@ logical-adapter extension, not a claim that those operations are supported.
 The detailed deferred contract lives in
 `include/mdbx_containers/sync/DESIGN.md`: it requires explicit multivalue wire
 sub-operations and receiver-side logical apply helpers before capture can be
-enabled. Order-sensitive histories belong to `KeyOrderedMultiValueTable<K, V>`;
-that table exists for local storage, but its sync capture/apply contract is
-still deferred.
+enabled.
+
+`KeyOrderedMultiValueTable<K, V>` has an append-only ordered logical adapter.
+The following coverage is intentionally deferred until the next ordered-adapter
+extension; it does not widen the current append-only contract:
+
+- malformed ordered pair payloads: truncated key or value, oversized declared
+  lengths, and trailing bytes;
+- destruction rollback of an active ordered capture session;
+- native transaction commit failure after ordered capture preparation;
+- missing, stale, or DBI-mismatched schema markers for ordered capture sessions.
 
 `AnyValueTable<K>` needs value type-tag propagation or another explicit
 compatibility policy. The current sync wire operation only carries raw value
