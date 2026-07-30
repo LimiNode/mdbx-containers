@@ -454,9 +454,11 @@ namespace sync {
         /// \brief Applies one strictly ordered logical delivery envelope.
         /// \details This is distinct from the legacy unordered delivery API.
         /// It accepts only the next contiguous origin sequence, acknowledges
-        /// duplicate and self-origin no-ops through their own sequence, and
+        /// persisted exact duplicate and self-origin no-ops through their own
+        /// sequence, and
         /// reports a gap as a retryable acknowledgement without invoking
-        /// logical adapters.
+        /// logical adapters. Exact duplicate validation does not require a
+        /// currently registered adapter or schema marker.
         LogicalDeliveryAcknowledgement apply_ordered_logical_delivery_envelope(
                 const LogicalDeliveryEnvelope& envelope,
                 const CodecBounds* bounds = nullptr) {
@@ -525,17 +527,6 @@ namespace sync {
                     return acknowledgement;
                 }
 
-                const LogicalApplyResult origin_validation =
-                    validate_ordered_logical_schema_origins(
-                        txn.handle(), changes, envelope.origin_node_id);
-                if (!origin_validation.ok) {
-                    set_logical_delivery_acknowledgement_failure(
-                        acknowledgement, origin_validation.error,
-                        origin_validation.retryable, bounds);
-                    txn.rollback();
-                    return acknowledgement;
-                }
-
                 const std::uint64_t last = order.last_applied(
                     txn.handle(), envelope.origin_node_id);
                 acknowledgement.acknowledged_through = last;
@@ -581,6 +572,17 @@ namespace sync {
                     set_logical_delivery_acknowledgement_failure(
                         acknowledgement,
                         "Logical ordered delivery sequence gap", true, bounds);
+                    txn.rollback();
+                    return acknowledgement;
+                }
+
+                const LogicalApplyResult origin_validation =
+                    validate_ordered_logical_schema_origins(
+                        txn.handle(), changes, envelope.origin_node_id);
+                if (!origin_validation.ok) {
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement, origin_validation.error,
+                        origin_validation.retryable, bounds);
                     txn.rollback();
                     return acknowledgement;
                 }

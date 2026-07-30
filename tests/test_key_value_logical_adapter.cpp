@@ -1081,6 +1081,131 @@ void test_ordered_logical_delivery_origin_binding_survives_reopen() {
     cleanup(path);
 }
 
+void test_ordered_logical_delivery_exact_retry_survives_reopen_without_adapter() {
+    const std::string path =
+        "test_ordered_logical_delivery_retry_without_adapter.mdbx";
+    const std::string dbi_name = "logical_ordered_delivery_retry";
+    const std::string schema_id = "app.logical_ordered_delivery_retry.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+
+    const mdbxc::sync::NodeId local_node = make_node(0x70u);
+    const mdbxc::sync::NodeId remote_node = make_node(0x71u);
+    const mdbxc::sync::DbId db_uuid = make_node(0xDCu);
+    mdbxc::sync::LogicalSchemaRecord record =
+        make_key_ordered_multi_value_record(dbi_name);
+    record.ordered_delivery_origin_node_id = remote_node;
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_uuid;
+    envelope.origin_node_id = remote_node;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "ordered-retry-without-adapter";
+    envelope.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        mdbxc::sync::LogicalSchemaRef(
+            schema_id,
+            mdbxc::sync::LogicalTableKind::KeyOrderedMultiValue,
+            1u),
+        1u, 0u, std::vector<std::uint8_t>()));
+
+    {
+        std::shared_ptr<mdbxc::Connection> conn =
+            mdbxc::Connection::create(cfg);
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, db_uuid);
+        engine.register_logical_schema(schema_id, record);
+        OrderedDeliveryRequiredAdapter adapter(dbi_name, schema_id);
+        engine.register_logical_adapter(adapter);
+
+        const mdbxc::sync::LogicalDeliveryAcknowledgement applied =
+            engine.apply_ordered_logical_delivery_envelope(envelope);
+        MDBXC_TEST_ASSERT(applied.ok);
+        MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
+        conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<mdbxc::Connection> conn =
+            mdbxc::Connection::create(cfg);
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, db_uuid);
+
+        const mdbxc::sync::LogicalDeliveryAcknowledgement replay =
+            engine.apply_ordered_logical_delivery_envelope(envelope);
+        MDBXC_TEST_ASSERT(replay.ok);
+        MDBXC_TEST_ASSERT(replay.acknowledged_through == 1u);
+        conn->disconnect();
+    }
+
+    cleanup(path);
+}
+
+void test_ordered_logical_delivery_exact_retry_survives_origin_migration() {
+    const std::string path =
+        "test_ordered_logical_delivery_retry_after_migration.mdbx";
+    const std::string dbi_name = "logical_ordered_delivery_migration";
+    const std::string schema_id = "app.logical_ordered_delivery_migration.v1";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x72u);
+    const mdbxc::sync::NodeId origin_a = make_node(0x73u);
+    const mdbxc::sync::NodeId origin_b = make_node(0x74u);
+    const mdbxc::sync::DbId db_uuid = make_node(0xDDu);
+    mdbxc::sync::LogicalSchemaRecord origin_a_record =
+        make_key_ordered_multi_value_record(dbi_name);
+    origin_a_record.ordered_delivery_origin_node_id = origin_a;
+    mdbxc::sync::LogicalSchemaRecord origin_b_record = origin_a_record;
+    origin_b_record.ordered_delivery_origin_node_id = origin_b;
+
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, db_uuid);
+    engine.register_logical_schema(schema_id, origin_a_record);
+    OrderedDeliveryRequiredAdapter adapter(dbi_name, schema_id);
+    engine.register_logical_adapter(adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope first;
+    first.destination_db_uuid = db_uuid;
+    first.origin_node_id = origin_a;
+    first.origin_sequence = 1u;
+    first.frame_id = "ordered-migration-a-1";
+    first.frame.changes.push_back(mdbxc::sync::LogicalChange(
+        adapter.schema_ref(), 1u, 0u, std::vector<std::uint8_t>()));
+    const mdbxc::sync::LogicalDeliveryAcknowledgement applied =
+        engine.apply_ordered_logical_delivery_envelope(first);
+    MDBXC_TEST_ASSERT(applied.ok);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
+
+    engine.migrate_logical_schema(schema_id, origin_a_record, origin_b_record);
+
+    const mdbxc::sync::LogicalDeliveryAcknowledgement replay =
+        engine.apply_ordered_logical_delivery_envelope(first);
+    MDBXC_TEST_ASSERT(replay.ok);
+    MDBXC_TEST_ASSERT(replay.acknowledged_through == 1u);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
+
+    mdbxc::sync::LogicalDeliveryEnvelope new_from_old_origin = first;
+    new_from_old_origin.origin_sequence = 2u;
+    new_from_old_origin.frame_id = "ordered-migration-a-2";
+    const mdbxc::sync::LogicalDeliveryAcknowledgement rejected =
+        engine.apply_ordered_logical_delivery_envelope(new_from_old_origin);
+    MDBXC_TEST_ASSERT(!rejected.ok);
+    MDBXC_TEST_ASSERT(!rejected.retryable);
+    MDBXC_TEST_ASSERT(adapter.apply_calls == 1u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_multi_value_logical_adapter_applies_multiset_operations() {
     const std::string path =
         "test_key_multi_value_logical_adapter_engine.mdbx";
@@ -4609,6 +4734,8 @@ int main() {
     test_key_table_logical_adapter_rejects_malformed_payload();
     test_logical_adapter_can_require_ordered_delivery();
     test_ordered_logical_delivery_origin_binding_survives_reopen();
+    test_ordered_logical_delivery_exact_retry_survives_reopen_without_adapter();
+    test_ordered_logical_delivery_exact_retry_survives_origin_migration();
     test_key_multi_value_logical_adapter_applies_multiset_operations();
     test_key_multi_value_logical_adapter_rejects_invalid_payload();
     test_key_multi_value_logical_capture_session_commits_typed_writes();

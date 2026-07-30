@@ -615,14 +615,17 @@ implementation of `OrderedDelivery`. `_mdbxc_logical_delivery_order` stores the
 highest committed contiguous sequence for each remote origin. A sequence at or
 below that frontier is a successful no-op only when its exact persisted delivery
 marker matches the incoming frame. A reused sequence with a different frame or
-payload, or a replay whose marker has been pruned, fails closed. A valid duplicate
-acknowledges through the attempted sequence by default, or through the persisted
-frontier when the sender advertises `CumulativeAcknowledgement`. Only the exact
-next sequence reaches schema validation and adapters; a gap is a retryable
-acknowledgement and leaves both user data and markers untouched. The generic
-unordered delivery API remains separate, so applications do not acquire ordering
-merely by changing a call site. Order-state advance, replay marker, and adapter
-mutations commit in one transaction.
+payload, or a replay whose marker has been pruned, fails closed. Exact replay
+validation happens before runtime adapter or schema-origin validation, so a
+committed delivery can acknowledge a lost-ACK retry after restart or an
+administrative ordered-origin migration. A valid duplicate acknowledges through
+the attempted sequence by default, or through the persisted frontier when the
+sender advertises `CumulativeAcknowledgement`. Only the exact next sequence
+reaches schema validation and adapters; a gap is a retryable acknowledgement and
+leaves both user data and markers untouched. The generic unordered delivery API
+remains separate, so applications do not acquire ordering merely by changing a
+call site. Order-state advance, replay marker, and adapter mutations commit in
+one transaction.
 
 `ILogicalDeliveryPeer` and `DirectLogicalDeliveryPeer` provide the capability-
 gated dispatch boundary. `SyncEngine::deliver_pending_logical_deliveries()`
