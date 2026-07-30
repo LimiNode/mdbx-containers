@@ -287,6 +287,37 @@ without the binding require an explicit schema-marker migration. The receiver
 replays changes in that stream order and assigns local prefixes while preserving
 the observable per-key append order.
 
+#### Controlled authoritative-origin cutover
+
+Changing the authoritative origin is an application-coordinated operational
+cutover, not an automatic failover mechanism. The schema-marker migration
+changes only the admission rule for future ordered deliveries; it does not
+move table data, sender outbox entries, receiver frontiers, or replay markers.
+Applications must use this sequence:
+
+1. Quiesce new capture at the old origin and drain its ordered outbox to every
+   replica participating in the dataset. The application chooses the delivery
+   acknowledgement boundary because the engine has no global peer registry or
+   distributed cutover coordinator.
+2. Keep replay markers for the old origin through the application retry
+   horizon. After each replica migrates its marker, a committed exact old-origin
+   delivery can still acknowledge as a no-op, but a new old-origin sequence is
+   rejected. Pruning the exact marker ends that retry guarantee.
+3. On every replica, call `migrate_logical_schema()` with the exact old record
+   and a replacement record whose `ordered_delivery_origin_node_id` names the
+   new origin. The replacement must keep the same schema kind, version, and
+   owned DBI set unless this is a separately designed schema migration.
+4. Only after all intended replicas have committed the replacement marker may
+   the new origin start typed capture and enqueue ordered deliveries. Its stream
+   is independent from the retired origin stream and therefore starts from its
+   own persisted outbox sequence.
+
+Before the first new-origin delivery, an aborted cutover can migrate the marker
+back using the same exact-record discipline. After a new-origin delivery has
+committed, rolling back the marker alone does not undo data or ordering state;
+use a new explicit operational migration plan. The protocol intentionally does
+not accept concurrent old and new origins as a shortcut for availability.
+
 Multiple independent origins writing the same ordered dataset are not supported
 by this contract. A future multi-writer format must carry an explicit globally
 stable element order identity, for example:
