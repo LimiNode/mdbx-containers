@@ -91,15 +91,25 @@ public:
             const std::string& schema_id,
             std::vector<std::string>* apply_order = nullptr)
         : RecordingAdapter(schema_id),
-          m_apply_order(apply_order) {}
+          m_apply_order(apply_order),
+          m_received_original_changes(true) {}
 
     mdbxc::sync::LogicalApplyResult preflight_batch(
             MDBX_txn* txn,
             const mdbxc::sync::LogicalChangeBatchView& changes) const override {
         (void)txn;
         ++m_preflight_batch_calls;
+        if (!m_expected_changes.empty() &&
+            changes.size() != m_expected_changes.size()) {
+            m_received_original_changes = false;
+            return mdbxc::sync::LogicalApplyResult::failure(
+                "unexpected logical batch size");
+        }
         for (std::size_t i = 0u; i < changes.size(); ++i) {
-            m_batch_changes.push_back(&changes[i]);
+            if (!m_expected_changes.empty() &&
+                &changes[i] != m_expected_changes[i]) {
+                m_received_original_changes = false;
+            }
             m_batch_opcodes.push_back(changes[i].opcode);
             for (std::size_t previous = 0u; previous < i; ++previous) {
                 if (changes[previous].opcode == changes[i].opcode) {
@@ -124,7 +134,8 @@ public:
     }
 
     mutable std::size_t m_preflight_batch_calls = 0;
-    mutable std::vector<const mdbxc::sync::LogicalChange*> m_batch_changes;
+    std::vector<const mdbxc::sync::LogicalChange*> m_expected_changes;
+    mutable bool m_received_original_changes;
     mutable std::vector<std::uint32_t> m_batch_opcodes;
 
 private:
@@ -279,6 +290,9 @@ void test_batch_preflight_receives_schema_local_changes() {
     changes.push_back(make_change("schema.first.v1", 1u));
     changes.push_back(make_change("schema.second.v1", 2u));
     changes.push_back(make_change("schema.first.v1", 3u));
+    first.m_expected_changes.push_back(&changes[0]);
+    first.m_expected_changes.push_back(&changes[2]);
+    second.m_expected_changes.push_back(&changes[1]);
 
     const mdbxc::sync::LogicalApplyResult result =
         registry.preflight_then_apply(nullptr, changes);
@@ -290,11 +304,10 @@ void test_batch_preflight_receives_schema_local_changes() {
         first.m_batch_opcodes.size() != 2u ||
         first.m_batch_opcodes[0] != 1u ||
         first.m_batch_opcodes[1] != 3u ||
-        first.m_batch_changes[0] != &changes[0] ||
-        first.m_batch_changes[1] != &changes[2] ||
+        !first.m_received_original_changes ||
         second.m_batch_opcodes.size() != 1u ||
         second.m_batch_opcodes[0] != 2u ||
-        second.m_batch_changes[0] != &changes[1] ||
+        !second.m_received_original_changes ||
         first.m_events.size() != 2u ||
         second.m_events.size() != 1u ||
         first.m_events[0] != "A1" ||
