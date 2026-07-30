@@ -10,6 +10,7 @@
 #include <cstdint>
 #include <map>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -17,8 +18,10 @@
 #include <vector>
 
 #include "../../KeyOrderedMultiValueTable.hpp"
+#include "../ILogicalDeliveryOutbox.hpp"
 #include "../LogicalTableAdapter.hpp"
 #include "../LogicalSchemaValidation.hpp"
+#include "../stores/MetaStore.hpp"
 #include "KeyOrderedMultiValueDestructiveState.hpp"
 
 namespace mdbxc {
@@ -193,6 +196,167 @@ namespace sync {
             return change;
         }
 
+        /// \brief Transaction-bound capture for destructive ordered changes.
+        /// \details Only \c commit_to_outbox() is exposed. This preserves the
+        /// atomic boundary between the physical table, v2 element state, and
+        /// the durable ordered-delivery envelope. An append followed by erase
+        /// of the same new id coalesces to no frame operation while its
+        /// allocated counter remains monotonic.
+        class LogicalCaptureSession {
+        public:
+            explicit LogicalCaptureSession(
+                    const KeyOrderedMultiValueTableDestructiveLogicalAdapter& adapter)
+                : m_adapter(adapter),
+                  m_txn(adapter.m_table.connection()->transaction(
+                      TransactionMode::WRITABLE)),
+                  m_active(true) {
+                const LogicalApplyResult marker_result =
+                    validate_logical_adapter_marker(
+                        m_txn.handle(), adapter.m_table.connection()->env_handle(),
+                        adapter);
+                if (!marker_result.ok) {
+                    throw std::runtime_error(marker_result.error);
+                }
+                const LogicalApplyResult origin_result =
+                    validate_ordered_logical_adapter_origin(
+                        m_txn.handle(), adapter.m_table.connection()->env_handle(),
+                        adapter);
+                if (!origin_result.ok) {
+                    throw std::runtime_error(origin_result.error);
+                }
+                MetaStore meta(adapter.m_table.connection()->env_handle());
+                meta.open(m_txn.handle());
+                m_origin = meta.get_node_id(m_txn.handle());
+                if (compare_node_id(m_origin, make_zero_node()) == 0) {
+                    throw std::runtime_error(
+                        "KeyOrderedMultiValue destructive capture origin is missing");
+                }
+            }
+
+            ~LogicalCaptureSession() noexcept {
+                rollback();
+            }
+
+            LogicalCaptureSession(const LogicalCaptureSession&) = delete;
+            LogicalCaptureSession& operator=(const LogicalCaptureSession&) = delete;
+
+            /// \brief Appends and returns its durable element identity.
+            OrderedElementId append(const KeyT& key, const ValueT& value) {
+                ensure_active();
+                try {
+                    const OrderedElementId id =
+                        m_adapter.m_state.allocate_id(m_txn.handle(), m_origin);
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_adapter.m_table.connection(), m_txn.handle());
+                    m_adapter.append_live_element(m_txn.handle(), id, key, value);
+                    m_pending.push_back(m_adapter.make_append(id, key, value));
+                    return id;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Erases exactly one live value by its immutable identity.
+            void erase(const OrderedElementId& id) {
+                ensure_active();
+                try {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_adapter.m_table.connection(), m_txn.handle());
+                    const std::size_t pending_index = find_pending_append(id);
+                    if (pending_index != m_pending.size()) {
+                        m_adapter.erase_live_element(m_txn.handle(), id, false);
+                        m_pending.erase(m_pending.begin() +
+                            static_cast<std::ptrdiff_t>(pending_index));
+                    } else {
+                        m_adapter.erase_live_element(m_txn.handle(), id, true);
+                        m_pending.push_back(m_adapter.make_erase(id));
+                    }
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Commits captured mutations and delivery atomically.
+            LogicalDeliveryEnvelope commit_to_outbox(
+                    ILogicalDeliveryOutbox& outbox,
+                    const DbId& destination,
+                    const CodecBounds* bounds = nullptr) {
+                ensure_active();
+                try {
+                    LogicalChangeFrame frame;
+                    frame.changes = m_pending;
+                    const LogicalDeliveryEnvelope envelope =
+                        outbox.enqueue_logical_delivery(
+                            m_txn.handle(), destination, frame, bounds);
+                    if (compare_node_id(envelope.origin_node_id, m_origin) != 0) {
+                        throw std::runtime_error(
+                            "Ordered destructive outbox origin does not match capture origin");
+                    }
+                    m_txn.commit();
+                    m_pending.clear();
+                    m_active = false;
+                    return envelope;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            void rollback() noexcept {
+                if (m_active) rollback_and_deactivate();
+            }
+
+            std::size_t pending_size() const {
+                return m_pending.size();
+            }
+
+        private:
+            std::size_t find_pending_append(const OrderedElementId& id) const {
+                for (std::size_t i = 0u; i < m_pending.size(); ++i) {
+                    if (m_pending[i].opcode ==
+                            KeyOrderedMultiValueDestructiveLogicalAppend &&
+                        decode_change(m_pending[i]).id == id) {
+                        return i;
+                    }
+                }
+                return m_pending.size();
+            }
+
+            void rollback_and_deactivate() noexcept {
+                try {
+                    m_pending.clear();
+                } catch (...) {
+                }
+                try {
+                    m_txn.rollback();
+                } catch (...) {
+                }
+                m_active = false;
+            }
+
+            void ensure_active() const {
+                if (!m_active) {
+                    throw std::logic_error(
+                        "KeyOrderedMultiValue destructive capture session is not active");
+                }
+            }
+
+            const KeyOrderedMultiValueTableDestructiveLogicalAdapter& m_adapter;
+            Transaction m_txn;
+            NodeId m_origin;
+            std::vector<LogicalChange> m_pending;
+            bool m_active;
+        };
+
+        std::unique_ptr<LogicalCaptureSession> begin_capture_session() const & {
+            return std::unique_ptr<LogicalCaptureSession>(
+                new LogicalCaptureSession(*this));
+        }
+
+        std::unique_ptr<LogicalCaptureSession> begin_capture_session() const && = delete;
+
         LogicalApplyResult preflight(MDBX_txn* txn,
                                      const LogicalChange& change) const override {
             try {
@@ -270,31 +434,9 @@ namespace sync {
                         throw std::runtime_error(
                             "OrderedElementId conflicts with persisted state");
                     }
-                    m_table.append(decoded.key, decoded.value, txn);
-                    m_state.put_live(txn, decoded.id, decoded.key_bytes,
-                                     decoded.value_bytes);
-                    ensure_key_parity(txn, decoded.key, decoded.key_bytes);
+                    append_live_element(txn, decoded.id, decoded.key, decoded.value);
                 } else {
-                    OrderedElementStateRecord record;
-                    if (!m_state.get(txn, decoded.id, record) || !record.live) {
-                        throw std::runtime_error("Ordered element is not live");
-                    }
-                    const KeyT key = decode_canonical_key(record.key);
-                    const std::vector<OrderedElementId> ids =
-                        m_state.live_ids_for_key(txn, record.key);
-                    std::size_t index = ids.size();
-                    for (std::size_t i = 0u; i < ids.size(); ++i) {
-                        if (ids[i] == decoded.id) {
-                            index = i;
-                            break;
-                        }
-                    }
-                    if (index == ids.size() || !m_table.erase_at(key, index, txn)) {
-                        throw std::runtime_error(
-                            "Ordered element physical value is missing");
-                    }
-                    m_state.tombstone(txn, decoded.id);
-                    ensure_key_parity(txn, key, record.key);
+                    erase_live_element(txn, decoded.id, true);
                 }
                 return LogicalApplyResult::success();
             } catch (const std::exception& e) {
@@ -481,6 +623,46 @@ namespace sync {
                     "OrderedElementId is not live");
             }
             return LogicalApplyResult::success();
+        }
+
+        void append_live_element(MDBX_txn* txn,
+                                 const OrderedElementId& id,
+                                 const KeyT& key,
+                                 const ValueT& value) const {
+            const std::vector<std::uint8_t> key_bytes = KeyCodec::encode(key);
+            const std::vector<std::uint8_t> value_bytes = ValueCodec::encode(value);
+            m_state.verify_introduced_high_water(txn, id.origin);
+            m_table.append(key, value, txn);
+            m_state.put_live(txn, id, key_bytes, value_bytes);
+            ensure_key_parity(txn, key, key_bytes);
+        }
+
+        void erase_live_element(MDBX_txn* txn,
+                                const OrderedElementId& id,
+                                bool preserve_tombstone) const {
+            OrderedElementStateRecord record;
+            if (!m_state.get(txn, id, record) || !record.live) {
+                throw std::runtime_error("Ordered element is not live");
+            }
+            const KeyT key = decode_canonical_key(record.key);
+            const std::vector<OrderedElementId> ids =
+                m_state.live_ids_for_key(txn, record.key);
+            std::size_t index = ids.size();
+            for (std::size_t i = 0u; i < ids.size(); ++i) {
+                if (ids[i] == id) {
+                    index = i;
+                    break;
+                }
+            }
+            if (index == ids.size() || !m_table.erase_at(key, index, txn)) {
+                throw std::runtime_error("Ordered element physical value is missing");
+            }
+            if (preserve_tombstone) {
+                m_state.tombstone(txn, id);
+            } else {
+                m_state.erase_live(txn, id);
+            }
+            ensure_key_parity(txn, key, record.key);
         }
 
         void ensure_key_parity(MDBX_txn* txn,
