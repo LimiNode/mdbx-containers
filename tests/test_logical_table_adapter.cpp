@@ -85,6 +85,50 @@ private:
     std::uint32_t m_schema_version;
 };
 
+class BatchRecordingAdapter : public RecordingAdapter {
+public:
+    explicit BatchRecordingAdapter(
+            const std::string& schema_id,
+            std::vector<std::string>* apply_order = nullptr)
+        : RecordingAdapter(schema_id),
+          m_apply_order(apply_order) {}
+
+    mdbxc::sync::LogicalApplyResult preflight_batch(
+            MDBX_txn* txn,
+            const std::vector<mdbxc::sync::LogicalChange>& changes) const override {
+        (void)txn;
+        ++m_preflight_batch_calls;
+        for (std::size_t i = 0u; i < changes.size(); ++i) {
+            m_batch_opcodes.push_back(changes[i].opcode);
+            for (std::size_t previous = 0u; previous < i; ++previous) {
+                if (changes[previous].opcode == changes[i].opcode) {
+                    return mdbxc::sync::LogicalApplyResult::failure(
+                        "duplicate logical operation in schema batch");
+                }
+            }
+        }
+        return mdbxc::sync::LogicalApplyResult::success();
+    }
+
+    mdbxc::sync::LogicalApplyResult apply(
+            MDBX_txn* txn,
+            const mdbxc::sync::LogicalChange& change) override {
+        const mdbxc::sync::LogicalApplyResult result =
+            RecordingAdapter::apply(txn, change);
+        if (result.ok && m_apply_order != nullptr) {
+            m_apply_order->push_back(
+                std::string("A") + std::to_string(change.opcode));
+        }
+        return result;
+    }
+
+    mutable std::size_t m_preflight_batch_calls = 0;
+    mutable std::vector<std::uint32_t> m_batch_opcodes;
+
+private:
+    std::vector<std::string>* m_apply_order;
+};
+
 class MdbxMutatingAdapter : public RecordingAdapter {
 public:
     MdbxMutatingAdapter(const std::string& schema_id,
@@ -218,6 +262,72 @@ void test_preflight_then_apply_order() {
         adapter.m_applied_opcodes[0] != 1u ||
         adapter.m_applied_opcodes[1] != 2u) {
         throw std::runtime_error("logical preflight/apply order mismatch");
+    }
+}
+
+void test_batch_preflight_receives_schema_local_changes() {
+    mdbxc::sync::LogicalTableRegistry registry;
+    std::vector<std::string> apply_order;
+    BatchRecordingAdapter first("schema.first.v1", &apply_order);
+    BatchRecordingAdapter second("schema.second.v1", &apply_order);
+    registry.register_adapter(&first);
+    registry.register_adapter(&second);
+
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(make_change("schema.first.v1", 1u));
+    changes.push_back(make_change("schema.second.v1", 2u));
+    changes.push_back(make_change("schema.first.v1", 3u));
+
+    const mdbxc::sync::LogicalApplyResult result =
+        registry.preflight_then_apply(nullptr, changes);
+    if (!result.ok ||
+        first.m_preflight_calls != 0u ||
+        second.m_preflight_calls != 0u ||
+        first.m_preflight_batch_calls != 1u ||
+        second.m_preflight_batch_calls != 1u ||
+        first.m_batch_opcodes.size() != 2u ||
+        first.m_batch_opcodes[0] != 1u ||
+        first.m_batch_opcodes[1] != 3u ||
+        second.m_batch_opcodes.size() != 1u ||
+        second.m_batch_opcodes[0] != 2u ||
+        first.m_events.size() != 2u ||
+        second.m_events.size() != 1u ||
+        first.m_events[0] != "A1" ||
+        second.m_events[0] != "A2" ||
+        first.m_events[1] != "A3" ||
+        apply_order.size() != 3u ||
+        apply_order[0] != "A1" ||
+        apply_order[1] != "A2" ||
+        apply_order[2] != "A3") {
+        throw std::runtime_error(
+            "logical batch preflight did not preserve schema and apply order");
+    }
+}
+
+void test_batch_preflight_blocks_all_apply() {
+    mdbxc::sync::LogicalTableRegistry registry;
+    BatchRecordingAdapter accepted("schema.accepted.v1");
+    BatchRecordingAdapter rejected("schema.duplicates.v1");
+    registry.register_adapter(&accepted);
+    registry.register_adapter(&rejected);
+
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(make_change("schema.accepted.v1", 1u));
+    changes.push_back(make_change("schema.duplicates.v1", 7u));
+    changes.push_back(make_change("schema.duplicates.v1", 7u));
+
+    const mdbxc::sync::LogicalApplyResult result =
+        registry.preflight_then_apply(nullptr, changes);
+    if (result.ok ||
+        accepted.m_preflight_batch_calls != 1u ||
+        rejected.m_preflight_batch_calls != 1u ||
+        accepted.m_preflight_calls != 0u ||
+        rejected.m_preflight_calls != 0u ||
+        accepted.m_apply_calls != 0u ||
+        rejected.m_apply_calls != 0u ||
+        rejected.m_batch_opcodes.size() != 2u) {
+        throw std::runtime_error(
+            "logical batch preflight failure reached apply phase");
     }
 }
 
@@ -539,6 +649,8 @@ int main() {
     test_registry_rejects_invalid_adapters();
     test_registry_rejects_duplicate_schema_id();
     test_preflight_then_apply_order();
+    test_batch_preflight_receives_schema_local_changes();
+    test_batch_preflight_blocks_all_apply();
     test_preflight_failure_blocks_apply();
     test_schema_mismatch_blocks_adapter_calls();
     test_schema_version_mismatch_blocks_adapter_calls();

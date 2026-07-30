@@ -8,6 +8,7 @@
 #include <map>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include <mdbx.h>
@@ -39,8 +40,8 @@ namespace sync {
 
     /// \brief Type-erased adapter for one logical table schema.
     /// \details Implementations own table-specific decoding and apply logic.
-    /// The sync core must call \c preflight() for all logical changes in a
-    /// transaction before calling \c apply() for any of them.
+    /// The sync core must validate every schema-local batch in a transaction
+    /// before calling \c apply() for any logical change.
     class ILogicalTableAdapter {
     public:
         virtual ~ILogicalTableAdapter() {}
@@ -74,6 +75,22 @@ namespace sync {
         virtual LogicalApplyResult preflight(
                 MDBX_txn* txn,
                 const LogicalChange& change) const = 0;
+
+        /// \brief Validates all changes for this registered schema at once.
+        /// \details The default preserves existing adapters by calling
+        /// \c preflight() for every change in relative frame order. Adapters
+        /// with frame-local invariants may override this method. The registry
+        /// calls it only after all changes have passed schema validation and
+        /// before any adapter \c apply() call.
+        virtual LogicalApplyResult preflight_batch(
+                MDBX_txn* txn,
+                const std::vector<LogicalChange>& changes) const {
+            for (std::size_t i = 0u; i < changes.size(); ++i) {
+                const LogicalApplyResult result = preflight(txn, changes[i]);
+                if (!result.ok) return result;
+            }
+            return LogicalApplyResult::success();
+        }
 
         /// \brief Applies a logical change after all preflights succeeded.
         virtual LogicalApplyResult apply(
@@ -133,6 +150,9 @@ namespace sync {
                 bool has_ordered_delivery = false) const {
             std::vector<AdapterRegistration> registrations;
             registrations.reserve(changes.size());
+            std::vector<AdapterRegistration> batch_registrations;
+            std::vector<std::vector<LogicalChange> > batches;
+            std::map<std::string, std::size_t> batch_indices;
 
             for (std::size_t i = 0; i < changes.size(); ++i) {
                 AdapterMap::const_iterator it =
@@ -150,11 +170,21 @@ namespace sync {
                         "Logical adapter requires ordered delivery");
                 }
                 registrations.push_back(it->second);
+
+                const std::pair<std::map<std::string, std::size_t>::iterator,
+                                bool> inserted = batch_indices.insert(
+                    std::make_pair(changes[i].schema.schema_id, batches.size()));
+                if (inserted.second) {
+                    batch_registrations.push_back(it->second);
+                    batches.push_back(std::vector<LogicalChange>());
+                }
+                batches[inserted.first->second].push_back(changes[i]);
             }
 
-            for (std::size_t i = 0; i < changes.size(); ++i) {
+            for (std::size_t i = 0u; i < batches.size(); ++i) {
                 const LogicalApplyResult result =
-                    registrations[i].adapter->preflight(txn, changes[i]);
+                    batch_registrations[i].adapter->preflight_batch(
+                        txn, batches[i]);
                 if (!result.ok) return result;
             }
 

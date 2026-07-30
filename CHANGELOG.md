@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
 - Restricted `KeyOrderedMultiValueTableLogicalAdapter` to its fixed
   schema-version-1 append payload contract. Future destructive ordered
   semantics require a separate versioned adapter.
+- Added batch preflight to `ILogicalTableAdapter`. Existing adapters retain
+  per-change preflight behavior by default; adapters with frame-local
+  invariants can validate their complete schema-local batch before apply.
 - Ordered logical schemas now persist an explicit authoritative origin in
   `_mdbxc_sync_schema`. Ordered delivery validates that binding before replay
   marker insertion or adapter callbacks, so independent origins cannot append
