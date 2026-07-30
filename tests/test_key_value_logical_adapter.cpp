@@ -1208,6 +1208,41 @@ void test_ordered_logical_delivery_exact_retry_survives_origin_migration() {
     cleanup(path);
 }
 
+void test_key_ordered_multi_value_logical_adapter_requires_schema_v1() {
+    const std::string path =
+        "test_key_ordered_multi_value_logical_adapter_schema_version.mdbx";
+    const std::string dbi_name = "logical_key_ordered_multi_value";
+    cleanup(path);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> table(conn, dbi_name);
+
+    const IntStringOrderedAdapter current(table,
+                                          "app.ordered_schema_version.v1");
+    MDBXC_TEST_ASSERT(current.schema_ref().schema_version == 1u);
+
+    const std::uint32_t invalid_versions[] = {0u, 2u};
+    for (std::size_t i = 0u;
+         i < sizeof(invalid_versions) / sizeof(invalid_versions[0]); ++i) {
+        bool rejected = false;
+        try {
+            IntStringOrderedAdapter invalid(
+                table, "app.ordered_schema_version.invalid", invalid_versions[i]);
+            (void)invalid;
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        MDBXC_TEST_ASSERT(rejected);
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_key_ordered_multi_value_logical_adapter_replays_append_history() {
     const std::string source_path =
         "test_key_ordered_multi_value_logical_source.mdbx";
@@ -5383,6 +5418,7 @@ int main() {
     test_ordered_logical_delivery_origin_binding_survives_reopen();
     test_ordered_logical_delivery_exact_retry_survives_reopen_without_adapter();
     test_ordered_logical_delivery_exact_retry_survives_origin_migration();
+    test_key_ordered_multi_value_logical_adapter_requires_schema_v1();
     test_key_ordered_multi_value_logical_adapter_replays_append_history();
     test_key_ordered_multi_value_logical_capture_commits_to_outbox();
     test_key_ordered_multi_value_logical_capture_delivers_and_replays();
