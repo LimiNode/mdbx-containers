@@ -96,7 +96,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear under one-writer or causally serialized updates. |
-| `KeyOrderedMultiValueTable` | Append-only logical adapter | `KeyOrderedMultiValueTableLogicalAdapter` captures and applies append-only changes through ordered delivery for the schema marker's one authoritative origin. Destructive operations remain deferred. |
+| `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin; broad key/value/clear capture remains deferred. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
 Do not add `record_op()` paths for unsupported table types without first
@@ -353,9 +353,9 @@ that operation and uses the same typed capture method. Its capture session owns
 one writable transaction and can atomically commit local appends plus an ordered
 outbox envelope through `commit_to_outbox()`.
 
-#### Planned destructive ordered-history contract
+#### Destructive ordered-history contract
 
-This is a versioned design for a later adapter extension. The existing
+The implemented initial destructive extension is versioned separately. The existing
 append-only `KeyOrderedMultiValueTableLogicalAdapter` is logically schema
 version 1 only and must reject every configured version other than 1. The
 destructive `KeyOrderedMultiValueTableDestructiveLogicalAdapter` is logically
@@ -419,8 +419,11 @@ schema version.
 
 The destructive marker has one non-zero `ordered_delivery_origin_node_id`.
 Before allocating an element id, typed capture verifies that the local sync
-`node_id` equals that marker origin. Every received `AppendElement` verifies,
-before adapter mutation, that all three origins are identical:
+`node_id` equals that marker origin. For a received `AppendElement`, the sync
+core first validates `delivery-envelope.origin_node_id` against the marker
+before adapter preflight. Destructive-adapter preflight then validates
+`element-id.origin` against that same marker before mutation. Together these
+checks require all three origins to be identical:
 
 ```text
 element-id.origin == delivery-envelope.origin_node_id
@@ -466,8 +469,8 @@ preflight.
 
 ##### Batch preflight and duplicate identities
 
-Before destructive schema version 2 is implemented, `ILogicalTableAdapter`
-must gain a source-compatible non-pure batch hook:
+Destructive schema version 2 uses the source-compatible non-pure batch hook on
+`ILogicalTableAdapter`:
 
 ```cpp
 virtual LogicalApplyResult preflight_batch(
@@ -512,16 +515,47 @@ of `affected_dbis()`. They are not `_mdbxc_` system DBIs and cannot be shared
 with another logical schema. The marker primary remains the ordered table; the
 marker must contain precisely this canonical three-name set.
 
+Setup calls `SyncEngine::initialize_logical_adapter_schema()` in one writable
+transaction. Without a marker, it requires an empty primary DBI, creates empty
+auxiliary DBIs, and commits the marker. With an existing matching marker, it
+only reopens and validates the existing primary and auxiliary DBIs without
+`MDBX_CREATE`. A missing auxiliary DBI or incompatible persistent flags are
+schema corruption, not an empty state to recreate during setup or delivery.
+Recovery or rebaseline of an existing v2 schema requires a separate explicit
+procedure; rerunning setup is intentionally not a repair operation.
+
+Before constructing a schema-v2 primary table accessor, callers use
+`KeyOrderedMultiValueTableDestructiveLogicalAdapter::open_primary_for_schema()`.
+The helper first reads the persistent marker. It preserves the requested
+`MDBX_CREATE` flag only when the marker is absent; once a matching marker
+exists, it opens the primary without creation. Thus a missing primary DBI
+remains detectable corruption instead of becoming a new empty table. Direct
+`KeyOrderedMultiValueTable` construction remains the ordinary non-schema-bound
+table API and is outside this lifecycle.
+
 `OrderedElementId` has two encodings. Its logical wire encoding is exactly
 `NodeId[16] || sequence-le64`. Its bytewise ordered DBI-key suffix is
 `NodeId[16] || sequence-be64`; the fixed-width `NodeId` bytes precede the
 big-endian sequence so records of one origin retain numeric sequence order.
 The all-zero `NodeId` and `sequence == 0` are invalid. A counter stores the last
 allocated sequence, starts at zero, allocates one through `UINT64_MAX`, and
-fails before mutation on overflow. Remote delivery does not allocate or advance
-the local origin's counter; a baseline migration initializes every origin
-counter to at least the largest assigned id for that origin before the origin is
-allowed to write again.
+fails before mutation on overflow. A separate per-origin introduced high-water
+mark advances with every newly persisted `AppendElement`, remains after a
+tombstone, and ensures new ids are strictly increasing in append order. Local
+allocation uses the larger of its counter and the introduced high-water mark,
+so a later local writer cannot reuse a sequence introduced by remote delivery.
+For every origin that has a persisted Live or Tombstone record, the high-water
+record is mandatory and must be greater than or equal to that origin's largest
+persisted element sequence. Existing-schema verification, local allocation and
+admission of a new append check this invariant before mutation; a missing or
+lower high-water record is corruption, not an implicit zero value.
+
+For every `AppendElement`, the sync core validates the ordered envelope origin
+against the marker before adapter preflight, and destructive-adapter preflight
+validates the id origin against the marker before state or table mutation.
+`EraseElement` deliberately does not impose that admission check: it addresses
+an already persisted id and must remain able to remove legacy elements during a
+controlled migration.
 
 `element-state` uses ascending bytewise keys. It rejects `MDBX_REVERSEKEY`,
 `MDBX_DUPSORT`, `MDBX_INTEGERKEY`, `MDBX_INTEGERDUP`, `MDBX_REVERSEDUP`, and
@@ -531,19 +565,20 @@ reserved key namespace and persistent-layout-v1 values are:
 ```text
 0x00 || NodeId[16]                         -> last-allocated-sequence-le64
 0x01 || NodeId[16] || sequence-be64        -> Live:
-                                                0x01 || logical-key-size-le32
-                                                     || exact-KeyCodec-bytes
-                                                     || logical-value-size-le32
-                                                     || exact-ValueCodec-bytes
-                                                     || local-prefix-be64
-                                             Tombstone:
-                                                0x02
+                                                 0x01 || logical-key-size-le32
+                                                      || exact-KeyCodec-bytes
+                                                      || logical-value-size-le32
+                                                      || exact-ValueCodec-bytes
+                                              Tombstone:
+                                                 0x02
+0x02 || NodeId[16]                         -> introduced-high-water-le64
 ```
 
-The `0x00` counter and `0x01` element namespaces must never be interpreted as
-one another. A counter value must be exactly eight bytes. An element key of any
-other length or tag, a zero node/sequence, a truncated length/value field,
-non-canonical codec bytes, or trailing bytes is corruption and fails closed.
+The `0x00` counter, `0x01` element, and `0x02` introduced-high-water namespaces
+must never be interpreted as one another. Counter and high-water values must be
+exactly eight bytes. An element key of any other length or tag, a zero
+node/sequence, a truncated length/value field, non-canonical codec bytes, or
+trailing bytes is corruption and fails closed.
 Live state stores exactly the canonical logical codec bytes accepted from the
 `AppendElement` payload. Retry equality and the baseline digest compare those
 logical bytes. To validate or mutate the primary DBI, the adapter decodes the
@@ -554,25 +589,22 @@ their only meaning is permanent non-resurrection of the immutable id. Deletion
 metadata, pruning and compaction require a later persistent layout with a
 separately designed global recovery horizon.
 
-`elements-by-key` is a DUPSORT DBI. Its key is the exact canonical serialized
-`KeyT` byte representation used by the primary ordered table; its fixed-format
-duplicate is:
+`elements-by-key` is a DUPSORT DBI. Its key is the exact canonical logical
+`KeyCodec` byte representation. Its fixed-format duplicate is:
 
 ```text
-local-prefix-be64 || NodeId[16] || sequence-be64
+NodeId[16] || sequence-be64
 ```
 
-This makes duplicate enumeration match the table's local presentation order
-without a full-state scan. The DBI must use `MDBX_DUPSORT` with bytewise
-ascending duplicate comparison and must reject `MDBX_INTEGERDUP`,
-`MDBX_REVERSEDUP`, and `MDBX_DUPFIXED`. Its key-comparator flags must exactly
-match the primary table: `MDBX_REVERSEKEY` and validated `MDBX_INTEGERKEY` are
-both inherited when present. Creation/open validates the exact required flags
-through the normal MDBX/ACCEDE path; an existing incompatible DBI is a schema
-error, not a layout to reinterpret. Every index duplicate must be exactly 32
-bytes and contain a non-zero element id.
+For the initial one-origin implementation, the introduced high-water mark
+requires every new append id to be strictly increasing in frame order. Therefore
+bytewise id order is the append order of live elements for one key. The DBI uses
+`MDBX_DUPSORT` with ascending bytewise comparison and rejects incompatible
+duplicate flags. It is a logical index, not a physical mirror of the primary key
+comparator. Every index duplicate is exactly 24 bytes and contains a non-zero
+element id.
 
-After a destructive schema marker is installed, every table mutation must use
+After a destructive schema marker is installed, every local table mutation must use
 the typed adapter session. Mixing direct `KeyOrderedMultiValueTable` mutators
 with the adapter is outside the schema contract. The implementation cannot
 intercept an arbitrary direct raw write at the instant it occurs, but it must
@@ -580,42 +612,51 @@ fail closed before a later destructive mutation can ignore it. For every touched
 key, preflight and post-mutation validation require exact parity:
 
 ```text
-physical duplicate (serialized key, local-prefix, serialized value)
+physical duplicate in current public per-key order
     <=> one Live element-state record whose decoded logical bytes serialize to
-        that key/value and carry the same prefix
-    <=> one elements-by-key duplicate under that serialized key with the same
-        prefix and element id
+        that key/value
+    <=> one elements-by-key duplicate under that canonical logical key with the
+        same element id
 ```
 
+Validation obtains the index side by keyed DUPSORT lookup and the state side by
+a reverse scan of all Live state records for that canonical key; the two exact
+id sets must agree before their values are compared with the physical table.
 An orphan physical row, key-index entry, or Live state record is corruption.
 `clear()` and baseline migration must validate the complete three-DBI parity;
 persistent-layout-v1 does not substitute an unchecked count, generation, or
 hash shortcut. The adapter must never infer or synthesize an element id for a
 raw row during a replicated destructive write.
 
-The table's public representation remains `local-order-prefix || serialized-
-value`. The later implementation must add a narrow table primitive that erases
-one physical duplicate by serialized key plus local-order-prefix. It must not
-implement replicated deletion through `erase_at()` because an index is local and
-can shift after another deletion. An adapter resolves the element through its
-state record, removes that exact local duplicate and the matching key-index
-entry, and changes the state record to a tombstone in the same MDBX transaction.
+The reverse scan is an intentional correctness-first implementation. Its
+per-key cost is linear in all persisted element-state records. A separate
+benchmark-and-bounds follow-up must establish a measured need before adding a
+reverse index or another optimization; this layout must not weaken parity
+validation merely to avoid that scan. High-water integrity validation likewise
+scans the persisted records for one origin before allocation or admission of a
+new id. It remains part of the same benchmark-and-bounds follow-up; no cached
+shortcut may hide durable state corruption.
+
+The initial v2 adapter resolves an element through its persistent state and uses
+the current per-key live-id order to call `erase_at()` inside the same ordered
+delivery transaction. This is valid only for the fixed single-authoritative-
+origin contract: no concurrent writer may shift that order. A future multi-origin
+or baseline-import v2 extension requires a narrow physical-prefix erase primitive
+and a layout revision; it is not implied by this initial adapter.
 
 The versioned logical operations are:
 
 | Operation | Required payload | Apply semantics |
 |-----------|------------------|-----------------|
-| `AppendElement` | Exact schema-v2 payload above | A new id appends once, allocates the replica-local prefix, and persists matching live-state and key-index records. A retry with an existing Live id and byte-identical key/value is a successful no-op after parity validation. The same id with different bytes, or an id already tombstoned, is a permanent conflict. |
-| `EraseElement` | Exact schema-v2 payload above | Delete the exact live occurrence addressed by the state record, remove its key-index record, and persist its tombstone. Replaying an existing tombstone is a successful no-op; an unknown id or a missing physical live record fails closed. |
+| `AppendElement` | Exact schema-v2 payload above | A new id appends once and persists matching live-state and key-index records. An exact committed envelope retry is deduplicated by the delivery layer before adapter callbacks. A later byte-identical append of an already Live id is a successful no-op; a differing payload or a tombstoned id is a permanent conflict. Repeating any `OrderedElementId` within one schema-local batch is malformed and fails during batch preflight. |
+| `EraseElement` | Exact schema-v2 payload above | Delete the exact live occurrence addressed by the state record, remove its key-index record, and persist its tombstone. An exact committed envelope retry is deduplicated before adapter callbacks; an unknown or tombstoned id, or a missing physical live record, fails closed. |
 
 `erase(key, value)`, `erase(key)`, `erase_at(key, index)`, `clear()`, and
-`replace_with()` are not independent broad wire operations in the first
-extension. Typed capture resolves the current local live elements, then emits
-one `EraseElement` for each selected immutable id, in the same ordered frame as
-any replacement `AppendElement` operations. This preserves the current public
-semantics while making every remote deletion addressable. Frame and codec bounds
-remain authoritative: a destructive operation that cannot fit in one bounded
-transaction/frame fails before commit rather than silently becoming partial.
+`replace_with()` are not independent broad wire operations. The initial typed
+capture surface exposes only `append()` and exact `erase(OrderedElementId)`.
+Resolving broad local mutators into bounded `EraseElement` frames is a follow-up
+extension, together with a stronger physical-prefix layout for migration and
+multi-origin histories.
 
 Tombstones are retained indefinitely in the first destructive implementation.
 They must not be pruned by time or by a local outbox acknowledgement. Safe
@@ -660,7 +701,8 @@ id. After the first committed destructive envelope, replacing the marker with
 the append-only version cannot roll back durable element ids or outbox state; it
 requires recovery or re-baselining instead.
 
-Before implementation, add tests for:
+Remaining hardening before this initial v2 adapter can grow into a broader
+destructive surface includes:
 
 - repeated identical values and exact `erase_at` targeting; `erase(key, value)`,
   key erase, clear and replace semantics;
@@ -712,9 +754,9 @@ anchors, see the
   format; deferred until an explicit identity-mapping scheme lands.
 - `KeyMultiValueTable` — DUPSORT duplicate values need the unordered multiset
   model described above before capture can be enabled.
-- `KeyOrderedMultiValueTable` — destructive ordered-history operations remain
-  deferred until the planned persistent element-identity and tombstone contract
-  is implemented and covered by round-trip tests.
+- `KeyOrderedMultiValueTable` — broad destructive local mutators, baseline
+  import, multi-origin history and tombstone compaction remain deferred beyond
+  the implemented single-origin v2 `append` / exact-id `erase` contract.
 - `AnyValueTable` — heterogeneous values need type-tag propagation on the wire.
 - `IdentityProvider` integration in `BaseTable` — declared in v0.1, no
   write path until HashedKeyValueStore.

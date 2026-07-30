@@ -622,6 +622,12 @@ namespace sync {
                 return LogicalApplyResult::failure(
                     "OrderedElementId is not live");
             }
+            if (decoded.is_append) {
+                ensure_key_parity(txn, decoded.key, decoded.key_bytes);
+            } else {
+                ensure_key_parity(txn, decode_canonical_key(record.key),
+                                  record.key);
+            }
             return LogicalApplyResult::success();
         }
 
@@ -669,10 +675,11 @@ namespace sync {
                                const KeyT& key,
                                const std::vector<std::uint8_t>& key_bytes) const {
             const std::vector<ValueT> values = m_table.find(key, txn);
-            const std::vector<OrderedElementId> ids =
+            std::vector<OrderedElementId> ids =
                 m_state.live_ids_for_key(txn, key_bytes);
             std::vector<OrderedElementId> state_ids =
                 m_state.live_state_ids_for_key(txn, key_bytes);
+            std::sort(ids.begin(), ids.end(), OrderedElementIdLess());
             std::sort(state_ids.begin(), state_ids.end(), OrderedElementIdLess());
             if (values.size() != ids.size() || ids != state_ids) {
                 throw std::runtime_error(
