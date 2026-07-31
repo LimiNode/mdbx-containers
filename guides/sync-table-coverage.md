@@ -21,7 +21,7 @@ values during transport, and remote apply replays the captured physical
 | `VectorStore` | Indirectly supported | Captured through its internal `SequenceTable` and `KeyValueTable` members. | The internal table operations are replicated; `VectorStore` has no separate wire type. This raw path requires one authoritative or externally serialized writer per collection. Already-open instances compare `Connection::sync_apply_generation()` and lazily rebuild their RAM index before index-dependent operations after remote apply. A connection apply/read barrier serializes remote `handle_push()` apply commits with cache-backed `VectorStore` operations. Each `VectorStore` instance serializes its own methods; C++17 builds let different readers share the connection read side, while C++11 builds use an exclusive connection mutex fallback. | `test_sync_capture`, `test_sync_replication` |
 | `AnyValueTable<K>` | Deferred | No `ChangeOp` in v0.1. | Not applied by sync as a typed heterogeneous table. | `test_sync_capture` negative coverage |
 | `KeyMultiValueTable<K, V>` | Limited logical adapter | No raw `ChangeOp` in v0.1. | `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear for one writer or causally serialized updates. Raw calls, append, reconcile, range erase, and general multi-writer destructive convergence remain deferred. | `test_key_value_logical_adapter`, `test_sync_capture` negative coverage |
-| `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapters | No raw `ChangeOp` in v0.1. Schema v1 captures append-only changes; schema v2 captures `AppendElement` and exact `EraseElement` by persistent id. | Both schemas require one authoritative ordered origin and fail closed for direct logical frames or unordered delivery. Schema v2 persists element identity and tombstones, and its typed capture atomically commits local mutations plus an ordered outbox envelope. Broad key/value erase and clear have a documented bounded exact-id expansion contract but are not implemented; replace, baseline import, and multi-origin histories remain separately deferred. | `test_key_value_logical_adapter`, `test_key_ordered_multi_value_destructive_state`, `test_key_ordered_multi_value_destructive_adapter` |
+| `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapters | No raw `ChangeOp` in v0.1. Schema v1 captures append-only changes; schema v2 captures `AppendElement` and exact `EraseElement` by persistent id. | Both schemas require one authoritative ordered origin and fail closed for direct logical frames or unordered delivery. Schema v2 persists element identity and tombstones, and its typed capture atomically commits local mutations plus an ordered outbox envelope. Bounded `erase_at`, key/value erase, and clear resolve selectors to exact ids before mutation; replace, baseline import, and multi-origin histories remain separately deferred. | `test_key_value_logical_adapter`, `test_key_ordered_multi_value_destructive_state`, `test_key_ordered_multi_value_destructive_adapter` |
 | `HashedKeyValueStore<K, V, H, Layout>` | Deferred | No `ChangeOp` in v0.1. | Hash-index identity and logical-key mapping are deferred. | `test_sync_capture` negative coverage |
 
 ## Supported Capture Contract
@@ -119,12 +119,12 @@ append-only. Schema v2 adds `AppendElement` and exact `EraseElement` by a
 persistent `OrderedElementId`, with Live/Tombstone state, per-origin introduced
 high-water integrity, and typed capture that atomically commits the mutation and
 an ordered outbox envelope. Both require one authoritative ordered origin.
-Broad key/value erase and clear have a design-only contract with separate
-candidate-expansion and inspected-record budgets. It expands a complete
+Bounded `erase_at`, key/value erase, and clear expand a complete
 canonical-codec selector result into deterministic exact-id operations before
-mutation; no broad wire opcode or capture method is implemented. Replace,
-baseline import, multi-origin histories, tombstone pruning, and compaction
-remain deferred. The transaction wrapper's native
+mutation. Candidate-expansion and inspected-record budgets apply to the entire
+operation, including remaining mutation-time reads. Replace, baseline import,
+multi-origin histories, tombstone pruning, and compaction remain deferred. The
+transaction wrapper's native
 commit-error cleanup path has deterministic test-only coverage after ordered
 capture preparation: the injected path aborts the native handle before
 returning an MDBX error, notifies the attached capture sink of the discard, and
