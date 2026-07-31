@@ -3,10 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
-- Added bounded `erase_at()`, `erase_value()`, and `erase_key()` selector
+- Added bounded `erase_at()`, `erase_value()`, `erase_key()`, and `clear()` selector
   expansion to destructive ordered capture. They resolve canonical logical-codec
   selectors to exact immutable ids before mutation and emit only `EraseElement`
-  operations; `clear()` remains a separate pending operation.
+  operations.
 - Added persistent `OrderedElementId` and state-store primitives for the
   initial destructive `KeyOrderedMultiValueTable` logical schema v2.
 - Added a schema-version-2 destructive logical adapter for

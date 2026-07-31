@@ -722,6 +722,29 @@ namespace mdbxc {
             }
         }
 
+        template<typename BeforeInspect>
+        void db_collect_entries(std::vector<value_type>& entries,
+                                MDBX_txn* txn,
+                                BeforeInspect before_inspect) const {
+            CursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
+                       "Failed to open MDBX cursor");
+
+            MDBX_val db_key;
+            MDBX_val db_val;
+            int rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_FIRST);
+            while (rc == MDBX_SUCCESS) {
+                before_inspect();
+                entries.push_back(value_type(
+                    deserialize_key<KeyT>(db_key),
+                    deserialize_value<ValueT>(strip_order(db_val))));
+                rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_NEXT);
+            }
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "Failed to read ordered multi-value records");
+            }
+        }
+
         bool db_contains_key(const KeyT& key, MDBX_txn* txn) const {
             SerializeScratch sc_key;
             MDBX_val db_key = serialize_key<Options::safe_integer_key>(key, sc_key);

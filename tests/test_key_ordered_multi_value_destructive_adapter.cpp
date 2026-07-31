@@ -674,6 +674,124 @@ void test_destructive_capture_bounds_post_selection_mutation_scans() {
     cleanup(path);
 }
 
+void test_destructive_capture_clears_bounded_tombstone_heavy_table() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_broad_clear.mdbx";
+    const std::string primary = "ordered_clear_values";
+    const std::string state = "ordered_clear_state";
+    const std::string by_key = "ordered_clear_by_key";
+    const std::string schema = "app.ordered_clear.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x64u);
+    const mdbxc::sync::DbId local_db = make_node(0xA4u);
+    const mdbxc::sync::DbId destination = make_node(0xB4u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+
+    mdbxc::sync::OrderedElementId first;
+    mdbxc::sync::OrderedElementId second;
+    mdbxc::sync::OrderedElementId third;
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        first = session->append(1, "first");
+        second = session->append(1, "second");
+        third = session->append(2, "third");
+        session->append(2, "fourth");
+        session->append(3, "fifth");
+        session->commit_to_outbox(engine, destination);
+    }
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->erase(first);
+        session->erase(second);
+        session->erase(third);
+        session->commit_to_outbox(engine, destination);
+    }
+    if (table.count() != 2u || table.find(2).size() != 1u ||
+        table.find(3).size() != 1u) {
+        throw std::runtime_error("ordered clear tombstone fixture is invalid");
+    }
+
+    const mdbxc::sync::BroadEraseBounds bounds = { 8u, 256u };
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        if (session->clear(bounds) != 2u) {
+            throw std::runtime_error("ordered broad clear selected the wrong ids");
+        }
+        const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+            session->commit_to_outbox(engine, destination);
+        if (envelope.frame.changes.size() != 2u) {
+            throw std::runtime_error("ordered broad clear emitted the wrong changes");
+        }
+        for (std::size_t i = 0u; i < envelope.frame.changes.size(); ++i) {
+            if (envelope.frame.changes[i].opcode !=
+                mdbxc::sync::KeyOrderedMultiValueDestructiveLogicalErase) {
+                throw std::runtime_error("ordered broad clear emitted a non-erase");
+            }
+        }
+    }
+    if (table.count() != 0u) {
+        throw std::runtime_error("ordered broad clear left a live physical value");
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(4, "survives");
+        session->commit_to_outbox(engine, destination);
+    }
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::BroadEraseBounds no_selection = { 0u, 256u };
+        bool rejected = false;
+        try {
+            session->clear(no_selection);
+        } catch (const std::length_error&) {
+            rejected = true;
+        }
+        const std::vector<std::string> values = table.find(4);
+        if (!rejected || values.size() != 1u || values[0] != "survives") {
+            throw std::runtime_error(
+                "ordered broad clear selection failure did not roll back");
+        }
+    }
+
+    table.append(5, "untracked");
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        bool rejected = false;
+        try {
+            session->clear(bounds);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected || table.find(4).size() != 1u ||
+            table.find(5).size() != 1u) {
+            throw std::runtime_error(
+                "ordered broad clear accepted untracked physical data");
+        }
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 void test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates() {
     const std::string path = "test_key_ordered_multi_value_destructive_replay.mdbx";
     const std::string primary = "ordered_replay_values";
@@ -1346,6 +1464,7 @@ int main() {
     test_destructive_capture_rolls_back_injected_native_commit_failure();
     test_destructive_capture_resolves_bounded_broad_erasure();
     test_destructive_capture_bounds_post_selection_mutation_scans();
+    test_destructive_capture_clears_bounded_tombstone_heavy_table();
     test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates();
     test_destructive_preflight_rejects_untracked_physical_value();
     test_destructive_preflight_rejects_state_index_corruption();
