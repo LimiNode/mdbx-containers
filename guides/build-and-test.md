@@ -161,8 +161,8 @@ parameters, CSV columns, and measurement guidelines.
 `ordered_destructive_state_benchmark` is a separate manual CSV baseline for the
 full destructive ordered-state reverse scan and per-origin high-water scan. It
 accepts optional positional `origins elements_per_origin key_count iterations`
-arguments; use it before proposing a cache, index, or bound for those
-correctness paths.
+arguments plus optional `tombstones_per_origin`; use it before proposing a
+cache, index, or bound for those correctness paths.
 The benchmark supports named presets:
 
 ```bash

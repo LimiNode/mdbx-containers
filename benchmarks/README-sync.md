@@ -147,12 +147,14 @@ Use identical arguments and build settings when comparing revisions:
 cmake --build tmp/build-bench --target ordered_destructive_state_benchmark
 tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark
 tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark \
-    16 512 32 100
+    16 512 32 100 384
 ```
 
 The optional positional arguments are `origins`, `elements_per_origin`,
-`key_count`, and `iterations`. CSV rows separately report `element_records` and
-`state_records`; the latter includes the allocation counter and introduced
-high-water record for each origin. `elapsed_ms` includes read-transaction open,
-the measured scan, and rollback. Use results from representative workloads
-before adding an index, cache, or fixed limit to either correctness path.
+`key_count`, `iterations`, and `tombstones_per_origin`. The first
+`tombstones_per_origin` ids of every origin are persisted as Tombstone records;
+the default is zero. CSV rows separately report total, Live, and Tombstone
+element records, the full state-record count, and live DUPSORT index records.
+`elapsed_ms` includes read-transaction open, the measured scan, and rollback.
+Use results from representative workloads before adding an index, cache, or
+fixed limit to either correctness path.

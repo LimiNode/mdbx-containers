@@ -153,13 +153,15 @@ tmp/build-bench/bin/benchmarks/sync_tick_hub_benchmark \
 cmake --build tmp/build-bench --target ordered_destructive_state_benchmark
 tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark
 tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark \
-    16 512 32 100
+    16 512 32 100 384
 ```
 
 Необязательные позиционные аргументы: `origins`, `elements_per_origin`,
-`key_count` и `iterations`. CSV отдельно содержит `element_records` и
-`state_records`; второе значение включает allocation counter и introduced
-high-water record каждого origin. `elapsed_ms` включает открытие read
-transaction, измеряемое сканирование и rollback. Результаты representative
-workloads нужны до добавления index, cache или фиксированного лимита к любому
-из путей корректности.
+`key_count`, `iterations` и `tombstones_per_origin`. Первые
+`tombstones_per_origin` id каждого origin сохраняются как Tombstone records;
+по умолчанию значение равно нулю. CSV отдельно содержит общее число, Live и
+Tombstone element records, полное число state records и Live DUPSORT index
+records. `elapsed_ms` включает открытие read transaction, измеряемое
+сканирование и rollback. Результаты representative workloads нужны до
+добавления index, cache или фиксированного лимита к любому из путей
+корректности.
