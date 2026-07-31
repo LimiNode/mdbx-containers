@@ -114,8 +114,11 @@ delivery. The logical core uses the following contracts:
   `KeyOrderedMultiValueTableDestructiveLogicalAdapter` applies schema-v2
   `AppendElement` and exact `EraseElement` changes with persistent element
   identity and tombstones; its typed capture session atomically commits local
-  mutations and an ordered outbox envelope. Broad destructive mutators remain
-  deferred. Transferring the authoritative origin is an
+  mutations and an ordered outbox envelope. Broad key/value erase and clear
+  have a design-only contract with separate candidate and inspected-record
+  bounds plus canonical logical-codec selector semantics; their capture
+  methods remain unimplemented. Replace and other broad state construction
+  remain separately deferred. Transferring the authoritative origin is an
   application-coordinated schema-marker cutover; it is not automatic failover
   and requires old-outbox drain plus replay-marker retention through the chosen
   retry horizon.
@@ -150,10 +153,10 @@ tables.
   `SnapshotRequired` as automatically recoverable by sync itself.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
   multi-writer convergence for `KeyMultiValueTable`.
-- Extend schema-v2 `KeyOrderedMultiValueTable<K, V>` beyond exact element
-  operations only after broad mutators have bounded `EraseElement` frame
-  semantics, plus a persistent-layout design for baseline import and
-  multi-origin histories.
+- Implement schema-v2 broad key/value erase and clear only through the
+  documented selector-to-`EraseElement` contract with independent candidate
+  and inspected-record budgets. Design `replace_with()`, baseline import, and
+  multi-origin histories separately; none is implied by bounded erasure.
 - Evaluate whether any `KeyMultiValueTable` framing ideas carry over to
   `AnyValueTable` and `HashedKeyValueStore`.
 
