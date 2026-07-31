@@ -20,7 +20,7 @@ values during transport, and remote apply replays the captured physical
 | `SequenceTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; append, `insert_or_assign`, erase, and clear paths are implemented. | Stable `uint64_t` sequence keys and value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
 | `VectorStore` | Indirectly supported | Captured through its internal `SequenceTable` and `KeyValueTable` members. | The internal table operations are replicated; `VectorStore` has no separate wire type. This raw path requires one authoritative or externally serialized writer per collection. Already-open instances compare `Connection::sync_apply_generation()` and lazily rebuild their RAM index before index-dependent operations after remote apply. A connection apply/read barrier serializes remote `handle_push()` apply commits with cache-backed `VectorStore` operations. Each `VectorStore` instance serializes its own methods; C++17 builds let different readers share the connection read side, while C++11 builds use an exclusive connection mutex fallback. | `test_sync_capture`, `test_sync_replication` |
 | `AnyValueTable<K>` | Deferred | No `ChangeOp` in v0.1. | Not applied by sync as a typed heterogeneous table. | `test_sync_capture` negative coverage |
-| `KeyMultiValueTable<K, V>` | Limited logical adapter | No raw `ChangeOp` in v0.1. | `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear for one writer or causally serialized updates. Raw calls, append, reconcile, range erase, and general multi-writer destructive convergence remain deferred. | `test_key_value_logical_adapter`, `test_sync_capture` negative coverage |
+| `KeyMultiValueTable<K, V>` | Limited logical adapter | No raw `ChangeOp` in v0.1. | Schema v1 explicitly captures unordered insert, key erase, all-matching-value erase, and clear. Schema v2 additionally captures exact-one erase and typed `reconcile()` for one writer or causally serialized updates. Raw calls, append, range erase, and general multi-writer destructive convergence remain deferred. | `test_key_value_logical_adapter`, `test_sync_capture` negative coverage |
 | `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapters | No raw `ChangeOp` in v0.1. Schema v1 captures append-only changes; schema v2 captures `AppendElement` and exact `EraseElement` by persistent id. | Both schemas require one authoritative ordered origin and fail closed for direct logical frames or unordered delivery. Schema v2 persists element identity and tombstones, and its typed capture atomically commits local mutations plus an ordered outbox envelope. Bounded `erase_at`, key/value erase, and clear resolve selectors to exact ids before mutation; replace, baseline import, and multi-origin histories remain separately deferred. | `test_key_value_logical_adapter`, `test_key_ordered_multi_value_destructive_state`, `test_key_ordered_multi_value_destructive_adapter` |
 | `HashedKeyValueStore<K, V, H, Layout>` | Deferred | No `ChangeOp` in v0.1. | Hash-index identity and logical-key mapping are deferred. | `test_sync_capture` negative coverage |
 
@@ -104,11 +104,8 @@ unordered multiset model. Repeated identical `(key, value)` pairs preserve
 multiplicity under single-writer or causally serialized updates. Raw v0.1
 capture, bulk/reconcile/range capture, and general concurrent destructive
 updates remain deferred.
-Before adding another `KeyMultiValueTableLogicalAdapter` opcode or capture
-method, expand its malformed-payload regression matrix to cover truncated
-pair payloads, oversized declared lengths, trailing bytes, payload-bearing
-clear, and unknown opcodes. This is deferred coverage work for the next
-logical-adapter extension, not a claim that those operations are supported.
+The adapter rejects truncated pair payloads, oversized declared lengths,
+trailing bytes, payload-bearing clear, and unknown opcodes before mutation.
 The detailed deferred contract lives in
 `include/mdbx_containers/sync/DESIGN.md`: it requires explicit multivalue wire
 sub-operations and receiver-side logical apply helpers before capture can be

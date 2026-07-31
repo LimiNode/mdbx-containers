@@ -3,6 +3,11 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
+
+- Added `KeyMultiValueTable::erase_one()` and schema-v2 logical
+  `EraseOneValue`. Schema v2 typed multivalue capture supports
+  multiplicity-preserving `reconcile()` by publishing exact surplus deletes and
+  missing inserts; schema v1 remains limited to its original operation set.
 - Added bounded `erase_at()`, `erase_value()`, `erase_key()`, and `clear()` selector
   expansion to destructive ordered capture. They resolve canonical logical-codec
   selectors to exact immutable ids before mutation and emit only `EraseElement`

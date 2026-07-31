@@ -1109,6 +1109,28 @@ namespace mdbxc {
             return erase(key, value, txn.handle());
         }
 
+        /// \brief Removes one matching key-value pair.
+        /// \param key Key to remove from.
+        /// \param value One matching value to remove.
+        /// \param txn Optional transaction handle.
+        /// \return \c true if one pair was removed.
+        /// \details Repeated identical pairs remain stored separately. This
+        /// method removes at most one of them.
+        bool erase_one(const KeyT& key, const ValueT& value,
+                       MDBX_txn* txn = nullptr) {
+            bool removed = false;
+            with_transaction([this, &key, &value, &removed](MDBX_txn* t) {
+                removed = db_erase_one_pair(key, value, t);
+            }, TransactionMode::WRITABLE, txn);
+            return removed;
+        }
+
+        /// \brief Removes one matching key-value pair in an active transaction.
+        bool erase_one(const KeyT& key, const ValueT& value,
+                       const Transaction& txn) {
+            return erase_one(key, value, txn.handle());
+        }
+
         /// \brief Removes all pairs.
         /// \param txn Optional transaction handle.
         void clear(MDBX_txn* txn = nullptr) {
@@ -1972,6 +1994,36 @@ namespace mdbxc {
                 check_mdbx(rc, "Failed to scan duplicate values");
             }
             return removed;
+        }
+
+        bool db_erase_one_pair(const KeyT& key, const ValueT& value,
+                               MDBX_txn* txn) {
+            CursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
+                       "Failed to open MDBX cursor");
+
+            SerializeScratch sc_key;
+            SerializeScratch sc_value;
+            MDBX_val db_key = serialize_key<Options::safe_integer_key>(key, sc_key);
+            MDBX_val raw_value = make_comparable_value(value, sc_value);
+            MDBX_val db_val;
+            int rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_SET_KEY);
+            if (rc == MDBX_NOTFOUND) {
+                return false;
+            }
+            check_mdbx(rc, "Failed to seek key");
+            while (rc == MDBX_SUCCESS) {
+                if (stored_value_matches(db_val, raw_value)) {
+                    check_mdbx(mdbx_cursor_del(cursor.get(), MDBX_CURRENT),
+                               "Failed to erase duplicate value");
+                    return true;
+                }
+                rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_NEXT_DUP);
+            }
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "Failed to scan duplicate values");
+            }
+            return false;
         }
 
         void db_clear(MDBX_txn* txn) {
