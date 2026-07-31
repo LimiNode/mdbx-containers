@@ -158,3 +158,9 @@ element records, the full state-record count, and live DUPSORT index records.
 `elapsed_ms` includes read-transaction open, the measured scan, and rollback.
 Use results from representative workloads before adding an index, cache, or
 fixed limit to either correctness path.
+
+Bounded destructive capture now uses prevalidated exact ids for its mutation
+phase and does not repeat this full reverse scan for every selected id. The
+corresponding regression retains a tombstone-heavy state with one Live element
+and a deliberately tight scan budget; use this benchmark to compare larger
+state and tombstone distributions before changing that trusted path.

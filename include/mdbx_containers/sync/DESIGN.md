@@ -683,6 +683,11 @@ every current value. `clear()` scans and reconciles the complete bounded
 primary/state/key-index set, validates introduced high-water marks for every
 Live or Tombstone origin, and admits each Live id before it materializes the
 complete candidate set or creates the first tombstone.
+
+After that prevalidation, bounded selector mutation reuses resolved key/id
+metadata and deletes positions in descending per-key order. It does not repeat
+the full reverse state scan after each id. Physical cursor reads and all state
+or index point reads remain part of the same `max_scanned_records` budget.
 Committing a session with no pending changes retains the existing empty-envelope
 semantics and consumes one ordered delivery sequence.
 

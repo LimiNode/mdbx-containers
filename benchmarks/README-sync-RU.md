@@ -165,3 +165,10 @@ records. `elapsed_ms` включает открытие read transaction, изм
 сканирование и rollback. Результаты representative workloads нужны до
 добавления index, cache или фиксированного лимита к любому из путей
 корректности.
+
+Bounded destructive capture теперь использует предварительно проверенные exact
+id на стадии mutation и не повторяет это полное reverse-сканирование для
+каждого выбранного id. Соответствующий regression сохраняет state с большим
+числом tombstone и одним Live element при намеренно жёстком scan budget;
+используйте этот benchmark для сравнения более крупных распределений state и
+tombstone перед изменением trusted path.

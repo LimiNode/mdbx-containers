@@ -586,10 +586,102 @@ namespace sync {
                 }
             }
 
+            struct TrustedErase {
+                OrderedElementId id;
+                std::vector<std::uint8_t> key;
+                std::size_t physical_index;
+            };
+
+            static bool trusted_erase_position_descending(
+                    const TrustedErase& lhs,
+                    const TrustedErase& rhs) {
+                return lhs.physical_index > rhs.physical_index;
+            }
+
+            static bool trusted_erase_id_less(const TrustedErase& lhs,
+                                              const TrustedErase& rhs) {
+                return OrderedElementIdLess()(lhs.id, rhs.id);
+            }
+
             void erase_selected(const std::vector<OrderedElementId>& ids,
                                 OrderedElementCandidateSet* candidates) {
+                if (candidates == nullptr) {
+                    throw std::logic_error(
+                        "Trusted ordered erasure requires bounded prevalidation");
+                }
+                std::vector<TrustedErase> resolved;
+                std::vector<std::vector<std::uint8_t> > keys;
                 for (std::size_t i = 0u; i < ids.size(); ++i) {
-                    erase_resolved(ids[i], candidates);
+                    OrderedElementStateRecord record;
+                    if (!m_adapter.m_state.get(
+                            m_txn.handle(), ids[i], record, candidates) ||
+                        !record.live) {
+                        throw std::runtime_error(
+                            "Prevalidated ordered element is not live");
+                    }
+                    TrustedErase entry;
+                    entry.id = ids[i];
+                    entry.key = record.key;
+                    entry.physical_index = 0u;
+                    resolved.push_back(entry);
+                    if (find_key_group(keys, record.key) == keys.size()) {
+                        keys.push_back(record.key);
+                    }
+                }
+
+                Connection::SyncCaptureSuppressionScope suppress_capture(
+                    *m_adapter.m_table.connection(), m_txn.handle());
+                for (std::size_t key_index = 0u;
+                     key_index < keys.size(); ++key_index) {
+                    const KeyT key = decode_canonical_key(keys[key_index]);
+                    const std::vector<OrderedElementId> live_ids =
+                        m_adapter.m_state.live_ids_for_key(
+                            m_txn.handle(), keys[key_index], candidates);
+                    std::vector<TrustedErase> group;
+                    for (std::size_t i = 0u; i < resolved.size(); ++i) {
+                        if (resolved[i].key != keys[key_index]) continue;
+                        std::size_t position = live_ids.size();
+                        for (std::size_t j = 0u; j < live_ids.size(); ++j) {
+                            if (live_ids[j] == resolved[i].id) {
+                                position = j;
+                                break;
+                            }
+                        }
+                        if (position == live_ids.size()) {
+                            throw std::runtime_error(
+                                "Prevalidated ordered element index is missing id");
+                        }
+                        resolved[i].physical_index = position;
+                        group.push_back(resolved[i]);
+                    }
+                    std::sort(group.begin(), group.end(),
+                              trusted_erase_position_descending);
+                    for (std::size_t i = 0u; i < group.size(); ++i) {
+                        if (!m_adapter.m_table.db_erase_at(
+                                key, group[i].physical_index, m_txn.handle(),
+                                [candidates]() {
+                                    candidates->inspect_record();
+                                })) {
+                            throw std::runtime_error(
+                                "Prevalidated ordered element physical value is missing");
+                        }
+                    }
+                }
+
+                std::sort(resolved.begin(), resolved.end(), trusted_erase_id_less);
+                for (std::size_t i = 0u; i < resolved.size(); ++i) {
+                    const std::size_t pending_index =
+                        find_pending_append(resolved[i].id);
+                    if (pending_index != m_pending.size()) {
+                        m_adapter.m_state.erase_live_prevalidated(
+                            m_txn.handle(), resolved[i].id, resolved[i].key);
+                        m_pending.erase(m_pending.begin() +
+                            static_cast<std::ptrdiff_t>(pending_index));
+                    } else {
+                        m_adapter.m_state.tombstone_prevalidated(
+                            m_txn.handle(), resolved[i].id, resolved[i].key);
+                        m_pending.push_back(m_adapter.make_erase(resolved[i].id));
+                    }
                 }
             }
 
