@@ -64,7 +64,8 @@ namespace sync {
                 throw std::invalid_argument(
                     "KeyMultiValueTableLogicalAdapter DBI name is empty");
             }
-            if (m_schema_version != 1u && m_schema_version != 2u) {
+            if (m_schema_version != 1u && m_schema_version != 2u &&
+                m_schema_version != 3u) {
                 throw std::invalid_argument(
                     "KeyMultiValueTableLogicalAdapter schema version is unsupported");
             }
@@ -123,8 +124,9 @@ namespace sync {
         /// \details The session owns a writable transaction and suppresses raw
         /// capture for its mutations. It captures only unordered multiset
         /// operations exposed by this class. Direct table calls, bulk table
-        /// APIs, and range erasure remain local-only. Typed schema-v2
-        /// \c reconcile() is captured as exact multiset deltas.
+        /// APIs remain local-only. Typed schema-v2 \c reconcile() is captured
+        /// as exact multiset deltas. Schema-v3 \c erase_range() captures a
+        /// bounded range as exact \c EraseKey changes.
         /// The adapter, table, and connection referenced by the adapter must
         /// outlive the session. An exception after physical mutation, outbox
         /// enqueue, or native commit processing begins requests rollback of
@@ -166,6 +168,41 @@ namespace sync {
                         m_adapter.m_table.insert(
                             key, value, m_txn.handle());
                     });
+            }
+
+            template<template<class...> class ContainerT>
+            void append(const ContainerT<KeyT, ValueT>& values) {
+                std::vector<typename table_type::value_type> copy;
+                for (typename ContainerT<KeyT, ValueT>::const_iterator it =
+                         values.begin(); it != values.end(); ++it) {
+                    copy.push_back(typename table_type::value_type(
+                        it->first, it->second));
+                }
+                append(copy);
+            }
+
+            void append(const std::vector<typename table_type::value_type>& values) {
+                ensure_active();
+                try {
+                    std::vector<LogicalChange> changes;
+                    changes.reserve(values.size());
+                    std::size_t i = 0u;
+                    for (; i < values.size(); ++i) {
+                        changes.push_back(m_adapter.make_insert_one(
+                            values[i].first, values[i].second));
+                    }
+                    m_pending.reserve(m_pending.size() + changes.size());
+                    for (i = 0u; i < values.size(); ++i) {
+                        m_pending.push_back(changes[i]);
+                        Connection::SyncCaptureSuppressionScope suppress_capture(
+                            *m_adapter.m_table.connection(), m_txn.handle());
+                        m_adapter.m_table.insert(
+                            values[i].first, values[i].second, m_txn.handle());
+                    }
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
             }
 
             bool erase(const KeyT& key) {
@@ -224,6 +261,63 @@ namespace sync {
                         m_pending.resize(previous_size);
                     }
                     return removed;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Erases an inclusive key range through bounded typed capture.
+            /// \param from_key First key in the table's key order.
+            /// \param to_key Last key in the table's key order.
+            /// \param max_pairs Maximum physical pairs selected by the range.
+            /// \return Number of local physical pairs removed.
+            /// \throws std::length_error if more than \p max_pairs pairs match.
+            /// \details The session builds exact \c EraseKey changes for all
+            /// selected distinct keys before its first table mutation.
+            std::size_t erase_range(const KeyT& from_key,
+                                    const KeyT& to_key,
+                                    std::size_t max_pairs) {
+                ensure_active();
+                try {
+                    m_adapter.require_schema_v3();
+                    std::vector<RangeEraseKey> plan;
+                    std::vector<std::uint8_t> previous_payload;
+                    bool has_previous = false;
+                    std::size_t selected_pairs = 0u;
+                    m_adapter.m_table.for_each_range(
+                        from_key, to_key,
+                        [this, &plan, &previous_payload, &has_previous,
+                         &selected_pairs, &max_pairs](const KeyT& key,
+                                                      const ValueT&) -> bool {
+                            if (selected_pairs >= max_pairs) {
+                                throw std::length_error(
+                                    "KeyMultiValue range exceeds max_pairs");
+                            }
+                            ++selected_pairs;
+                            const LogicalChange change =
+                                m_adapter.make_erase_key(key);
+                            if (!has_previous ||
+                                change.payload != previous_payload) {
+                                plan.push_back(RangeEraseKey(key, change));
+                                previous_payload = change.payload;
+                                has_previous = true;
+                            }
+                            return true;
+                        }, m_txn.handle());
+                    m_pending.reserve(m_pending.size() + plan.size());
+                    std::size_t i = 0u;
+                    for (; i < plan.size(); ++i) {
+                        m_pending.push_back(plan[i].change);
+                        Connection::SyncCaptureSuppressionScope suppress_capture(
+                            *m_adapter.m_table.connection(), m_txn.handle());
+                        if (!m_adapter.m_table.erase(
+                                plan[i].key, m_txn.handle())) {
+                            throw std::logic_error(
+                                "KeyMultiValue range lost a planned key");
+                        }
+                    }
+                    return selected_pairs;
                 } catch (...) {
                     rollback_and_deactivate();
                     throw;
@@ -364,6 +458,15 @@ namespace sync {
             }
 
         private:
+            struct RangeEraseKey {
+                RangeEraseKey(const KeyT& key_value,
+                              const LogicalChange& change_value)
+                    : key(key_value), change(change_value) {}
+
+                KeyT key;
+                LogicalChange change;
+            };
+
             struct ReconcileDelta {
                 ReconcileDelta(const LogicalChange& change_value,
                                const typename table_type::value_type& pair_value,
@@ -575,9 +678,16 @@ namespace sync {
         }
 
         void require_schema_v2() const {
-            if (m_schema_version != 2u) {
+            if (m_schema_version != 2u && m_schema_version != 3u) {
                 throw std::logic_error(
-                    "KeyMultiValue exact-one erase requires schema version 2");
+                    "KeyMultiValue exact-one erase requires schema version 2 or 3");
+            }
+        }
+
+        void require_schema_v3() const {
+            if (m_schema_version != 3u) {
+                throw std::logic_error(
+                    "KeyMultiValue range erase requires schema version 3");
             }
         }
 
@@ -588,9 +698,9 @@ namespace sync {
                     change.opcode == KeyMultiValueLogicalEraseAllValues ||
                     change.opcode == KeyMultiValueLogicalEraseOneValue) {
                     if (change.opcode == KeyMultiValueLogicalEraseOneValue &&
-                        m_schema_version != 2u) {
+                        m_schema_version != 2u && m_schema_version != 3u) {
                         return LogicalApplyResult::failure(
-                            "KeyMultiValue exact-one erase requires schema version 2");
+                            "KeyMultiValue exact-one erase requires schema version 2 or 3");
                     }
                     (void)decode_pair(change.payload);
                     return LogicalApplyResult::success();
