@@ -1967,16 +1967,48 @@ void test_key_multi_value_logical_adapter_rejects_invalid_payload() {
     IntStringMultiAdapter adapter(table, schema_id);
     engine.register_logical_adapter(adapter);
 
-    mdbxc::sync::LogicalChange malformed =
+    table.insert(77, "keep");
+
+    std::vector<mdbxc::sync::LogicalChange> malformed_changes;
+    mdbxc::sync::LogicalChange truncated_length =
         adapter.make_insert_one(5, "five");
-    malformed.payload.push_back(0xffu);
-    std::vector<mdbxc::sync::LogicalChange> changes;
-    changes.push_back(malformed);
-    const mdbxc::sync::LogicalApplyResult result =
-        engine.apply_logical_changes(changes);
-    MDBXC_TEST_ASSERT(!result.ok);
-    MDBXC_TEST_ASSERT(result.error.find("payload") != std::string::npos);
-    MDBXC_TEST_ASSERT(table.count() == 0u);
+    truncated_length.payload.resize(3u);
+    malformed_changes.push_back(truncated_length);
+
+    mdbxc::sync::LogicalChange truncated_pair =
+        adapter.make_insert_one(5, "five");
+    truncated_pair.payload.pop_back();
+    malformed_changes.push_back(truncated_pair);
+
+    mdbxc::sync::LogicalChange oversized_blob =
+        adapter.make_insert_one(5, "five");
+    oversized_blob.payload.assign(4u, 0xffu);
+    malformed_changes.push_back(oversized_blob);
+
+    mdbxc::sync::LogicalChange trailing_bytes =
+        adapter.make_insert_one(5, "five");
+    trailing_bytes.payload.push_back(0xffu);
+    malformed_changes.push_back(trailing_bytes);
+
+    mdbxc::sync::LogicalChange payload_clear = adapter.make_clear();
+    payload_clear.payload.push_back(0u);
+    malformed_changes.push_back(payload_clear);
+
+    mdbxc::sync::LogicalChange unknown_opcode = adapter.make_clear();
+    unknown_opcode.opcode = 99u;
+    malformed_changes.push_back(unknown_opcode);
+
+    for (std::size_t i = 0u; i < malformed_changes.size(); ++i) {
+        std::vector<mdbxc::sync::LogicalChange> changes;
+        changes.push_back(malformed_changes[i]);
+        const mdbxc::sync::LogicalApplyResult result =
+            engine.apply_logical_changes(changes);
+        MDBXC_TEST_ASSERT(!result.ok);
+        MDBXC_TEST_ASSERT(result.error.find("payload") != std::string::npos ||
+                          result.error.find("opcode") != std::string::npos);
+        MDBXC_TEST_ASSERT(table.count() == 1u);
+        MDBXC_TEST_ASSERT(table.count(77, "keep") == 1u);
+    }
 
     conn->disconnect();
     cleanup(path);
