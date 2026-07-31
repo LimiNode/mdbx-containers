@@ -499,6 +499,56 @@ void test_ordered_element_state_rejects_malformed_records_in_origin_scan() {
     cleanup(path);
 }
 
+void test_broad_erase_candidate_set_enforces_bounds_and_order() {
+    const mdbxc::sync::NodeId first_origin = make_node(0x11u);
+    const mdbxc::sync::NodeId second_origin = make_node(0x21u);
+    mdbxc::sync::OrderedElementId first;
+    first.origin = first_origin;
+    first.sequence = 2u;
+    mdbxc::sync::OrderedElementId second;
+    second.origin = first_origin;
+    second.sequence = 1u;
+    mdbxc::sync::OrderedElementId third;
+    third.origin = second_origin;
+    third.sequence = 1u;
+
+    const mdbxc::sync::BroadEraseBounds bounds = { 2u, 2u };
+    mdbxc::sync::OrderedElementCandidateSet candidates(bounds);
+    candidates.inspect_record();
+    candidates.inspect_record();
+    if (candidates.scanned_records() != 2u) {
+        throw std::runtime_error("broad erase scan accounting is incorrect");
+    }
+
+    bool scan_rejected = false;
+    try {
+        candidates.inspect_record();
+    } catch (const std::length_error&) {
+        scan_rejected = true;
+    }
+    if (!scan_rejected) {
+        throw std::runtime_error("broad erase scan limit was not enforced");
+    }
+
+    candidates.select(first);
+    candidates.select(second);
+    const std::vector<mdbxc::sync::OrderedElementId> ordered =
+        candidates.sorted_ids();
+    if (ordered.size() != 2u || ordered[0] != second || ordered[1] != first) {
+        throw std::runtime_error("broad erase candidates are not canonical ordered");
+    }
+
+    bool selection_rejected = false;
+    try {
+        candidates.select(third);
+    } catch (const std::length_error&) {
+        selection_rejected = true;
+    }
+    if (!selection_rejected) {
+        throw std::runtime_error("broad erase selection limit was not enforced");
+    }
+}
+
 } // namespace
 
 int main() {
@@ -508,5 +558,6 @@ int main() {
     test_ordered_element_state_rejects_corrupt_introduced_high_water();
     test_ordered_element_state_rejects_second_origin_high_water_corruption();
     test_ordered_element_state_rejects_malformed_records_in_origin_scan();
+    test_broad_erase_candidate_set_enforces_bounds_and_order();
     return 0;
 }

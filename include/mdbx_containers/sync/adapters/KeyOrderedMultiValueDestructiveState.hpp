@@ -5,6 +5,7 @@
 /// \file KeyOrderedMultiValueDestructiveState.hpp
 /// \brief Persistent state primitives for destructive ordered logical schemas.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstring>
 #include <cstdint>
@@ -49,6 +50,74 @@ namespace sync {
             return compared < 0 ||
                    (compared == 0 && lhs.sequence < rhs.sequence);
         }
+    };
+
+    /// \brief Explicit bounds for destructive broad local erasure.
+    /// \details Every persisted primary, state, or key-index record must be
+    /// counted before it is decoded or otherwise inspected. Selected ids are
+    /// counted before they are materialized in the candidate set.
+    struct BroadEraseBounds {
+        std::size_t max_selected_elements;
+        std::size_t max_scanned_records;
+    };
+
+    /// \brief Bounded, deterministic candidate set for exact element erasure.
+    /// \details Broad selectors resolve to immutable ids before mutating the
+    /// table. This helper centralizes both limits and canonical id ordering so
+    /// every selector has the same rollback boundary.
+    class OrderedElementCandidateSet {
+    public:
+        explicit OrderedElementCandidateSet(const BroadEraseBounds& bounds)
+            : m_bounds(bounds),
+              m_scanned_records(0u) {}
+
+        /// \brief Accounts for one record before decoding or inspecting it.
+        void inspect_record() {
+            if (m_scanned_records >= m_bounds.max_scanned_records) {
+                throw std::length_error(
+                    "Ordered destructive broad erase scan limit exceeded");
+            }
+            ++m_scanned_records;
+        }
+
+        /// \brief Adds one resolved immutable id before later mutation.
+        void select(const OrderedElementId& id) {
+            if (!is_valid_ordered_element_id(id)) {
+                throw std::invalid_argument(
+                    "Ordered destructive broad erase id is invalid");
+            }
+            if (m_ids.size() >= m_bounds.max_selected_elements) {
+                throw std::length_error(
+                    "Ordered destructive broad erase selection limit exceeded");
+            }
+            m_ids.push_back(id);
+        }
+
+        std::size_t scanned_records() const {
+            return m_scanned_records;
+        }
+
+        std::size_t selected_size() const {
+            return m_ids.size();
+        }
+
+        /// \brief Returns ids in canonical origin/sequence order.
+        std::vector<OrderedElementId> sorted_ids() const {
+            std::vector<OrderedElementId> out = m_ids;
+            std::sort(out.begin(), out.end(), OrderedElementIdLess());
+            for (std::size_t i = 1u; i < out.size(); ++i) {
+                if (out[i - 1u] == out[i]) {
+                    throw std::runtime_error(
+                        "Ordered destructive broad erase resolved a duplicate id");
+                }
+            }
+            return out;
+        }
+
+    private:
+        BroadEraseBounds m_bounds;
+        std::size_t m_scanned_records;
+        std::vector<OrderedElementId> m_ids;
     };
 
     /// \brief Encodes an id for logical payloads: node bytes plus LE sequence.
