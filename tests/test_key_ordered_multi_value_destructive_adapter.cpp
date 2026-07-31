@@ -171,6 +171,25 @@ void insert_raw_index_record(
     transaction.commit();
 }
 
+void insert_raw_index_value(
+        const std::shared_ptr<mdbxc::Connection>& connection,
+        const std::string& by_key_name,
+        const std::vector<std::uint8_t>& key,
+        const std::vector<std::uint8_t>& value) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::WRITABLE);
+    MDBX_dbi by_key = 0;
+    mdbxc::check_mdbx(mdbx_dbi_open(
+        transaction.handle(), by_key_name.c_str(), MDBX_DUPSORT, &by_key),
+        "test state index DBI open failed");
+    MDBX_val raw_key = make_raw_val(key);
+    MDBX_val raw_value = make_raw_val(value);
+    mdbxc::check_mdbx(mdbx_put(transaction.handle(), by_key,
+                                &raw_key, &raw_value, MDBX_NODUPDATA),
+                      "test raw state index write failed");
+    transaction.commit();
+}
+
 void delete_raw_index_record(
         const std::shared_ptr<mdbxc::Connection>& connection,
         const std::string& by_key_name,
@@ -189,6 +208,25 @@ void delete_raw_index_record(
     mdbxc::check_mdbx(mdbx_del(transaction.handle(), by_key,
                                 &raw_key, &raw_value),
                       "test state index delete failed");
+    transaction.commit();
+}
+
+void delete_raw_index_value(
+        const std::shared_ptr<mdbxc::Connection>& connection,
+        const std::string& by_key_name,
+        const std::vector<std::uint8_t>& key,
+        const std::vector<std::uint8_t>& value) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::WRITABLE);
+    MDBX_dbi by_key = 0;
+    mdbxc::check_mdbx(mdbx_dbi_open(
+        transaction.handle(), by_key_name.c_str(), MDBX_DUPSORT, &by_key),
+        "test state index DBI open failed");
+    MDBX_val raw_key = make_raw_val(key);
+    MDBX_val raw_value = make_raw_val(value);
+    mdbxc::check_mdbx(mdbx_del(transaction.handle(), by_key,
+                                &raw_key, &raw_value),
+                      "test raw state index delete failed");
     transaction.commit();
 }
 
@@ -725,6 +763,21 @@ void test_destructive_capture_clears_bounded_tombstone_heavy_table() {
         throw std::runtime_error("ordered clear tombstone fixture is invalid");
     }
 
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        bool rejected = false;
+        try {
+            session->clear({ 1u, 256u });
+        } catch (const std::length_error&) {
+            rejected = true;
+        }
+        if (!rejected || table.count() != 2u) {
+            throw std::runtime_error(
+                "ordered clear selected beyond its candidate limit");
+        }
+    }
+
     const mdbxc::sync::BroadEraseBounds bounds = { 8u, 256u };
     {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
@@ -785,6 +838,174 @@ void test_destructive_capture_clears_bounded_tombstone_heavy_table() {
             table.find(5).size() != 1u) {
             throw std::runtime_error(
                 "ordered broad clear accepted untracked physical data");
+        }
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_capture_clear_rejects_complete_schema_corruption() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_clear_corruption.mdbx";
+    const std::string primary = "ordered_clear_corrupt_values";
+    const std::string state = "ordered_clear_corrupt_state";
+    const std::string by_key = "ordered_clear_corrupt_by_key";
+    const std::string schema = "app.ordered_clear_corrupt.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x66u);
+    const mdbxc::sync::DbId local_db = make_node(0xA6u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    const mdbxc::sync::BroadEraseBounds bounds = { 8u, 1024u };
+    const std::vector<std::uint8_t> key = IntKeyCodec::encode(7);
+    mdbxc::sync::OrderedElementId orphan;
+    orphan.origin = origin;
+    orphan.sequence = 1u;
+
+    insert_raw_index_record(connection, by_key, key, orphan);
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        bool rejected = false;
+        try {
+            session->clear(bounds);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected || !table.empty()) {
+            throw std::runtime_error("ordered clear accepted orphan key index id");
+        }
+    }
+    delete_raw_index_record(connection, by_key, key, orphan);
+
+    const std::vector<std::uint8_t> malformed_index_value(1u, 0x01u);
+    insert_raw_index_value(
+        connection, by_key, key, malformed_index_value);
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        bool rejected = false;
+        try {
+            session->clear(bounds);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected || !table.empty()) {
+            throw std::runtime_error("ordered clear accepted malformed index id");
+        }
+    }
+    delete_raw_index_value(connection, by_key, key, malformed_index_value);
+
+    mdbxc::sync::OrderedElementId tombstone_id;
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        tombstone_id = session->append(8, "tombstone");
+        session->commit_to_outbox(engine, make_node(0xB6u));
+    }
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->erase(tombstone_id);
+        session->commit_to_outbox(engine, make_node(0xB6u));
+    }
+    insert_raw_index_record(
+        connection, by_key, IntKeyCodec::encode(8), tombstone_id);
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        bool rejected = false;
+        try {
+            session->clear(bounds);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected || !table.empty()) {
+            throw std::runtime_error("ordered clear accepted tombstone index id");
+        }
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_capture_clear_checks_tombstone_only_origin_high_water() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_clear_high_water.mdbx";
+    const std::string primary = "ordered_clear_high_water_values";
+    const std::string state = "ordered_clear_high_water_state";
+    const std::string by_key = "ordered_clear_high_water_by_key";
+    const std::string schema = "app.ordered_clear_high_water.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x67u);
+    const mdbxc::sync::NodeId tombstone_origin = make_node(0x77u);
+    const mdbxc::sync::DbId local_db = make_node(0xA7u);
+    const mdbxc::sync::DbId destination = make_node(0xB7u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(1, "live");
+        session->commit_to_outbox(engine, destination);
+    }
+
+    mdbxc::sync::OrderedElementId tombstone_id;
+    tombstone_id.origin = tombstone_origin;
+    tombstone_id.sequence = 1u;
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        mdbxc::Connection::SyncCaptureSuppressionScope suppress_capture(
+            *connection, transaction.handle());
+        table.append(2, "tombstone", transaction);
+        adapter.state_store().put_live(
+            transaction.handle(), tombstone_id,
+            IntKeyCodec::encode(2), StringValueCodec::encode("tombstone"));
+        if (!table.erase_at(2, 0u, transaction)) {
+            throw std::runtime_error("tombstone-only origin fixture is invalid");
+        }
+        adapter.state_store().tombstone(transaction.handle(), tombstone_id);
+        transaction.commit();
+    }
+    delete_raw_introduced_high_water(connection, state, tombstone_origin);
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        bool rejected = false;
+        try {
+            session->clear({ 8u, 1024u });
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected || table.find(1).size() != 1u ||
+            table.find(1)[0] != "live") {
+            throw std::runtime_error(
+                "ordered clear missed tombstone-only origin high-water corruption");
         }
     }
 
@@ -1465,6 +1686,8 @@ int main() {
     test_destructive_capture_resolves_bounded_broad_erasure();
     test_destructive_capture_bounds_post_selection_mutation_scans();
     test_destructive_capture_clears_bounded_tombstone_heavy_table();
+    test_destructive_capture_clear_rejects_complete_schema_corruption();
+    test_destructive_capture_clear_checks_tombstone_only_origin_high_water();
     test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates();
     test_destructive_preflight_rejects_untracked_physical_value();
     test_destructive_preflight_rejects_state_index_corruption();

@@ -679,8 +679,10 @@ distinguish potentially broad selectors from `erase(OrderedElementId)`. They
 preserve the corresponding local table semantics: `erase_at()` returns false
 for a missing index, `erase_value()` removes every repeated exact value under
 the key, `erase_key()` removes every value under the key, and `clear()` removes
-every current value. `clear()` validates the complete bounded schema candidate
-set before it creates the first tombstone.
+every current value. `clear()` scans and reconciles the complete bounded
+primary/state/key-index set, validates introduced high-water marks for every
+Live or Tombstone origin, and admits each Live id before it materializes the
+complete candidate set or creates the first tombstone.
 Committing a session with no pending changes retains the existing empty-envelope
 semantics and consumes one ordered delivery sequence.
 

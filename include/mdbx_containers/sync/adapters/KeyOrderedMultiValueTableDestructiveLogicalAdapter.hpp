@@ -341,38 +341,46 @@ namespace sync {
                 ensure_active();
                 try {
                     OrderedElementCandidateSet candidates(bounds);
-                    const std::vector<OrderedLiveElementState> live_records =
-                        m_adapter.m_state.live_state_records(
-                            m_txn.handle(), &candidates);
+                    const OrderedElementStateScan state_scan =
+                        m_adapter.m_state.scan_all_element_records(
+                            m_txn.handle(), &candidates, true);
                     std::vector<typename table_type::value_type> physical_entries;
                     m_adapter.m_table.db_collect_entries(
                         physical_entries, m_txn.handle(),
                         [&candidates]() {
                             candidates.inspect_record();
                         });
-                    if (physical_entries.size() != live_records.size()) {
+                    if (physical_entries.size() != state_scan.live_records.size()) {
                         throw std::runtime_error(
                             "Ordered destructive table and state counts differ");
                     }
+                    const std::vector<OrderedElementKeyIndexEntry> index_entries =
+                        m_adapter.m_state.key_index_entries(
+                            m_txn.handle(), &candidates);
+                    std::vector<OrderedElementKeyIndexEntry> expected_index_entries;
                     std::vector<std::vector<std::uint8_t> > keys;
                     std::vector<std::vector<OrderedElementId> > state_ids;
-                    std::vector<NodeId> origins;
-                    for (std::size_t i = 0u; i < live_records.size(); ++i) {
+                    for (std::size_t i = 0u;
+                         i < state_scan.live_records.size(); ++i) {
                         const std::size_t key_index = find_key_group(
-                            keys, live_records[i].record.key);
+                            keys, state_scan.live_records[i].record.key);
                         if (key_index == keys.size()) {
-                            keys.push_back(live_records[i].record.key);
+                            keys.push_back(state_scan.live_records[i].record.key);
                             state_ids.push_back(std::vector<OrderedElementId>());
                         }
-                        state_ids[key_index].push_back(live_records[i].id);
-                        if (!contains_origin(origins, live_records[i].id.origin)) {
-                            origins.push_back(live_records[i].id.origin);
-                        }
+                        state_ids[key_index].push_back(state_scan.live_records[i].id);
+                        OrderedElementKeyIndexEntry expected;
+                        expected.key = state_scan.live_records[i].record.key;
+                        expected.id = state_scan.live_records[i].id;
+                        expected_index_entries.push_back(expected);
                     }
 
-                    for (std::size_t i = 0u; i < origins.size(); ++i) {
+                    validate_complete_key_index(
+                        index_entries, expected_index_entries);
+                    for (std::size_t i = 0u;
+                         i < state_scan.element_origins.size(); ++i) {
                         m_adapter.m_state.verify_introduced_high_water(
-                            m_txn.handle(), origins[i], &candidates);
+                            m_txn.handle(), state_scan.element_origins[i], &candidates);
                     }
                     for (std::size_t i = 0u; i < keys.size(); ++i) {
                         const KeyT key = KeyCodec::decode(keys[i]);
@@ -450,6 +458,33 @@ namespace sync {
                 return false;
             }
 
+            static bool key_index_entry_less(
+                    const OrderedElementKeyIndexEntry& lhs,
+                    const OrderedElementKeyIndexEntry& rhs) {
+                if (lhs.key != rhs.key) {
+                    return lhs.key < rhs.key;
+                }
+                return OrderedElementIdLess()(lhs.id, rhs.id);
+            }
+
+            static void validate_complete_key_index(
+                    std::vector<OrderedElementKeyIndexEntry> actual,
+                    std::vector<OrderedElementKeyIndexEntry> expected) {
+                for (std::size_t i = 0u; i < actual.size(); ++i) {
+                    const KeyT key = KeyCodec::decode(actual[i].key);
+                    if (KeyCodec::encode(key) != actual[i].key) {
+                        throw std::runtime_error(
+                            "Ordered destructive index key is non-canonical");
+                    }
+                }
+                std::sort(actual.begin(), actual.end(), key_index_entry_less);
+                std::sort(expected.begin(), expected.end(), key_index_entry_less);
+                if (actual != expected) {
+                    throw std::runtime_error(
+                        "Ordered destructive complete key index and state differ");
+                }
+            }
+
             template<typename Selector>
             bool resolve_live_elements(
                     const KeyT& key,
@@ -509,16 +544,8 @@ namespace sync {
                     const std::vector<std::uint8_t>& key_bytes,
                     std::vector<OrderedElementId> expected_ids,
                     OrderedElementCandidateSet& candidates) const {
-                std::vector<OrderedElementId> index_ids =
-                    m_adapter.m_state.live_ids_for_key(
-                        m_txn.handle(), key_bytes, &candidates);
-                std::sort(index_ids.begin(), index_ids.end(), OrderedElementIdLess());
                 std::sort(expected_ids.begin(), expected_ids.end(),
                           OrderedElementIdLess());
-                if (index_ids != expected_ids) {
-                    throw std::runtime_error(
-                        "Ordered destructive key index and state records differ");
-                }
 
                 std::vector<ValueT> physical_values;
                 m_adapter.m_table.db_collect_values(
@@ -526,20 +553,19 @@ namespace sync {
                     [&candidates]() {
                         candidates.inspect_record();
                     });
-                if (physical_values.size() != index_ids.size()) {
+                if (physical_values.size() != expected_ids.size()) {
                     throw std::runtime_error(
                         "Ordered destructive table and state counts differ");
                 }
-                for (std::size_t i = 0u; i < index_ids.size(); ++i) {
+                for (std::size_t i = 0u; i < expected_ids.size(); ++i) {
                     OrderedElementStateRecord record;
                     if (!m_adapter.m_state.get(
-                            m_txn.handle(), index_ids[i], record, &candidates) ||
+                            m_txn.handle(), expected_ids[i], record, &candidates) ||
                         !record.live || record.key != key_bytes ||
                         record.value != ValueCodec::encode(physical_values[i])) {
                         throw std::runtime_error(
                             "Ordered destructive table and state value order differs");
                     }
-                    candidates.select(index_ids[i]);
                 }
             }
 
