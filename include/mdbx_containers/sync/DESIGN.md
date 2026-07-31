@@ -862,9 +862,10 @@ anchors, see the
   format; deferred until an explicit identity-mapping scheme lands.
 - `KeyMultiValueTable` — DUPSORT duplicate values need the unordered multiset
   model described above before capture can be enabled.
-- `KeyOrderedMultiValueTable` — broad destructive local mutators, baseline
-  import, multi-origin history and tombstone compaction remain deferred beyond
-  the implemented single-origin v2 `append` / exact-id `erase` contract.
+- `KeyOrderedMultiValueTable` — raw capture, `replace_with()`, baseline import,
+  multi-origin history and tombstone compaction remain deferred beyond the
+  implemented single-origin v2 capture contract. That contract includes
+  bounded `erase_at`, key/value erase, and clear, each expanded to exact ids.
 - `AnyValueTable` — heterogeneous values need type-tag propagation on the wire.
 - `IdentityProvider` integration in `BaseTable` — declared in v0.1, no
   write path until HashedKeyValueStore.

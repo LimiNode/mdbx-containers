@@ -79,11 +79,11 @@ These table families intentionally emit no `ChangeOp` in v0.1:
   general multi-writer destructive convergence. The explicit unordered logical
   adapter covers only insert, key erase, all-matching-value erase, and clear for one writer
   or causally serialized updates.
-- `KeyOrderedMultiValueTable` raw capture and broad destructive operations.
-  Schema v1 remains append-only. Schema v2 supports logical `AppendElement`
-  and exact `EraseElement` by persistent element id through one authoritative
-  ordered origin, but key/value erase, clear, baseline import, and multi-origin
-  histories remain deferred.
+- `KeyOrderedMultiValueTable` raw capture, replace, baseline import, and
+  multi-origin histories. Schema v1 remains append-only. Schema v2 supports
+  logical `AppendElement` and exact `EraseElement` by persistent element id,
+  plus bounded `erase_at`, key/value erase, and clear capture through one
+  authoritative ordered origin.
 - `HashedKeyValueStore`, until the relationship between logical key bytes,
   physical storage keys, and hash-index entries is specified.
 
@@ -114,11 +114,11 @@ delivery. The logical core uses the following contracts:
   `KeyOrderedMultiValueTableDestructiveLogicalAdapter` applies schema-v2
   `AppendElement` and exact `EraseElement` changes with persistent element
   identity and tombstones; its typed capture session atomically commits local
-  mutations and an ordered outbox envelope. Broad key/value erase and clear
-  have a design-only contract with separate candidate and inspected-record
-  bounds plus canonical logical-codec selector semantics; their capture
-  methods remain unimplemented. Replace and other broad state construction
-  remain separately deferred. Transferring the authoritative origin is an
+  mutations and an ordered outbox envelope. Bounded `erase_at`, key/value
+  erase, and clear capture resolve canonical logical-codec selectors to exact
+  ids with separate candidate and inspected-record bounds. Replace and other
+  broad state construction remain separately deferred. Transferring the
+  authoritative origin is an
   application-coordinated schema-marker cutover; it is not automatic failover
   and requires old-outbox drain plus replay-marker retention through the chosen
   retry horizon.
@@ -153,10 +153,8 @@ tables.
   `SnapshotRequired` as automatically recoverable by sync itself.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
   multi-writer convergence for `KeyMultiValueTable`.
-- Implement schema-v2 broad key/value erase and clear only through the
-  documented selector-to-`EraseElement` contract with independent candidate
-  and inspected-record budgets. Design `replace_with()`, baseline import, and
-  multi-origin histories separately; none is implied by bounded erasure.
+- Design `replace_with()`, baseline import, and multi-origin histories for
+  schema v2 separately; none is implied by the implemented bounded erasure.
 - Evaluate whether any `KeyMultiValueTable` framing ideas carry over to
   `AnyValueTable` and `HashedKeyValueStore`.
 
