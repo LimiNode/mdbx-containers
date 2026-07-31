@@ -96,7 +96,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear under one-writer or causally serialized updates. |
-| `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin; broad key/value/clear capture remains deferred. |
+| `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Broad key/value/clear capture has a bounded exact-id expansion design but remains unimplemented. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
 Do not add `record_op()` paths for unsupported table types without first
@@ -654,9 +654,108 @@ The versioned logical operations are:
 `erase(key, value)`, `erase(key)`, `erase_at(key, index)`, `clear()`, and
 `replace_with()` are not independent broad wire operations. The initial typed
 capture surface exposes only `append()` and exact `erase(OrderedElementId)`.
-Resolving broad local mutators into bounded `EraseElement` frames is a follow-up
-extension, together with a stronger physical-prefix layout for migration and
-multi-origin histories.
+Broad local erasure extends that same wire contract by resolving local
+selectors into exact ids; it must not add key-, value-, index-, or clear-level
+opcodes.
+
+##### Bounded broad local erasure contract
+
+The planned typed capture-session API is:
+
+```text
+struct BroadEraseBounds {
+    size_t max_selected_elements;
+    size_t max_scanned_records;
+};
+
+bool erase_at(key, index, const BroadEraseBounds& bounds)
+size_t erase_value(key, value, const BroadEraseBounds& bounds)
+size_t erase_key(key, const BroadEraseBounds& bounds)
+size_t clear(const BroadEraseBounds& bounds)
+```
+
+These methods are not implemented yet. Their names distinguish the potentially
+broad selectors from `erase(OrderedElementId)`. They preserve the corresponding
+local table semantics: `erase_at()` returns false for a missing index,
+`erase_value()` removes every repeated exact value under the key, `erase_key()`
+removes every value under the key, and `clear()` removes every live element.
+Committing a session with no pending changes retains the existing empty-envelope
+semantics and consumes one ordered delivery sequence.
+
+Broad selectors are encoded exactly once through the logical schema's
+`KeyCodec` and `ValueCodec`. `erase_key()` and `erase_at()` resolve the
+canonical `KeyCodec` bytes. `erase_value()` selects Live state records whose
+stored canonical key and value bytes exactly equal the canonical encodings of
+the caller's `KeyT` and `ValueT`. Physical primary bytes are used only for
+three-DBI parity validation after the stored logical bytes are decoded and
+serialized through the table wrapper; they are never compared directly with
+logical selector bytes. Typed `operator==` is not the replicated selector
+contract.
+
+Every broad method runs inside the capture session's existing writable
+transaction and follows a resolve-then-mutate lifecycle:
+
+1. Validate the persistent marker, authoritative origin, and exact three-DBI
+   parity for the selector scope under one cumulative
+   `max_scanned_records` budget. `clear()` validates the complete schema.
+2. Resolve every selected Live record to its existing immutable
+   `OrderedElementId`, including elements appended earlier in the same session.
+   Repeated equal values remain separate selected ids.
+3. Stop before inspecting a persisted record that would exceed
+   `max_scanned_records`, or before materializing a selected id that would
+   exceed `max_selected_elements`. Exceeding either caller-supplied bound throws
+   `std::length_error`, rolls back and deactivates the complete session, and
+   leaves the table, both state DBIs, and outbox unchanged. The implementation
+   must not mutate while validating parity or discovering the candidate set.
+4. Sort the complete selected set by origin bytes and then numeric element
+   sequence, equivalently by the persistent id-index encoding with its
+   big-endian sequence. This gives `clear()` a deterministic order independent
+   of a local key serializer or MDBX comparator. The little-endian logical wire
+   encoding must not be used as a numeric sort key.
+5. Apply exact erasure for each id in that order. A selected id appended in the
+   same session coalesces with its pending `AppendElement`; a pre-existing id
+   adds one `EraseElement`. `max_selected_elements` counts both kinds before
+   coalescing, so it bounds candidate memory, mutations, and potential
+   `EraseElement` expansion rather than only final frame size.
+
+Both fields of `BroadEraseBounds` are mandatory; there is no default unbounded
+overload. `max_scanned_records` is cumulative across parity validation and
+selection. Every primary, element-state, or elements-by-key record returned and
+inspected counts, including Tombstones and records revisited by separate
+passes. Fixed-size schema-marker and local-identity lookups are not part of this
+record-scan count. A cursor may fetch one additional record as lookahead to
+distinguish exact-bound completion from overflow, but must reject before
+decoding, comparing, or materializing that record. The budget therefore bounds
+record inspection with one constant cursor-step allowance; it does not bound
+wall-clock time, MDBX tree lookup latency, or operating-system I/O.
+
+`CodecBounds::max_ops_per_batch`, `max_value_len`, and
+`max_transport_message_bytes` independently bound the final encoded frame.
+Encoding or outbox failure still rolls back the transaction and deactivates the
+session even when it occurs after in-transaction physical mutation.
+
+`erase_at()` selects at most one id but still takes `BroadEraseBounds`, because
+its per-key parity validation may scan persisted state. A zero selected-element
+budget succeeds only when the selector resolves no Live id; a zero scan budget
+succeeds only when no primary/state/index record needs inspection. No method
+may derive ids from raw physical rows, skip tombstone creation, or publish a
+partial frame. Receiver apply remains unchanged because it sees only exact
+`EraseElement` operations.
+
+`replace_with()` is not part of this contract. It needs a separately bounded
+combined plan for removals, new id allocation, repeated input values, and final
+per-key order. Baseline import, multi-origin histories, physical-prefix
+optimization, and tombstone pruning likewise remain separate extensions.
+
+Implementation acceptance requires C++11/C++17 coverage for empty and non-empty
+selectors under a zero selected-element budget; exact scan-budget success and
+scan-budget-plus-one rejection; repeated equal values; canonical selector bytes
+that intentionally differ from physical serialization; exact index targeting;
+pending-append coalescing; deterministic clear order; tombstone-heavy clear;
+selected-element exact-bound success and bound-plus-one rejection; codec/outbox
+rollback; native commit-error rollback; restart/replay; and corrupt parity
+before selection. A failed broad operation must never leave a partial table
+mutation, state transition, tombstone set, or outbox envelope.
 
 Tombstones are retained indefinitely in the first destructive implementation.
 They must not be pruned by time or by a local outbox acknowledgement. Safe
@@ -704,8 +803,8 @@ requires recovery or re-baselining instead.
 Remaining hardening before this initial v2 adapter can grow into a broader
 destructive surface includes:
 
-- repeated identical values and exact `erase_at` targeting; `erase(key, value)`,
-  key erase, clear and replace semantics;
+- implementation of the bounded `erase_at`, matching-value, key, and clear
+  capture-session contract above; a separate bounded `replace_with()` design;
 - a duplicate `AppendElement` with identical bytes, the same id with different
   bytes, append of a tombstoned id, duplicate ids in one frame, an
   append-then-erase remote duplicate pair, and unknown destructive opcodes;
@@ -730,9 +829,9 @@ destructive surface includes:
   orphan key-index entries and orphan Live state records;
 - missing state/index DBIs and incompatible flags, plus v1/v2 marker or DBI-set
   mismatches, all rejected before adapter callbacks or mutation;
-- bounded clear/replace payloads that fail without changing any of the three
-  DBIs or the outbox; transaction, native commit and outbox rollback; and
-  restart/retry after the durable outbox commit;
+- broad-operation exact-bound and bound-plus-one failures without changing any
+  of the three DBIs or the outbox; restart/retry after the durable outbox
+  commit;
 - restart between baseline construction and marker activation, migration parity
   and high-water verification, an authoritative-baseline SHA-256 mismatch, and
   a later origin cutover with pre-existing ids.
