@@ -171,7 +171,7 @@ locally assigned sequence prefix uniquely identifies one cross-node record.
 The first sync design for `KeyMultiValueTable` targets unordered multiset
 preservation under single-writer or causally serialized updates. Schema v1
 contains `InsertOne`, `EraseKey`, `EraseAllValues`, and `Clear`; schema v2 adds
-`EraseOneValue` and typed `reconcile()`:
+`EraseOneValue` and typed `reconcile()`; schema v3 adds bounded `EraseRange`:
 
 ```text
 for every serialized key and serialized public value:
@@ -225,6 +225,16 @@ raw table calls, `append()`, or `erase_range()`. Those paths remain local until
 a later extension can preserve their exact multiset semantics. This is not
 partial raw capture: callers opt into the typed session and only its documented
 methods publish logical changes.
+
+Schema v3 `EraseRange` carries two canonical serialized public keys. It is an
+inclusive logical-key interval, never a raw MDBX cursor key. Typed capture must
+inspect and select the complete local range before mutation under one shared
+`max_inspected_records` / `max_selected_pairs` budget. It then publishes one
+range change and applies the same inclusive range locally. A receiver validates
+both payload blobs and applies its public `erase_range()` semantics. The
+operation is still limited to one writer or causally serialized destructive
+updates; it provides no multi-writer convergence. `append()` needs no schema-v3
+opcode: typed capture expands it into `InsertOne` changes in input order.
 
 Implementation phases:
 
