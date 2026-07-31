@@ -79,9 +79,11 @@ These table families intentionally emit no `ChangeOp` in v0.1:
   general multi-writer destructive convergence. The explicit unordered logical
   adapter covers only insert, key erase, all-matching-value erase, and clear for one writer
   or causally serialized updates.
-- `KeyOrderedMultiValueTable` raw capture and destructive operations. Its
-  append-only logical contract requires one ordered origin stream; adapter,
-  capture, and round-trip support are tracked separately from raw v0.1 sync.
+- `KeyOrderedMultiValueTable` raw capture and broad destructive operations.
+  Schema v1 remains append-only. Schema v2 supports logical `AppendElement`
+  and exact `EraseElement` by persistent element id through one authoritative
+  ordered origin, but key/value erase, clear, baseline import, and multi-origin
+  histories remain deferred.
 - `HashedKeyValueStore`, until the relationship between logical key bytes,
   physical storage keys, and hash-index entries is specified.
 
@@ -89,7 +91,8 @@ Do not add `record_op()` calls to these tables until their wire format and
 round-trip tests exist. A partial capture path is worse than no capture because
 it can make replication appear successful while logical state diverges.
 
-The logical sync scaffolding is preparatory only:
+The raw `handle_push()` transport path remains separate from explicit logical
+delivery. The logical core uses the following contracts:
 
 - `_mdbxc_sync_schema` is a persistent compatibility marker, not an apply path.
 - `LogicalChange` payloads are opaque and are not serialized by the current
@@ -106,13 +109,16 @@ The logical sync scaffolding is preparatory only:
 - `KeyMultiValueTableLogicalAdapter` follows the same explicit logical-frame
   path for its limited unordered multiset operation set. It does not enable raw
   `ChangeOp` capture for the table wrapper.
-- `KeyOrderedMultiValueTableLogicalAdapter` applies append-only logical changes
-  only through ordered delivery for one origin stream. Its typed capture
-  session can atomically commit local appends and an ordered outbox envelope;
-  destructive ordered-table operations remain deferred. Transferring that
-  authoritative origin is an application-coordinated schema-marker cutover;
-  it is not automatic failover and requires old-outbox drain plus replay-marker
-  retention through the chosen retry horizon.
+- `KeyOrderedMultiValueTableLogicalAdapter` applies schema-v1 append-only
+  changes only through ordered delivery for one origin stream.
+  `KeyOrderedMultiValueTableDestructiveLogicalAdapter` applies schema-v2
+  `AppendElement` and exact `EraseElement` changes with persistent element
+  identity and tombstones; its typed capture session atomically commits local
+  mutations and an ordered outbox envelope. Broad destructive mutators remain
+  deferred. Transferring the authoritative origin is an
+  application-coordinated schema-marker cutover; it is not automatic failover
+  and requires old-outbox drain plus replay-marker retention through the chosen
+  retry horizon.
 - Logical delivery replay markers can be pruned through a persisted per-origin
   watermark. The watermark DBI is created lazily on the first pruning call, so
   deployments that use pruning must reserve one additional named-DBI slot in
@@ -144,8 +150,10 @@ tables.
   `SnapshotRequired` as automatically recoverable by sync itself.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
   multi-writer convergence for `KeyMultiValueTable`.
-- Keep `KeyOrderedMultiValueTable<K, V>` append-only until persistent element
-  identity and tombstone semantics are designed for destructive operations.
+- Extend schema-v2 `KeyOrderedMultiValueTable<K, V>` beyond exact element
+  operations only after broad mutators have bounded `EraseElement` frame
+  semantics, plus a persistent-layout design for baseline import and
+  multi-origin histories.
 - Evaluate whether any `KeyMultiValueTable` framing ideas carry over to
   `AnyValueTable` and `HashedKeyValueStore`.
 

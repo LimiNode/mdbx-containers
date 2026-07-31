@@ -21,7 +21,7 @@ values during transport, and remote apply replays the captured physical
 | `VectorStore` | Indirectly supported | Captured through its internal `SequenceTable` and `KeyValueTable` members. | The internal table operations are replicated; `VectorStore` has no separate wire type. This raw path requires one authoritative or externally serialized writer per collection. Already-open instances compare `Connection::sync_apply_generation()` and lazily rebuild their RAM index before index-dependent operations after remote apply. A connection apply/read barrier serializes remote `handle_push()` apply commits with cache-backed `VectorStore` operations. Each `VectorStore` instance serializes its own methods; C++17 builds let different readers share the connection read side, while C++11 builds use an exclusive connection mutex fallback. | `test_sync_capture`, `test_sync_replication` |
 | `AnyValueTable<K>` | Deferred | No `ChangeOp` in v0.1. | Not applied by sync as a typed heterogeneous table. | `test_sync_capture` negative coverage |
 | `KeyMultiValueTable<K, V>` | Limited logical adapter | No raw `ChangeOp` in v0.1. | `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear for one writer or causally serialized updates. Raw calls, append, reconcile, range erase, and general multi-writer destructive convergence remain deferred. | `test_key_value_logical_adapter`, `test_sync_capture` negative coverage |
-| `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapter | No raw `ChangeOp` in v0.1. | Append-only logical changes require one ordered origin stream; direct logical frames and unordered delivery fail closed. Typed capture atomically commits local appends plus an ordered outbox envelope; destructive operations remain deferred pending persistent element identity and tombstones. | `test_key_value_logical_adapter` |
+| `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapters | No raw `ChangeOp` in v0.1. Schema v1 captures append-only changes; schema v2 captures `AppendElement` and exact `EraseElement` by persistent id. | Both schemas require one authoritative ordered origin and fail closed for direct logical frames or unordered delivery. Schema v2 persists element identity and tombstones, and its typed capture atomically commits local mutations plus an ordered outbox envelope. Broad key/value erase, clear, baseline import, and multi-origin histories remain deferred. | `test_key_value_logical_adapter`, `test_key_ordered_multi_value_destructive_state`, `test_key_ordered_multi_value_destructive_adapter` |
 | `HashedKeyValueStore<K, V, H, Layout>` | Deferred | No `ChangeOp` in v0.1. | Hash-index identity and logical-key mapping are deferred. | `test_sync_capture` negative coverage |
 
 ## Supported Capture Contract
@@ -114,12 +114,15 @@ The detailed deferred contract lives in
 sub-operations and receiver-side logical apply helpers before capture can be
 enabled.
 
-`KeyOrderedMultiValueTable<K, V>` has an append-only ordered logical adapter.
-Malformed ordered pair payloads, active-session destruction rollback, and
-missing, stale, or DBI-mismatched schema markers are covered by the current
-append-only adapter regression tests. A native MDBX commit failure after ordered
-capture preparation remains deferred coverage; the existing pre-commit failure
-test does not model a native commit failure.
+`KeyOrderedMultiValueTable<K, V>` has two ordered logical schemas. Schema v1 is
+append-only. Schema v2 adds `AppendElement` and exact `EraseElement` by a
+persistent `OrderedElementId`, with Live/Tombstone state, per-origin introduced
+high-water integrity, and typed capture that atomically commits the mutation and
+an ordered outbox envelope. Both require one authoritative ordered origin.
+Broad key/value erase, clear, baseline import, multi-origin histories, tombstone
+pruning, and compaction remain deferred. A native MDBX commit failure after
+ordered capture preparation also remains deferred coverage; the existing
+pre-commit failure test does not model a native commit failure.
 
 `AnyValueTable<K>` needs value type-tag propagation or another explicit
 compatibility policy. The current sync wire operation only carries raw value
