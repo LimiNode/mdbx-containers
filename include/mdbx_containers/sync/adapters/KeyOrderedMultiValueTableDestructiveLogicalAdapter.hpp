@@ -336,6 +336,72 @@ namespace sync {
                 }
             }
 
+            /// \brief Resolves and erases every current table element.
+            std::size_t clear(const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    OrderedElementCandidateSet candidates(bounds);
+                    const OrderedElementStateScan state_scan =
+                        m_adapter.m_state.scan_all_element_records(
+                            m_txn.handle(), &candidates, true);
+                    std::vector<typename table_type::value_type> physical_entries;
+                    m_adapter.m_table.db_collect_entries(
+                        physical_entries, m_txn.handle(),
+                        [&candidates]() {
+                            candidates.inspect_record();
+                        });
+                    if (physical_entries.size() != state_scan.live_records.size()) {
+                        throw std::runtime_error(
+                            "Ordered destructive table and state counts differ");
+                    }
+                    const std::vector<OrderedElementKeyIndexEntry> index_entries =
+                        m_adapter.m_state.key_index_entries(
+                            m_txn.handle(), &candidates);
+                    std::vector<OrderedElementKeyIndexEntry> expected_index_entries;
+                    std::vector<std::vector<std::uint8_t> > keys;
+                    std::vector<std::vector<OrderedElementId> > state_ids;
+                    for (std::size_t i = 0u;
+                         i < state_scan.live_records.size(); ++i) {
+                        const std::size_t key_index = find_key_group(
+                            keys, state_scan.live_records[i].record.key);
+                        if (key_index == keys.size()) {
+                            keys.push_back(state_scan.live_records[i].record.key);
+                            state_ids.push_back(std::vector<OrderedElementId>());
+                        }
+                        state_ids[key_index].push_back(state_scan.live_records[i].id);
+                        OrderedElementKeyIndexEntry expected;
+                        expected.key = state_scan.live_records[i].record.key;
+                        expected.id = state_scan.live_records[i].id;
+                        expected_index_entries.push_back(expected);
+                    }
+
+                    validate_complete_key_index(
+                        index_entries, expected_index_entries);
+                    for (std::size_t i = 0u;
+                         i < state_scan.element_origins.size(); ++i) {
+                        m_adapter.m_state.verify_introduced_high_water(
+                            m_txn.handle(), state_scan.element_origins[i], &candidates);
+                    }
+                    for (std::size_t i = 0u; i < keys.size(); ++i) {
+                        const KeyT key = KeyCodec::decode(keys[i]);
+                        if (KeyCodec::encode(key) != keys[i]) {
+                            throw std::runtime_error(
+                                "Ordered destructive state key is non-canonical");
+                        }
+                        validate_live_key_group(
+                            key, keys[i], state_ids[i], candidates);
+                    }
+
+                    const std::vector<OrderedElementId> ids =
+                        candidates.sorted_ids();
+                    erase_selected(ids, &candidates);
+                    return ids.size();
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
             /// \brief Commits captured mutations and delivery atomically.
             LogicalDeliveryEnvelope commit_to_outbox(
                     ILogicalDeliveryOutbox& outbox,
@@ -371,6 +437,17 @@ namespace sync {
             }
 
         private:
+            static std::size_t find_key_group(
+                    const std::vector<std::vector<std::uint8_t> >& keys,
+                    const std::vector<std::uint8_t>& key) {
+                for (std::size_t i = 0u; i < keys.size(); ++i) {
+                    if (keys[i] == key) {
+                        return i;
+                    }
+                }
+                return keys.size();
+            }
+
             static bool contains_origin(const std::vector<NodeId>& origins,
                                         const NodeId& origin) {
                 for (std::size_t i = 0u; i < origins.size(); ++i) {
@@ -379,6 +456,33 @@ namespace sync {
                     }
                 }
                 return false;
+            }
+
+            static bool key_index_entry_less(
+                    const OrderedElementKeyIndexEntry& lhs,
+                    const OrderedElementKeyIndexEntry& rhs) {
+                if (lhs.key != rhs.key) {
+                    return lhs.key < rhs.key;
+                }
+                return OrderedElementIdLess()(lhs.id, rhs.id);
+            }
+
+            static void validate_complete_key_index(
+                    std::vector<OrderedElementKeyIndexEntry> actual,
+                    std::vector<OrderedElementKeyIndexEntry> expected) {
+                for (std::size_t i = 0u; i < actual.size(); ++i) {
+                    const KeyT key = KeyCodec::decode(actual[i].key);
+                    if (KeyCodec::encode(key) != actual[i].key) {
+                        throw std::runtime_error(
+                            "Ordered destructive index key is non-canonical");
+                    }
+                }
+                std::sort(actual.begin(), actual.end(), key_index_entry_less);
+                std::sort(expected.begin(), expected.end(), key_index_entry_less);
+                if (actual != expected) {
+                    throw std::runtime_error(
+                        "Ordered destructive complete key index and state differ");
+                }
             }
 
             template<typename Selector>
@@ -433,6 +537,36 @@ namespace sync {
                     }
                 }
                 return selected;
+            }
+
+            void validate_live_key_group(
+                    const KeyT& key,
+                    const std::vector<std::uint8_t>& key_bytes,
+                    std::vector<OrderedElementId> expected_ids,
+                    OrderedElementCandidateSet& candidates) const {
+                std::sort(expected_ids.begin(), expected_ids.end(),
+                          OrderedElementIdLess());
+
+                std::vector<ValueT> physical_values;
+                m_adapter.m_table.db_collect_values(
+                    key, physical_values, m_txn.handle(),
+                    [&candidates]() {
+                        candidates.inspect_record();
+                    });
+                if (physical_values.size() != expected_ids.size()) {
+                    throw std::runtime_error(
+                        "Ordered destructive table and state counts differ");
+                }
+                for (std::size_t i = 0u; i < expected_ids.size(); ++i) {
+                    OrderedElementStateRecord record;
+                    if (!m_adapter.m_state.get(
+                            m_txn.handle(), expected_ids[i], record, &candidates) ||
+                        !record.live || record.key != key_bytes ||
+                        record.value != ValueCodec::encode(physical_values[i])) {
+                        throw std::runtime_error(
+                            "Ordered destructive table and state value order differs");
+                    }
+                }
             }
 
             void erase_resolved(const OrderedElementId& id,

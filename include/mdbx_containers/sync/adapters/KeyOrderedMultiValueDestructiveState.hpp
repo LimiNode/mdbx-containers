@@ -181,6 +181,28 @@ namespace sync {
         std::vector<std::uint8_t> value;
     };
 
+    /// \brief One live state record paired with its immutable identity.
+    struct OrderedLiveElementState {
+        OrderedElementId id;
+        OrderedElementStateRecord record;
+    };
+
+    /// \brief Full bounded element-state scan used by complete-schema selectors.
+    struct OrderedElementStateScan {
+        std::vector<OrderedLiveElementState> live_records;
+        std::vector<NodeId> element_origins;
+    };
+
+    /// \brief One physical elements-by-key entry.
+    struct OrderedElementKeyIndexEntry {
+        std::vector<std::uint8_t> key;
+        OrderedElementId id;
+
+        bool operator==(const OrderedElementKeyIndexEntry& other) const {
+            return key == other.key && id == other.id;
+        }
+    };
+
     /// \brief Transactional store for destructive ordered element state.
     /// \details The state DBI stores origin allocation counters, introduced
     /// sequence high-water marks, and Live/Tombstone records.
@@ -541,6 +563,107 @@ namespace sync {
             return out;
         }
 
+        /// \brief Scans every element record and every origin it references.
+        /// \param select_live_candidates When true, each Live id is admitted
+        ///        before its record is materialized in the returned vector.
+        OrderedElementStateScan scan_all_element_records(
+                MDBX_txn* txn,
+                OrderedElementCandidateSet* candidates = nullptr,
+                bool select_live_candidates = false) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::scan_all_element_records");
+            const MDBX_dbi state = open_state(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, state, &cursor),
+                       "Ordered element state cursor open failed");
+            OrderedElementStateScan out;
+            try {
+                MDBX_val raw_key;
+                MDBX_val raw_value;
+                int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
+                                         MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    inspect_record(candidates);
+                    const std::uint8_t* bytes =
+                        static_cast<const std::uint8_t*>(raw_key.iov_base);
+                    if (bytes == nullptr || raw_key.iov_len == 0u) {
+                        throw std::runtime_error(
+                            "Ordered element state key is invalid");
+                    }
+                    if (bytes[0] == counter_tag() ||
+                        bytes[0] == introduced_tag()) {
+                        if (raw_key.iov_len != 1u + NodeId().size() ||
+                            raw_value.iov_len != 8u) {
+                            throw std::runtime_error(
+                                "Ordered element counter record is corrupt");
+                        }
+                    } else if (bytes[0] == element_tag()) {
+                        OrderedLiveElementState entry;
+                        entry.id = decode_element_key(raw_key);
+                        entry.record = decode_state_value(raw_value);
+                        if (!contains_origin(out.element_origins, entry.id.origin)) {
+                            out.element_origins.push_back(entry.id.origin);
+                        }
+                        if (entry.record.live) {
+                            if (select_live_candidates && candidates != nullptr) {
+                                candidates->select(entry.id);
+                            }
+                            out.live_records.push_back(entry);
+                        }
+                    } else {
+                        throw std::runtime_error(
+                            "Ordered element state key tag is invalid");
+                    }
+                    rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
+                                         MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc, "Ordered element state cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return out;
+        }
+
+        /// \brief Bounded full scan of the elements-by-key DUPSORT index.
+        std::vector<OrderedElementKeyIndexEntry> key_index_entries(
+                MDBX_txn* txn,
+                OrderedElementCandidateSet* candidates = nullptr) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::key_index_entries");
+            const MDBX_dbi by_key = open_by_key(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, by_key, &cursor),
+                       "Ordered element key index cursor open failed");
+            std::vector<OrderedElementKeyIndexEntry> out;
+            try {
+                MDBX_val raw_key;
+                MDBX_val raw_value;
+                int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
+                                         MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    inspect_record(candidates);
+                    OrderedElementKeyIndexEntry entry;
+                    entry.key = copy_bytes(raw_key);
+                    entry.id = decode_index_value(raw_value);
+                    out.push_back(entry);
+                    rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
+                                         MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc, "Ordered element key index cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return out;
+        }
+
     private:
         static std::uint8_t counter_tag() { return 0x00u; }
         static std::uint8_t element_tag() { return 0x01u; }
@@ -561,6 +684,18 @@ namespace sync {
             if (candidates != nullptr) {
                 candidates->inspect_record();
             }
+        }
+
+        static std::vector<std::uint8_t> copy_bytes(const MDBX_val& value) {
+            if (value.iov_len == 0u) {
+                return std::vector<std::uint8_t>();
+            }
+            if (value.iov_base == nullptr) {
+                throw std::runtime_error("Ordered element index key is invalid");
+            }
+            const std::uint8_t* bytes =
+                static_cast<const std::uint8_t*>(value.iov_base);
+            return std::vector<std::uint8_t>(bytes, bytes + value.iov_len);
         }
 
         MDBX_dbi open_by_key(MDBX_txn* txn) const {
