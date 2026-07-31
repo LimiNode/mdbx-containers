@@ -102,8 +102,10 @@ successful while source and destination table semantics diverge.
 `KeyMultiValueTable<K, V>` has a limited explicit logical adapter for the
 unordered multiset model. Repeated identical `(key, value)` pairs preserve
 multiplicity under single-writer or causally serialized updates. Raw v0.1
-capture, bulk/reconcile/range capture, and general concurrent destructive
-updates remain deferred.
+capture, direct bulk/range table calls, and general concurrent destructive
+updates remain deferred. The typed session supports batch `append()` in all
+supported schema versions, schema-v2 `reconcile()`, and schema-v3 bounded
+`erase_range()` capture.
 The adapter rejects truncated pair payloads, oversized declared lengths,
 trailing bytes, payload-bearing clear, and unknown opcodes before mutation.
 The detailed deferred contract lives in

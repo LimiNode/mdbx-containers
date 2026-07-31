@@ -75,13 +75,13 @@ These table families intentionally emit no `ChangeOp` in v0.1:
 
 - `AnyValueTable`, until a wire-level type tag and compatibility policy is
   specified.
-- raw `KeyMultiValueTable` capture, bulk/range operations, and
-  general multi-writer destructive convergence. The explicit unordered logical
-  adapter schema v1 covers insert, key erase, all-matching-value erase, and
-  clear; schema v2 additionally covers exact-one erase and typed `reconcile()`.
-  Schema v3 adds bounded typed range erasure under the same one-writer or
-  causally serialized update contract; capture expands the selected keys into
-  existing `EraseKey` logical changes before local mutation.
+- raw `KeyMultiValueTable` capture, direct bulk/range table calls, and general
+  multi-writer destructive convergence. The explicit unordered logical adapter
+  schema v1 covers insert, typed batch `append()`, key erase, all-matching-value
+  erase, and clear; schema v2 additionally covers exact-one erase and typed
+  `reconcile()`. Schema v3 adds bounded typed range erasure under the same
+  one-writer or causally serialized update contract; capture expands the
+  selected keys into existing `EraseKey` logical changes before local mutation.
 - `KeyOrderedMultiValueTable` raw capture, replace, baseline import, and
   multi-origin histories. Schema v1 remains append-only. Schema v2 supports
   logical `AppendElement` and exact `EraseElement` by persistent element id,

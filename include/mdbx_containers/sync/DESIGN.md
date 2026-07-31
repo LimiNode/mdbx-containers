@@ -216,15 +216,16 @@ matching adapter fail closed before mutation through logical schema-marker and
 adapter validation.
 
 The first implementation scope is intentionally smaller than the complete
-model. Schema v1 typed capture supports `InsertOne`, `EraseKey`,
-`EraseAllValues`, and `Clear`. Schema v2 additionally supports
-`EraseOneValue` and `reconcile()`. Reconciliation matches canonical logical
-pairs by multiplicity, emits one `EraseOneValue` per surplus occurrence, then
-emits missing `InsertOne` changes in desired-vector order. It does not capture
-raw table calls, `append()`, or `erase_range()`. Those paths remain local until
-a later extension can preserve their exact multiset semantics. This is not
-partial raw capture: callers opt into the typed session and only its documented
-methods publish logical changes.
+model. Schema v1 typed capture supports `InsertOne`, batch `append()` expanded
+in input order into `InsertOne`, `EraseKey`, `EraseAllValues`, and `Clear`.
+Schema v2 additionally supports `EraseOneValue` and `reconcile()`.
+Reconciliation matches canonical logical pairs by multiplicity, emits one
+`EraseOneValue` per surplus occurrence, then emits missing `InsertOne` changes
+in desired-vector order. Schema v3 additionally supports bounded typed
+`erase_range()`, expanded into `EraseKey` changes before local mutation. These
+typed session methods are version-neutral where stated; direct table calls and
+raw capture remain local-only. This is not partial raw capture: callers opt
+into the typed session and only its documented methods publish logical changes.
 
 Schema v3 typed range erasure is an inclusive logical-key interval, never a raw
 MDBX cursor key. Capture scans the complete local range before mutation under a
@@ -247,15 +248,16 @@ Implementation phases:
    values for `EraseOneValue` and `EraseAllValues`; use public key ordering for
    range erasure.
 3. Add the scoped typed capture session only for methods that map directly to
-   the first implementation operations. Raw capture stays disabled.
+   the implementation operations. Raw capture stays disabled.
 4. Add negative compatibility tests: receivers without the matching adapter or
    persistent marker must fail before table mutation.
 5. Add round-trip tests before documenting the wrapper as supported. Tests must
    compare logical multiset counts, not raw duplicate bytes or local iteration
    order.
 
-`append()` can be represented as a sequence of `InsertOne` operations in the
-same local batch. `erase(key, value)` emits `EraseAllValues`. Typed
+Typed `append()` is available for schema v1, v2, and v3 because it is
+represented as a sequence of `InsertOne` operations in the same local batch.
+`erase(key, value)` emits `EraseAllValues`. Typed
 `reconcile()` emits one `EraseOneValue` per surplus occurrence and one
 `InsertOne` per missing occurrence so that repeated identical pairs preserve
 their final multiplicity. If a future implementation captures lower-level
@@ -876,9 +878,9 @@ anchors, see the
 
 - `HashedKeyValueStore` — internal hash index layout complicates the wire
   format; deferred until an explicit identity-mapping scheme lands.
-- `KeyMultiValueTable` — raw capture, `append()`, and range-oriented operations
-  remain deferred beyond the schema-v1/v2 unordered multiset model described
-  above.
+- `KeyMultiValueTable` — raw capture, direct table bulk/range calls, and
+  general multi-writer destructive convergence remain deferred beyond the
+  typed schema-v1/v2/v3 model described above.
 - `KeyOrderedMultiValueTable` — raw capture, `replace_with()`, baseline import,
   multi-origin history and tombstone compaction remain deferred beyond the
   implemented single-origin v2 capture contract. That contract includes
