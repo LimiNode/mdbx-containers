@@ -506,6 +506,8 @@ namespace mdbxc {
 
     inline void Connection::on_discard(MDBX_txn* txn) noexcept {
         try {
+            // txn is an identity token here. A terminal commit error may have
+            // already invalidated the native handle.
             clear_sync_capture_failed(txn);
             sync::ISyncCaptureSink* sink = sync_capture();
             if (sink != nullptr) {

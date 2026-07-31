@@ -91,8 +91,11 @@ namespace mdbxc {
 
         /// \brief Discard hook for sync capture.
         /// \details Called by \c Transaction::release / \c rollback paths
-        /// when a write transaction is aborted. Default is no-op; \c Connection
-        /// forwards to the attached \c ISyncCaptureSink.
+        /// before a write transaction is aborted, and after a terminal native
+        /// commit error has already terminated it. \p txn is an opaque identity
+        /// token only; implementations must not dereference it or pass it to
+        /// MDBX. Default is no-op; \c Connection forwards to the attached
+        /// \c ISyncCaptureSink.
         virtual void on_discard(MDBX_txn* txn) noexcept {
             (void)txn;
         }

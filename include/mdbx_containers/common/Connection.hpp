@@ -59,6 +59,10 @@ namespace mdbxc {
 #   if MDBXC_SYNC_ENABLED
     public:
         void on_pre_commit(MDBX_txn* txn) override;
+        /// \brief Clears capture state using \p txn only as an identity token.
+        /// \details The MDBX transaction may already be terminated after a
+        /// native commit error. This method and the attached sink must not
+        /// dereference \p txn or pass it to MDBX.
         void on_discard(MDBX_txn* txn) noexcept override;
 #   endif
     private:

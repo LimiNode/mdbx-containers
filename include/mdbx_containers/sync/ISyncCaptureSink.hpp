@@ -83,11 +83,16 @@ namespace sync {
         virtual void flush_in_txn(MDBX_txn* txn) = 0;
 
         /// \brief Discards any pending ops recorded for a transaction that
-        /// is about to be aborted or rolled back.
-        /// \param txn The about-to-be-aborted write transaction.
+        /// was or is being aborted.
+        /// \param txn Opaque identity token for the discarded transaction.
         /// \details Default implementation is a no-op; overrides drop the
         /// pending ops so the next transaction on the same thread (or the
         /// next MDBX_txn* address if the allocator reuses it) starts clean.
+        /// On explicit rollback or destructor cleanup, \p txn may still name
+        /// an active transaction immediately before \c mdbx_txn_abort(). On a
+        /// terminal native commit error, MDBX has already terminated it.
+        /// Implementations may compare or use the pointer value as a map key,
+        /// but must not dereference it or pass it to any MDBX API.
         virtual void discard_txn(MDBX_txn* txn) noexcept {
             (void)txn;
         }
