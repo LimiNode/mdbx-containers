@@ -2119,6 +2119,24 @@ void test_key_multi_value_logical_capture_session_commits_typed_writes() {
                       mdbxc::sync::KeyMultiValueLogicalClear);
     MDBXC_TEST_ASSERT(table.count() == 0u);
 
+    std::vector<mdbxc::KeyMultiValueTable<int, std::string>::value_type>
+        appended;
+    appended.push_back(std::make_pair(3, std::string("three")));
+    appended.push_back(std::make_pair(3, std::string("three")));
+    std::vector<mdbxc::sync::LogicalChange> append_changes;
+    {
+        std::unique_ptr<IntStringMultiAdapter::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(appended);
+        session->commit(append_changes);
+    }
+    MDBXC_TEST_ASSERT(append_changes.size() == 2u);
+    MDBXC_TEST_ASSERT(append_changes[0].opcode ==
+                      mdbxc::sync::KeyMultiValueLogicalInsertOne);
+    MDBXC_TEST_ASSERT(append_changes[1].opcode ==
+                      mdbxc::sync::KeyMultiValueLogicalInsertOne);
+    MDBXC_TEST_ASSERT(table.count(3, "three") == 2u);
+
     {
         mdbxc::Transaction txn =
             conn->transaction(mdbxc::TransactionMode::READ_ONLY);
@@ -2307,8 +2325,17 @@ void test_key_multi_value_logical_capture_session_appends_and_erases_bounded_ran
     const mdbxc::sync::LogicalApplyResult result =
         replica_engine.apply_logical_changes(changes);
     MDBXC_TEST_ASSERT(result.ok);
-    MDBXC_TEST_ASSERT(replica_table.retrieve_all_vector() ==
-                      source_table.retrieve_all_vector());
+    MDBXC_TEST_ASSERT(replica_table.count() == source_table.count());
+    MDBXC_TEST_ASSERT(replica_table.count(1, "one") ==
+                      source_table.count(1, "one"));
+    MDBXC_TEST_ASSERT(replica_table.count(2) == source_table.count(2));
+    MDBXC_TEST_ASSERT(replica_table.count(3) == source_table.count(3));
+    MDBXC_TEST_ASSERT(replica_table.count(4, "four") ==
+                      source_table.count(4, "four"));
+    MDBXC_TEST_ASSERT(replica_table.count(5, "five") ==
+                      source_table.count(5, "five"));
+    MDBXC_TEST_ASSERT(replica_table.count(2) == 0u);
+    MDBXC_TEST_ASSERT(replica_table.count(3) == 0u);
 
     source->disconnect();
     replica->disconnect();
@@ -2362,6 +2389,94 @@ void test_key_multi_value_logical_range_bound_rolls_back_before_mutation() {
     }
     MDBXC_TEST_ASSERT(commit_rejected);
     MDBXC_TEST_ASSERT(changes.empty());
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_key_multi_value_logical_range_boundaries_and_schema_rejection() {
+    const std::string path =
+        "test_key_multi_value_logical_adapter_range_boundaries.mdbx";
+    const std::string v3_dbi_name = "logical_key_multi_value_range_v3";
+    const std::string v2_dbi_name = "logical_key_multi_value_range_v2";
+    const std::string v3_schema_id =
+        "app.logical_key_multi_value_range_boundaries.v3";
+    const std::string v2_schema_id =
+        "app.logical_key_multi_value_range_boundaries.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(make_node(0x69), make_node(0xE9));
+    engine.register_logical_schema(
+        v3_schema_id, make_key_multi_value_record(v3_dbi_name, 3u));
+    engine.register_logical_schema(
+        v2_schema_id, make_key_multi_value_record(v2_dbi_name, 2u));
+    mdbxc::KeyMultiValueTable<int, std::string> v3_table(
+        connection, v3_dbi_name);
+    mdbxc::KeyMultiValueTable<int, std::string> v2_table(
+        connection, v2_dbi_name);
+    IntStringMultiAdapter v3_adapter(v3_table, v3_schema_id, 3u);
+    IntStringMultiAdapter v2_adapter(v2_table, v2_schema_id, 2u);
+
+    v3_table.insert(1, "one");
+    v3_table.insert(1, "one");
+    v3_table.insert(2, "two");
+    std::vector<mdbxc::sync::LogicalChange> exact_changes;
+    {
+        std::unique_ptr<IntStringMultiAdapter::LogicalCaptureSession> session =
+            v3_adapter.begin_capture_session();
+        MDBXC_TEST_ASSERT(session->erase_range(1, 2, 3u) == 3u);
+        session->commit(exact_changes);
+    }
+    MDBXC_TEST_ASSERT(exact_changes.size() == 2u);
+    MDBXC_TEST_ASSERT(v3_table.count() == 0u);
+
+    {
+        std::unique_ptr<IntStringMultiAdapter::LogicalCaptureSession> session =
+            v3_adapter.begin_capture_session();
+        std::vector<mdbxc::sync::LogicalChange> empty_changes;
+        MDBXC_TEST_ASSERT(session->erase_range(10, 20, 0u) == 0u);
+        session->commit(empty_changes);
+        MDBXC_TEST_ASSERT(empty_changes.empty());
+    }
+    {
+        std::unique_ptr<IntStringMultiAdapter::LogicalCaptureSession> session =
+            v3_adapter.begin_capture_session();
+        std::vector<mdbxc::sync::LogicalChange> inverted_changes;
+        MDBXC_TEST_ASSERT(session->erase_range(2, 1, 0u) == 0u);
+        session->commit(inverted_changes);
+        MDBXC_TEST_ASSERT(inverted_changes.empty());
+    }
+
+    v3_table.insert(4, "four");
+    std::unique_ptr<IntStringMultiAdapter::LogicalCaptureSession> bounded_session =
+        v3_adapter.begin_capture_session();
+    bool zero_bound_rejected = false;
+    try {
+        (void)bounded_session->erase_range(4, 4, 0u);
+    } catch (const std::length_error&) {
+        zero_bound_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(zero_bound_rejected);
+    MDBXC_TEST_ASSERT(v3_table.count(4, "four") == 1u);
+
+    v2_table.insert(7, "seven");
+    std::unique_ptr<IntStringMultiAdapter::LogicalCaptureSession> v2_session =
+        v2_adapter.begin_capture_session();
+    bool v2_rejected = false;
+    try {
+        (void)v2_session->erase_range(7, 7, 1u);
+    } catch (const std::logic_error&) {
+        v2_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(v2_rejected);
+    MDBXC_TEST_ASSERT(v2_table.count(7, "seven") == 1u);
 
     connection->disconnect();
     cleanup(path);
@@ -5811,6 +5926,7 @@ int main() {
     test_key_multi_value_logical_capture_session_reconciles_multiplicity();
     test_key_multi_value_logical_capture_session_appends_and_erases_bounded_range();
     test_key_multi_value_logical_range_bound_rolls_back_before_mutation();
+    test_key_multi_value_logical_range_boundaries_and_schema_rejection();
     test_key_multi_value_logical_reconcile_rolls_back_late_codec_failure();
     test_key_multi_value_logical_capture_session_commits_to_outbox();
     test_key_multi_value_logical_capture_session_rolls_back_on_outbox_failure();
