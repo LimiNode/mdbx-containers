@@ -615,6 +615,33 @@ void test_destructive_capture_resolves_bounded_broad_erasure() {
     {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
+        session->append(1, "same");
+        session->append(1, "middle");
+        session->append(1, "same");
+        session->append(1, "last");
+        session->commit_to_outbox(engine, destination);
+    }
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        if (session->erase_value(1, "same", bounds) != 2u) {
+            throw std::runtime_error(
+                "broad erasure did not select every repeated value");
+        }
+        session->commit_to_outbox(engine, destination);
+    }
+    {
+        const std::vector<std::string> values = table.find(1);
+        if (values.size() != 3u || values[0] != "first" ||
+            values[1] != "middle" || values[2] != "last") {
+            throw std::runtime_error(
+                "broad erasure shifted surviving duplicate positions");
+        }
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
         session->append(3, "transient");
         if (session->erase_value(3, "transient", bounds) != 1u ||
             session->pending_size() != 0u) {
