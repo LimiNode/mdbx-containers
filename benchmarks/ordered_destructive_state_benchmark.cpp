@@ -23,6 +23,7 @@ struct Scenario {
     std::uint64_t elements_per_origin;
     std::uint64_t key_count;
     std::uint64_t iterations;
+    std::uint64_t tombstones_per_origin;
 };
 
 struct CleanupGuard {
@@ -65,16 +66,22 @@ Scenario parse_scenario(int argc, char** argv) {
     scenario.elements_per_origin = 64u;
     scenario.key_count = 8u;
     scenario.iterations = 50u;
+    scenario.tombstones_per_origin = 0u;
     if (argc == 1) return scenario;
-    if (argc != 5) {
+    if (argc != 5 && argc != 6) {
         throw std::invalid_argument(
             "usage: ordered_destructive_state_benchmark "
-            "[origins elements_per_origin key_count iterations]");
+            "[origins elements_per_origin key_count iterations "
+            "[tombstones_per_origin]]");
     }
     scenario.origins = parse_u64(argv[1], "origins");
     scenario.elements_per_origin = parse_u64(argv[2], "elements_per_origin");
     scenario.key_count = parse_u64(argv[3], "key_count");
     scenario.iterations = parse_u64(argv[4], "iterations");
+    if (argc == 6) {
+        scenario.tombstones_per_origin =
+            parse_u64(argv[5], "tombstones_per_origin");
+    }
     return scenario;
 }
 
@@ -86,6 +93,10 @@ void validate_scenario(const Scenario& scenario) {
     if (scenario.origins > 200u || scenario.elements_per_origin > 4096u ||
         scenario.key_count > 1024u || scenario.iterations > 100000u) {
         throw std::invalid_argument("benchmark arguments exceed manual safety bounds");
+    }
+    if (scenario.tombstones_per_origin > scenario.elements_per_origin) {
+        throw std::invalid_argument(
+            "tombstones_per_origin exceeds elements_per_origin");
     }
 }
 
@@ -111,9 +122,14 @@ double elapsed_ms(const std::chrono::steady_clock::time_point& started) {
 }
 
 std::uint64_t expected_target_ids(const Scenario& scenario) {
-    const std::uint64_t per_origin =
-        scenario.elements_per_origin / scenario.key_count +
-        (scenario.elements_per_origin % scenario.key_count == 0u ? 0u : 1u);
+    std::uint64_t per_origin = 0u;
+    for (std::uint64_t element_index = scenario.tombstones_per_origin;
+         element_index < scenario.elements_per_origin;
+         ++element_index) {
+        if (element_index % scenario.key_count == 0u) {
+            ++per_origin;
+        }
+    }
     return per_origin * scenario.origins;
 }
 
@@ -130,6 +146,7 @@ void seed_state(const std::shared_ptr<mdbxc::Connection>& connection,
         const mdbxc::sync::NodeId origin =
             make_node(static_cast<std::uint8_t>(origin_index + 1u));
         origins.push_back(origin);
+        std::vector<mdbxc::sync::OrderedElementId> ids;
         for (std::uint64_t element_index = 0u;
              element_index < scenario.elements_per_origin;
              ++element_index) {
@@ -138,6 +155,13 @@ void seed_state(const std::shared_ptr<mdbxc::Connection>& connection,
             store.put_live(transaction.handle(), id,
                            make_key(element_index % scenario.key_count),
                            make_value(origin_index, element_index));
+            ids.push_back(id);
+        }
+        for (std::uint64_t tombstone_index = 0u;
+             tombstone_index < scenario.tombstones_per_origin;
+             ++tombstone_index) {
+            store.tombstone(
+                transaction.handle(), ids[static_cast<std::size_t>(tombstone_index)]);
         }
     }
     transaction.commit();
@@ -210,20 +234,28 @@ void run(const Scenario& scenario) {
 
     const std::uint64_t element_records =
         scenario.origins * scenario.elements_per_origin;
+    const std::uint64_t tombstone_records =
+        scenario.origins * scenario.tombstones_per_origin;
+    const std::uint64_t live_element_records =
+        element_records - tombstone_records;
     const std::uint64_t state_records =
         scenario.origins * (scenario.elements_per_origin + 2u);
+    const std::uint64_t by_key_records = live_element_records;
     std::cout
         << "scan,origins,elements_per_origin,key_count,iterations,element_records,"
-        << "state_records,matched_live_ids,elapsed_ms\n"
+        << "live_element_records,tombstone_records,state_records,by_key_records,"
+        << "matched_live_ids,elapsed_ms\n"
         << "live_state_ids_for_key," << scenario.origins << ','
         << scenario.elements_per_origin << ',' << scenario.key_count << ','
         << scenario.iterations << ',' << element_records << ','
-        << state_records << ','
+        << live_element_records << ',' << tombstone_records << ','
+        << state_records << ',' << by_key_records << ','
         << matched_live_ids << ',' << reverse_ms << '\n'
         << "verify_introduced_high_water," << scenario.origins << ','
         << scenario.elements_per_origin << ',' << scenario.key_count << ','
         << scenario.iterations << ',' << element_records << ','
-        << state_records << ','
+        << live_element_records << ',' << tombstone_records << ','
+        << state_records << ',' << by_key_records << ','
         << 0u << ',' << origin_ms << '\n';
     connection->disconnect();
 }
