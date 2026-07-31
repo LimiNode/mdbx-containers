@@ -851,6 +851,40 @@ namespace mdbxc {
             return false;
         }
 
+        template<typename BeforeInspect>
+        bool db_erase_at(const KeyT& key,
+                         std::size_t index,
+                         MDBX_txn* txn,
+                         BeforeInspect before_inspect) {
+            CursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
+                       "Failed to open MDBX cursor");
+
+            SerializeScratch sc_key;
+            MDBX_val db_key = serialize_key<Options::safe_integer_key>(key, sc_key);
+            MDBX_val db_val;
+            int rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_SET_KEY);
+            if (rc == MDBX_NOTFOUND) {
+                return false;
+            }
+            check_mdbx(rc, "Failed to seek key");
+            std::size_t current = 0u;
+            while (rc == MDBX_SUCCESS) {
+                before_inspect();
+                if (current == index) {
+                    check_mdbx(mdbx_cursor_del(cursor.get(), MDBX_CURRENT),
+                               "Failed to erase ordered duplicate by index");
+                    return true;
+                }
+                ++current;
+                rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_NEXT_DUP);
+            }
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "Failed to scan ordered duplicate values");
+            }
+            return false;
+        }
+
         void db_clear(MDBX_txn* txn) {
             check_mdbx(mdbx_drop(txn, m_dbi, 0), "Failed to clear ordered multi-value table");
         }
