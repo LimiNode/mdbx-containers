@@ -170,6 +170,10 @@ namespace sync {
                     });
             }
 
+            /// \brief Appends a batch through typed logical capture.
+            /// \details Available for schema versions 1, 2, and 3. Each
+            /// input pair becomes an \c InsertOne change in input order;
+            /// this method does not introduce a new wire opcode.
             template<template<class...> class ContainerT>
             void append(const ContainerT<KeyT, ValueT>& values) {
                 std::vector<typename table_type::value_type> copy;
