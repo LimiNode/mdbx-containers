@@ -133,3 +133,33 @@ tmp/build-bench/bin/benchmarks/sync_tick_hub_benchmark \
    сценариями или аргументами.
 6. Используйте этот benchmark только для оценки изменений ядра синхронизации.
    Он не показывает стоимость HTTP, WebSocket, IPC или шифрования.
+
+## Базовый benchmark destructive state
+
+`ordered_destructive_state_benchmark` измеряет два намеренно линейных пути
+проверки destructive schema version 2:
+
+- `live_state_ids_for_key()` выполняет обратное сканирование всего state DBI,
+  чтобы найти все живые element id одного canonical key и обнаружить записи,
+  отсутствующие в DUPSORT index;
+- `verify_introduced_high_water()` сканирует prefix одного origin перед выдачей
+  нового id.
+
+Это ручной baseline для границ нагрузки, а не заявление о пропускной
+способности и не CTest target. Для сравнения ревизий используйте одинаковые
+аргументы и настройки сборки:
+
+```bash
+cmake --build tmp/build-bench --target ordered_destructive_state_benchmark
+tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark
+tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark \
+    16 512 32 100
+```
+
+Необязательные позиционные аргументы: `origins`, `elements_per_origin`,
+`key_count` и `iterations`. CSV отдельно содержит `element_records` и
+`state_records`; второе значение включает allocation counter и introduced
+high-water record каждого origin. `elapsed_ms` включает открытие read
+transaction, измеряемое сканирование и rollback. Результаты representative
+workloads нужны до добавления index, cache или фиксированного лимита к любому
+из путей корректности.
