@@ -75,10 +75,11 @@ These table families intentionally emit no `ChangeOp` in v0.1:
 
 - `AnyValueTable`, until a wire-level type tag and compatibility policy is
   specified.
-- raw `KeyMultiValueTable` capture, bulk/reconcile/range operations, and
+- raw `KeyMultiValueTable` capture, bulk/range operations, and
   general multi-writer destructive convergence. The explicit unordered logical
-  adapter covers only insert, key erase, all-matching-value erase, and clear for one writer
-  or causally serialized updates.
+  adapter schema v1 covers insert, key erase, all-matching-value erase, and
+  clear; schema v2 additionally covers exact-one erase and typed `reconcile()`
+  for one writer or causally serialized updates.
 - `KeyOrderedMultiValueTable` raw capture, replace, baseline import, and
   multi-origin histories. Schema v1 remains append-only. Schema v2 supports
   logical `AppendElement` and exact `EraseElement` by persistent element id,
@@ -107,8 +108,9 @@ delivery. The logical core uses the following contracts:
   apply helpers with opt-in typed capture sessions. Neither is connected to
   the transport pull/push path yet; callers own logical frame delivery.
 - `KeyMultiValueTableLogicalAdapter` follows the same explicit logical-frame
-  path for its limited unordered multiset operation set. It does not enable raw
-  `ChangeOp` capture for the table wrapper.
+  path. Schema v1 provides unordered insert, key erase, all-matching-value
+  erase, and clear; schema v2 adds exact-one erase and typed `reconcile()`.
+  It does not enable raw `ChangeOp` capture for the table wrapper.
 - `KeyOrderedMultiValueTableLogicalAdapter` applies schema-v1 append-only
   changes only through ordered delivery for one origin stream.
   `KeyOrderedMultiValueTableDestructiveLogicalAdapter` applies schema-v2

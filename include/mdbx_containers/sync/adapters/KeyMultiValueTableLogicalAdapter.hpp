@@ -27,7 +27,8 @@ namespace sync {
         KeyMultiValueLogicalInsertOne       = 1,
         KeyMultiValueLogicalEraseKey        = 2,
         KeyMultiValueLogicalEraseAllValues  = 3,
-        KeyMultiValueLogicalClear           = 4
+        KeyMultiValueLogicalClear           = 4,
+        KeyMultiValueLogicalEraseOneValue   = 5
     };
 
     /// \brief Logical adapter for an unordered \c KeyMultiValueTable.
@@ -63,9 +64,9 @@ namespace sync {
                 throw std::invalid_argument(
                     "KeyMultiValueTableLogicalAdapter DBI name is empty");
             }
-            if (m_schema_version == 0u) {
+            if (m_schema_version != 1u && m_schema_version != 2u) {
                 throw std::invalid_argument(
-                    "KeyMultiValueTableLogicalAdapter schema version is zero");
+                    "KeyMultiValueTableLogicalAdapter schema version is unsupported");
             }
         }
 
@@ -104,6 +105,13 @@ namespace sync {
                                     key, value);
         }
 
+        LogicalChange make_erase_one_value(const KeyT& key,
+                                            const ValueT& value) const {
+            require_schema_v2();
+            return make_pair_change(KeyMultiValueLogicalEraseOneValue,
+                                    key, value);
+        }
+
         LogicalChange make_clear() const {
             LogicalChange change;
             change.schema = schema_ref();
@@ -114,13 +122,17 @@ namespace sync {
         /// \brief Transaction-bound typed logical capture session.
         /// \details The session owns a writable transaction and suppresses raw
         /// capture for its mutations. It captures only unordered multiset
-        /// operations exposed by this class; direct table calls, bulk
-        /// reconciliation, and range erasure remain local-only operations.
+        /// operations exposed by this class. Direct table calls, bulk table
+        /// APIs, and range erasure remain local-only. Typed schema-v2
+        /// \c reconcile() is captured as exact multiset deltas.
         /// The adapter, table, and connection referenced by the adapter must
         /// outlive the session. An exception after physical mutation, outbox
         /// enqueue, or native commit processing begins requests rollback of
-        /// the transaction and deactivates the session. Preparation or
-        /// encoding failures before transaction mutation leave it active.
+        /// the transaction and deactivates the session. Any failure during
+        /// \c reconcile() planning or application also rolls back and
+        /// deactivates the session, including before its first table mutation.
+        /// Other single-operation preparation or encoding failures before
+        /// mutation leave the session active.
         class LogicalCaptureSession {
         public:
             explicit LogicalCaptureSession(
@@ -197,6 +209,99 @@ namespace sync {
                 }
             }
 
+            bool erase_one(const KeyT& key, const ValueT& value) {
+                ensure_active();
+                const LogicalChange change =
+                    m_adapter.make_erase_one_value(key, value);
+                const std::size_t previous_size = m_pending.size();
+                m_pending.push_back(change);
+                try {
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_adapter.m_table.connection(), m_txn.handle());
+                    const bool removed = m_adapter.m_table.erase_one(
+                        key, value, m_txn.handle());
+                    if (!removed) {
+                        m_pending.resize(previous_size);
+                    }
+                    return removed;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            void reconcile(const std::vector<typename table_type::value_type>& desired) {
+                ensure_active();
+                try {
+                    m_adapter.require_schema_v2();
+                    const std::vector<typename table_type::value_type> existing =
+                        m_adapter.m_table.retrieve_all_vector(m_txn.handle());
+                    std::vector<LogicalChange> desired_changes;
+                    desired_changes.reserve(desired.size());
+                    std::size_t i = 0u;
+                    for (; i < desired.size(); ++i) {
+                        desired_changes.push_back(m_adapter.make_insert_one(
+                            desired[i].first, desired[i].second));
+                    }
+
+                    std::vector<bool> desired_matched(desired.size(), false);
+                    std::vector<bool> existing_matched(existing.size(), false);
+                    std::vector<ReconcileDelta> plan;
+                    plan.reserve(existing.size() + desired.size());
+                    for (i = 0u; i < existing.size(); ++i) {
+                        const LogicalChange existing_change =
+                            m_adapter.make_insert_one(existing[i].first,
+                                                      existing[i].second);
+                        std::size_t j = 0u;
+                        for (; j < desired.size(); ++j) {
+                            if (!desired_matched[j] &&
+                                existing_change.payload ==
+                                    desired_changes[j].payload) {
+                                desired_matched[j] = true;
+                                existing_matched[i] = true;
+                                break;
+                            }
+                        }
+                    }
+                    for (i = 0u; i < existing.size(); ++i) {
+                        if (!existing_matched[i]) {
+                            plan.push_back(ReconcileDelta(
+                                m_adapter.make_erase_one_value(
+                                    existing[i].first, existing[i].second),
+                                existing[i], true));
+                        }
+                    }
+                    for (i = 0u; i < desired.size(); ++i) {
+                        if (!desired_matched[i]) {
+                            plan.push_back(ReconcileDelta(
+                                desired_changes[i], desired[i], false));
+                        }
+                    }
+
+                    m_pending.reserve(m_pending.size() + plan.size());
+                    for (i = 0u; i < plan.size(); ++i) {
+                        m_pending.push_back(plan[i].change);
+                        Connection::SyncCaptureSuppressionScope suppress_capture(
+                            *m_adapter.m_table.connection(), m_txn.handle());
+                        if (plan[i].erase) {
+                            if (!m_adapter.m_table.erase_one(
+                                    plan[i].pair.first, plan[i].pair.second,
+                                    m_txn.handle())) {
+                                throw std::logic_error(
+                                    "KeyMultiValue reconcile lost a planned pair");
+                            }
+                        } else {
+                            m_adapter.m_table.insert(
+                                plan[i].pair.first, plan[i].pair.second,
+                                m_txn.handle());
+                        }
+                    }
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
             void clear() {
                 ensure_active();
                 append_then_mutate(m_adapter.make_clear(), [this]() {
@@ -259,6 +364,17 @@ namespace sync {
             }
 
         private:
+            struct ReconcileDelta {
+                ReconcileDelta(const LogicalChange& change_value,
+                               const typename table_type::value_type& pair_value,
+                               bool erase_value)
+                    : change(change_value), pair(pair_value), erase(erase_value) {}
+
+                LogicalChange change;
+                typename table_type::value_type pair;
+                bool erase;
+            };
+
             template<class Mutation>
             void append_then_mutate(const LogicalChange& change,
                                     const Mutation& mutation) {
@@ -335,6 +451,12 @@ namespace sync {
                     const std::pair<KeyT, ValueT> pair =
                         decode_pair(change.payload);
                     (void)m_table.erase(pair.first, pair.second, txn);
+                    return LogicalApplyResult::success();
+                }
+                if (change.opcode == KeyMultiValueLogicalEraseOneValue) {
+                    const std::pair<KeyT, ValueT> pair =
+                        decode_pair(change.payload);
+                    (void)m_table.erase_one(pair.first, pair.second, txn);
                     return LogicalApplyResult::success();
                 }
                 if (change.opcode == KeyMultiValueLogicalClear) {
@@ -452,11 +574,24 @@ namespace sync {
             return std::make_pair(key, value);
         }
 
-        static LogicalApplyResult validate_payload(
-                const LogicalChange& change) {
+        void require_schema_v2() const {
+            if (m_schema_version != 2u) {
+                throw std::logic_error(
+                    "KeyMultiValue exact-one erase requires schema version 2");
+            }
+        }
+
+        LogicalApplyResult validate_payload(
+                const LogicalChange& change) const {
             try {
                 if (change.opcode == KeyMultiValueLogicalInsertOne ||
-                    change.opcode == KeyMultiValueLogicalEraseAllValues) {
+                    change.opcode == KeyMultiValueLogicalEraseAllValues ||
+                    change.opcode == KeyMultiValueLogicalEraseOneValue) {
+                    if (change.opcode == KeyMultiValueLogicalEraseOneValue &&
+                        m_schema_version != 2u) {
+                        return LogicalApplyResult::failure(
+                            "KeyMultiValue exact-one erase requires schema version 2");
+                    }
                     (void)decode_pair(change.payload);
                     return LogicalApplyResult::success();
                 }

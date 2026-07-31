@@ -95,7 +95,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `SequenceTable` | Supported | Captures set/append/delete/clear against stable `uint64_t` record ids. `append()` remains a local single-writer helper; external synchronization is still required for concurrent appenders. |
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
-| `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear under one-writer or causally serialized updates. |
+| `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. Schema v1 captures unordered insert, key erase, all-matching-value erase, and clear; schema v2 adds exact-one erase and typed `reconcile()` under one-writer or causally serialized updates. |
 | `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
@@ -169,7 +169,9 @@ multiset model instead of assuming that a physical key, a stripped value, or a
 locally assigned sequence prefix uniquely identifies one cross-node record.
 
 The first sync design for `KeyMultiValueTable` targets unordered multiset
-preservation under single-writer or causally serialized updates:
+preservation under single-writer or causally serialized updates. Schema v1
+contains `InsertOne`, `EraseKey`, `EraseAllValues`, and `Clear`; schema v2 adds
+`EraseOneValue` and typed `reconcile()`:
 
 ```text
 for every serialized key and serialized public value:
@@ -214,12 +216,15 @@ matching adapter fail closed before mutation through logical schema-marker and
 adapter validation.
 
 The first implementation scope is intentionally smaller than the complete
-model. Its explicit typed capture session supports `InsertOne`, `EraseKey`,
-`EraseAllValues`, and `Clear`. It does not capture raw table calls, `append()`,
-`reconcile()`, `erase_range()`, or `EraseOneValue`. Those paths remain local
-until a later extension can preserve their exact multiset semantics. This is
-not partial raw capture: callers opt into the typed session and only its
-documented methods publish logical changes.
+model. Schema v1 typed capture supports `InsertOne`, `EraseKey`,
+`EraseAllValues`, and `Clear`. Schema v2 additionally supports
+`EraseOneValue` and `reconcile()`. Reconciliation matches canonical logical
+pairs by multiplicity, emits one `EraseOneValue` per surplus occurrence, then
+emits missing `InsertOne` changes in desired-vector order. It does not capture
+raw table calls, `append()`, or `erase_range()`. Those paths remain local until
+a later extension can preserve their exact multiset semantics. This is not
+partial raw capture: callers opt into the typed session and only its documented
+methods publish logical changes.
 
 Implementation phases:
 
@@ -239,8 +244,8 @@ Implementation phases:
    order.
 
 `append()` can be represented as a sequence of `InsertOne` operations in the
-same local batch. `erase(key, value)` should emit `EraseAllValues`.
-`reconcile()` should emit one `EraseOneValue` per surplus occurrence and one
+same local batch. `erase(key, value)` emits `EraseAllValues`. Typed
+`reconcile()` emits one `EraseOneValue` per surplus occurrence and one
 `InsertOne` per missing occurrence so that repeated identical pairs preserve
 their final multiplicity. If a future implementation captures lower-level
 physical deletes during `reconcile()` or range erase, it must copy cursor keys
@@ -860,8 +865,9 @@ anchors, see the
 
 - `HashedKeyValueStore` — internal hash index layout complicates the wire
   format; deferred until an explicit identity-mapping scheme lands.
-- `KeyMultiValueTable` — DUPSORT duplicate values need the unordered multiset
-  model described above before capture can be enabled.
+- `KeyMultiValueTable` — raw capture, `append()`, and range-oriented operations
+  remain deferred beyond the schema-v1/v2 unordered multiset model described
+  above.
 - `KeyOrderedMultiValueTable` — raw capture, `replace_with()`, baseline import,
   multi-origin history and tombstone compaction remain deferred beyond the
   implemented single-origin v2 capture contract. That contract includes
