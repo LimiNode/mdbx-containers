@@ -1,6 +1,7 @@
 #include <mdbx_containers/sync.hpp>
 
 #include <cstdio>
+#include <map>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -13,6 +14,34 @@ typedef mdbxc::sync::KeyValueLogicalStringCodec<std::string> StringValueCodec;
 typedef mdbxc::KeyOrderedMultiValueTable<int, std::string> table_type;
 typedef mdbxc::sync::KeyOrderedMultiValueTableDestructiveLogicalAdapter<
     int, std::string, IntKeyCodec, StringValueCodec> adapter_type;
+
+class CommitFailureCaptureSink : public mdbxc::sync::ISyncCaptureSink {
+public:
+    CommitFailureCaptureSink()
+        : flush_calls(0u), discard_calls(0u) {}
+
+    void record_change(
+            MDBX_txn*,
+            const std::string&,
+            mdbxc::sync::ChangeOpType,
+            std::uint32_t,
+            const std::vector<std::uint8_t>&,
+            const std::vector<std::uint8_t>&) override {}
+
+    void flush_in_txn(MDBX_txn* txn) override {
+        ++flush_calls;
+        pending[txn] = 1u;
+    }
+
+    void discard_txn(MDBX_txn* txn) noexcept override {
+        ++discard_calls;
+        pending.erase(txn);
+    }
+
+    std::map<MDBX_txn*, std::size_t> pending;
+    std::size_t flush_calls;
+    std::size_t discard_calls;
+};
 
 void cleanup(const std::string& path) {
     std::remove(path.c_str());
@@ -360,6 +389,86 @@ void test_destructive_capture_coalesces_and_commits_to_outbox() {
     }
     if (table.find(9).size() != 1u || table.find(9)[0] != "durable") {
         throw std::runtime_error("durable local ordered value is missing");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_capture_rolls_back_injected_native_commit_failure() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_native_commit_failure.mdbx";
+    const std::string primary = "ordered_commit_failure_values";
+    const std::string state = "ordered_commit_failure_state";
+    const std::string by_key = "ordered_commit_failure_by_key";
+    const std::string schema = "app.ordered_commit_failure.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x62u);
+    const mdbxc::sync::DbId local_db = make_node(0xA2u);
+    const mdbxc::sync::DbId destination = make_node(0xB2u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    CommitFailureCaptureSink capture_sink;
+    {
+        mdbxc::sync::SyncCaptureScope capture_scope(connection, capture_sink);
+        std::unique_ptr<adapter_type::LogicalCaptureSession> failed_session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::OrderedElementId failed_id =
+            failed_session->append(10, "discarded");
+        if (failed_id.sequence != 1u || failed_session->pending_size() != 1u) {
+            throw std::runtime_error("commit-failure capture setup is incorrect");
+        }
+
+        mdbxc::detail::fail_next_transaction_commit_for_test(MDBX_MAP_FULL);
+        bool commit_failed = false;
+        try {
+            failed_session->commit_to_outbox(engine, destination);
+        } catch (const mdbxc::MdbxException&) {
+            commit_failed = true;
+        }
+        if (!commit_failed || failed_session->pending_size() != 0u ||
+            capture_sink.flush_calls != 1u ||
+            capture_sink.discard_calls != 1u ||
+            !capture_sink.pending.empty()) {
+            throw std::runtime_error(
+                "native commit failure did not deactivate destructive capture");
+        }
+
+        bool reuse_rejected = false;
+        try {
+            failed_session->append(10, "must-not-append");
+        } catch (const std::logic_error&) {
+            reuse_rejected = true;
+        }
+        if (!reuse_rejected || !table.find(10).empty() ||
+            !engine.pending_logical_deliveries(destination).empty()) {
+            throw std::runtime_error(
+                "native commit failure leaked destructive capture state");
+        }
+    }
+
+    std::unique_ptr<adapter_type::LogicalCaptureSession> clean_session =
+        adapter.begin_capture_session();
+    const mdbxc::sync::OrderedElementId clean_id =
+        clean_session->append(10, "committed");
+    const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+        clean_session->commit_to_outbox(engine, destination);
+    if (clean_id.sequence != 1u || envelope.origin_sequence != 1u ||
+        table.find(10).size() != 1u || table.find(10)[0] != "committed" ||
+        engine.pending_logical_deliveries(destination).size() != 1u) {
+        throw std::runtime_error(
+            "native commit failure did not roll back table, state, and outbox");
     }
 
     connection->disconnect();
@@ -1035,6 +1144,7 @@ int main() {
     test_destructive_append_erase_and_batch_preflight();
     test_destructive_preflight_rejects_foreign_append_id();
     test_destructive_capture_coalesces_and_commits_to_outbox();
+    test_destructive_capture_rolls_back_injected_native_commit_failure();
     test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates();
     test_destructive_preflight_rejects_untracked_physical_value();
     test_destructive_preflight_rejects_state_index_corruption();

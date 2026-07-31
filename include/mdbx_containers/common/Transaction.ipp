@@ -1,5 +1,30 @@
 namespace mdbxc {
 
+#if defined(MDBXC_TEST_INJECT_TRANSACTION_COMMIT_FAILURE)
+    namespace detail {
+
+        inline int& injected_transaction_commit_result_for_test() {
+            static int result = MDBX_SUCCESS;
+            return result;
+        }
+
+        /// Test-only seam for exercising the post-native-commit error path.
+        inline void fail_next_transaction_commit_for_test(int result) {
+            assert(result != MDBX_SUCCESS &&
+                   result != MDBX_THREAD_MISMATCH &&
+                   "The injected commit result must terminate the transaction");
+            injected_transaction_commit_result_for_test() = result;
+        }
+
+        inline int take_injected_transaction_commit_result_for_test() {
+            int& result = injected_transaction_commit_result_for_test();
+            const int injected = result;
+            result = MDBX_SUCCESS;
+            return injected;
+        }
+    } // namespace detail
+#endif
+
     inline Transaction::Transaction(TransactionTracker* registry, MDBX_env* env, TransactionMode mode)
         : m_registry(registry), m_env(env), m_mode(mode) {
         begin();
@@ -141,11 +166,37 @@ namespace mdbxc {
             m_registry->on_pre_commit(txn);
 #           endif
 
-            const int rc = mdbx_txn_commit(txn);
+            int rc = MDBX_SUCCESS;
+#           if defined(MDBXC_TEST_INJECT_TRANSACTION_COMMIT_FAILURE)
+            rc = detail::take_injected_transaction_commit_result_for_test();
+            if (rc != MDBX_SUCCESS) {
+                // MDBX commit errors consume the transaction handle. Abort the
+                // injected transaction first so wrapper cleanup sees the same
+                // terminated-handle lifecycle without simulating storage I/O.
+                const int abort_rc = mdbx_txn_abort(txn);
+                assert((abort_rc == MDBX_SUCCESS ||
+                        abort_rc == MDBX_THREAD_MISMATCH) &&
+                       "mdbx_txn_abort() failed in injected commit failure");
+                (void)abort_rc;
+            } else {
+                rc = mdbx_txn_commit(txn);
+            }
+#           else
+            rc = mdbx_txn_commit(txn);
+#           endif
 
             if (rc == MDBX_THREAD_MISMATCH) {
                 check_mdbx(rc, "Failed to commit writable transaction");
             }
+
+#           if MDBXC_SYNC_ENABLED
+            if (rc != MDBX_SUCCESS) {
+                // A terminal native commit error aborts the transaction.
+                // Notify capture sinks before dropping the consumed handle so
+                // txn-pointer keyed pending state cannot leak into reuse.
+                m_registry->on_discard(txn);
+            }
+#           endif
 
             // MDBX_SUCCESS or any other error: the native handle is already
             // terminated (or we threw above for THREAD_MISMATCH). Null the

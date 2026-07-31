@@ -120,9 +120,12 @@ persistent `OrderedElementId`, with Live/Tombstone state, per-origin introduced
 high-water integrity, and typed capture that atomically commits the mutation and
 an ordered outbox envelope. Both require one authoritative ordered origin.
 Broad key/value erase, clear, baseline import, multi-origin histories, tombstone
-pruning, and compaction remain deferred. A native MDBX commit failure after
-ordered capture preparation also remains deferred coverage; the existing
-pre-commit failure test does not model a native commit failure.
+pruning, and compaction remain deferred. The transaction wrapper's native
+commit-error cleanup path has deterministic test-only coverage after ordered
+capture preparation: the injected path aborts the native handle before
+returning an MDBX error, notifies the attached capture sink of the discard, and
+requires the physical table, state, and outbox to all roll back. This is not a
+claim of real storage-I/O fault injection.
 
 `AnyValueTable<K>` needs value type-tag propagation or another explicit
 compatibility policy. The current sync wire operation only carries raw value

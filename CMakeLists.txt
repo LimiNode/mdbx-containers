@@ -515,6 +515,14 @@ if(MDBXC_BUILD_TESTS)
         mdbxc_add_test_target(${test_name} ${test_file})
     endforeach()
 
+    # This test alone exposes the header-only transaction commit-failure seam.
+    # Production and all other test targets always call mdbx_txn_commit directly.
+    if(TARGET test_key_ordered_multi_value_destructive_adapter)
+        target_compile_definitions(
+            test_key_ordered_multi_value_destructive_adapter PRIVATE
+            MDBXC_TEST_INJECT_TRANSACTION_COMMIT_FAILURE=1)
+    endif()
+
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR
             ((CMAKE_CXX_COMPILER_ID MATCHES "Clang") AND
              NOT CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))
