@@ -108,10 +108,10 @@ supported schema versions, schema-v2 `reconcile()`, and schema-v3 bounded
 `erase_range()` capture.
 The adapter rejects truncated pair payloads, oversized declared lengths,
 trailing bytes, payload-bearing clear, and unknown opcodes before mutation.
-The detailed deferred contract lives in
-`include/mdbx_containers/sync/DESIGN.md`: it requires explicit multivalue wire
-sub-operations and receiver-side logical apply helpers before capture can be
-enabled.
+The detailed typed contract and its remaining deferred boundaries live in
+`include/mdbx_containers/sync/DESIGN.md`. Typed capture is enabled for the
+documented schema-v1/v2/v3 operations; raw capture, direct bulk/range table
+calls, and general multi-writer destructive convergence remain deferred.
 
 `KeyOrderedMultiValueTable<K, V>` has two ordered logical schemas. Schema v1 is
 append-only. Schema v2 adds `AppendElement` and exact `EraseElement` by a

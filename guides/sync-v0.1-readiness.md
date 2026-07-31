@@ -110,8 +110,10 @@ delivery. The logical core uses the following contracts:
   apply helpers with opt-in typed capture sessions. Neither is connected to
   the transport pull/push path yet; callers own logical frame delivery.
 - `KeyMultiValueTableLogicalAdapter` follows the same explicit logical-frame
-  path. Schema v1 provides unordered insert, key erase, all-matching-value
-  erase, and clear; schema v2 adds exact-one erase and typed `reconcile()`.
+  path. Schema v1 provides unordered insert, version-neutral batch `append()`,
+  key erase, all-matching-value erase, and clear; schema v2 adds exact-one
+  erase and typed `reconcile()`; schema v3 adds bounded typed `erase_range()`
+  capture expanded into exact `EraseKey` changes.
   It does not enable raw `ChangeOp` capture for the table wrapper.
 - `KeyOrderedMultiValueTableLogicalAdapter` applies schema-v1 append-only
   changes only through ordered delivery for one origin stream.
