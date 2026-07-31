@@ -7,6 +7,9 @@ All notable changes to this project will be documented in this file.
   expansion to destructive ordered capture. They resolve canonical logical-codec
   selectors to exact immutable ids before mutation and emit only `EraseElement`
   operations.
+- Reused prevalidated bounded ordered candidates during mutation, avoiding a
+  repeated full state scan after every selected exact erase while preserving one
+  scan budget for remaining primary, index, and state reads.
 - Added persistent `OrderedElementId` and state-store primitives for the
   initial destructive `KeyOrderedMultiValueTable` logical schema v2.
 - Added a schema-version-2 destructive logical adapter for

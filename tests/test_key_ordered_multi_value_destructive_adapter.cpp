@@ -1013,6 +1013,67 @@ void test_destructive_capture_clear_checks_tombstone_only_origin_high_water() {
     cleanup(path);
 }
 
+void test_destructive_capture_trusted_clear_avoids_repeated_state_scans() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_trusted_clear.mdbx";
+    const std::string primary = "ordered_trusted_clear_values";
+    const std::string state = "ordered_trusted_clear_state";
+    const std::string by_key = "ordered_trusted_clear_by_key";
+    const std::string schema = "app.ordered_trusted_clear.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x68u);
+    const mdbxc::sync::DbId local_db = make_node(0xA8u);
+    const mdbxc::sync::DbId destination = make_node(0xB8u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+
+    std::vector<mdbxc::sync::OrderedElementId> ids;
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        for (std::size_t i = 0u; i < 64u; ++i) {
+            ids.push_back(session->append(1, "value"));
+        }
+        session->commit_to_outbox(engine, destination);
+    }
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        for (std::size_t i = 0u; i + 1u < ids.size(); ++i) {
+            session->erase(ids[i]);
+        }
+        session->commit_to_outbox(engine, destination);
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::BroadEraseBounds bounds = { 1u, 160u };
+        if (session->clear(bounds) != 1u) {
+            throw std::runtime_error("trusted ordered clear selected the wrong id");
+        }
+        session->commit_to_outbox(engine, destination);
+    }
+    if (!table.empty()) {
+        throw std::runtime_error(
+            "trusted ordered clear did not remove the final live value");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 void test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates() {
     const std::string path = "test_key_ordered_multi_value_destructive_replay.mdbx";
     const std::string primary = "ordered_replay_values";
@@ -1688,6 +1749,7 @@ int main() {
     test_destructive_capture_clears_bounded_tombstone_heavy_table();
     test_destructive_capture_clear_rejects_complete_schema_corruption();
     test_destructive_capture_clear_checks_tombstone_only_origin_high_water();
+    test_destructive_capture_trusted_clear_avoids_repeated_state_scans();
     test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates();
     test_destructive_preflight_rejects_untracked_physical_value();
     test_destructive_preflight_rejects_state_index_corruption();

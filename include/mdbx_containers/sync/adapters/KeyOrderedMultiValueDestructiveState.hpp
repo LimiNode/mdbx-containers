@@ -23,6 +23,11 @@
 namespace mdbxc {
 namespace sync {
 
+    template<class KeyT, class ValueT,
+             class KeyCodec, class ValueCodec,
+             class Options>
+    class KeyOrderedMultiValueTableDestructiveLogicalAdapter;
+
     /// \brief Immutable identity of one destructive ordered-table element.
     struct OrderedElementId {
         NodeId origin = make_zero_node();
@@ -210,6 +215,9 @@ namespace sync {
     /// Every public operation participates in the caller-owned transaction.
     class OrderedElementStateStore {
     public:
+        template<class, class, class, class, class>
+        friend class KeyOrderedMultiValueTableDestructiveLogicalAdapter;
+
         OrderedElementStateStore(MDBX_env* env,
                                  const std::string& state_dbi_name,
                                  const std::string& by_key_dbi_name)
@@ -420,6 +428,36 @@ namespace sync {
                        "Ordered element key index tombstone delete failed");
         }
 
+    private:
+        /// \brief Converts a prevalidated Live record to a tombstone.
+        /// \details The caller must have verified the record, its key-index
+        /// entry, and its physical primary row in the same transaction.
+        void tombstone_prevalidated(
+                MDBX_txn* txn,
+                const OrderedElementId& id,
+                const std::vector<std::uint8_t>& key) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::tombstone_prevalidated");
+            require_id(id);
+            const MDBX_dbi state = open_state(txn);
+            const std::vector<std::uint8_t> state_key = make_element_key(id);
+            const std::vector<std::uint8_t> tombstone_value(1u, tombstone_tag());
+            MDBX_val raw_state_key = make_val(state_key);
+            MDBX_val raw_state_value = make_val(tombstone_value);
+            check_mdbx(mdbx_put(txn, state, &raw_state_key, &raw_state_value,
+                                MDBX_UPSERT),
+                       "Ordered prevalidated tombstone write failed");
+
+            const MDBX_dbi by_key = open_by_key(txn);
+            const std::vector<std::uint8_t> index_value =
+                encode_ordered_element_id_index(id);
+            MDBX_val raw_index_key = make_val(key);
+            MDBX_val raw_index_value = make_val(index_value);
+            check_mdbx(mdbx_del(txn, by_key, &raw_index_key, &raw_index_value),
+                       "Ordered prevalidated key index delete failed");
+        }
+
+    public:
         /// \brief Removes a newly allocated live element without a tombstone.
         /// \details Used when one local typed capture session coalesces its own
         /// append and erase. The origin counter remains advanced.
@@ -446,6 +484,32 @@ namespace sync {
                        "Ordered element state erase failed");
         }
 
+    private:
+        /// \brief Erases a prevalidated newly allocated Live record.
+        /// \details Used when trusted broad resolution coalesces a pending
+        /// local append. The origin allocation counter remains advanced.
+        void erase_live_prevalidated(
+                MDBX_txn* txn,
+                const OrderedElementId& id,
+                const std::vector<std::uint8_t>& key) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::erase_live_prevalidated");
+            require_id(id);
+            const MDBX_dbi state = open_state(txn);
+            const MDBX_dbi by_key = open_by_key(txn);
+            const std::vector<std::uint8_t> state_key = make_element_key(id);
+            const std::vector<std::uint8_t> index_value =
+                encode_ordered_element_id_index(id);
+            MDBX_val raw_state_key = make_val(state_key);
+            MDBX_val raw_index_key = make_val(key);
+            MDBX_val raw_index_value = make_val(index_value);
+            check_mdbx(mdbx_del(txn, by_key, &raw_index_key, &raw_index_value),
+                       "Ordered prevalidated key index erase failed");
+            check_mdbx(mdbx_del(txn, state, &raw_state_key, nullptr),
+                       "Ordered prevalidated state erase failed");
+        }
+
+    public:
         bool get(MDBX_txn* txn,
                  const OrderedElementId& id,
                  OrderedElementStateRecord& out,
