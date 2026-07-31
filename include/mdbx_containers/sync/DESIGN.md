@@ -171,7 +171,8 @@ locally assigned sequence prefix uniquely identifies one cross-node record.
 The first sync design for `KeyMultiValueTable` targets unordered multiset
 preservation under single-writer or causally serialized updates. Schema v1
 contains `InsertOne`, `EraseKey`, `EraseAllValues`, and `Clear`; schema v2 adds
-`EraseOneValue` and typed `reconcile()`; schema v3 adds bounded `EraseRange`:
+`EraseOneValue` and typed `reconcile()`; schema v3 adds bounded typed
+range-erasure capture:
 
 ```text
 for every serialized key and serialized public value:
@@ -180,7 +181,7 @@ for every serialized key and serialized public value:
 
 General concurrent multi-writer convergence is not guaranteed by the operation
 set below. Destructive operations are not commutative with concurrent inserts:
-`EraseAllValues`, `EraseKey`, `EraseRange`, and `Clear` can produce different
+`EraseAllValues`, `EraseKey`, bounded range erasure, and `Clear` can produce different
 final counts when different replicas observe local writes and remote deletes in
 different orders. Supporting that case requires an explicit conflict model,
 such as a single authoritative writer per key/range, a deterministic global
@@ -203,7 +204,6 @@ The complete logical operation model is:
 | `EraseKey` | serialized key | Remove all values for the key. |
 | `EraseOneValue` | serialized key, serialized public value | Remove one matching repeated value for the key, if one exists. This is needed for `reconcile()` surplus deletes. |
 | `EraseAllValues` | serialized key, serialized public value | Remove all exact matching repeated values for the key, matching current public `erase(key, value)` semantics. |
-| `EraseRange` | serialized inclusive key range | Remove every physical pair whose key is in the range. |
 | `Clear` | no key/value payload | Remove all pairs in the table. |
 
 These operations use the existing `LogicalChange` envelope with
@@ -226,15 +226,16 @@ a later extension can preserve their exact multiset semantics. This is not
 partial raw capture: callers opt into the typed session and only its documented
 methods publish logical changes.
 
-Schema v3 `EraseRange` carries two canonical serialized public keys. It is an
-inclusive logical-key interval, never a raw MDBX cursor key. Typed capture must
-inspect and select the complete local range before mutation under one shared
-`max_inspected_records` / `max_selected_pairs` budget. It then publishes one
-range change and applies the same inclusive range locally. A receiver validates
-both payload blobs and applies its public `erase_range()` semantics. The
-operation is still limited to one writer or causally serialized destructive
-updates; it provides no multi-writer convergence. `append()` needs no schema-v3
-opcode: typed capture expands it into `InsertOne` changes in input order.
+Schema v3 typed range erasure is an inclusive logical-key interval, never a raw
+MDBX cursor key. Capture scans the complete local range before mutation under a
+mandatory `max_pairs` bound. It builds canonical `EraseKey` changes for the
+distinct selected public keys, reserves pending-frame storage, and only then
+removes the keys locally. The wire frame therefore uses the already validated
+`EraseKey` opcode rather than a broad remote cursor-delete operation. A receiver
+replays those exact key erasures through its public table API. The operation is
+still limited to one writer or causally serialized destructive updates; it
+provides no multi-writer convergence. `append()` needs no schema-v3 opcode:
+typed capture expands it into `InsertOne` changes in input order.
 
 Implementation phases:
 

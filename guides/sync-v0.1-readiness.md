@@ -79,8 +79,9 @@ These table families intentionally emit no `ChangeOp` in v0.1:
   general multi-writer destructive convergence. The explicit unordered logical
   adapter schema v1 covers insert, key erase, all-matching-value erase, and
   clear; schema v2 additionally covers exact-one erase and typed `reconcile()`.
-  Schema v3 is reserved for bounded typed range erase under the same one-writer
-  or causally serialized update contract.
+  Schema v3 adds bounded typed range erasure under the same one-writer or
+  causally serialized update contract; capture expands the selected keys into
+  existing `EraseKey` logical changes before local mutation.
 - `KeyOrderedMultiValueTable` raw capture, replace, baseline import, and
   multi-origin histories. Schema v1 remains append-only. Schema v2 supports
   logical `AppendElement` and exact `EraseElement` by persistent element id,
