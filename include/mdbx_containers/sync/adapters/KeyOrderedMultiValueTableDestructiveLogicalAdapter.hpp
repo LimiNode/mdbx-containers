@@ -278,6 +278,74 @@ namespace sync {
                 }
             }
 
+            /// \brief Resolves and erases one current per-key append position.
+            bool erase_at(const KeyT& key,
+                          std::size_t index,
+                          const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    OrderedElementCandidateSet candidates(bounds);
+                    const bool found = resolve_live_elements(
+                        key, candidates,
+                        [index](std::size_t current,
+                                const OrderedElementStateRecord&) {
+                            return current == index;
+                        });
+                    if (!found) return false;
+                    erase_selected(candidates.sorted_ids());
+                    return true;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Resolves and erases all canonical value matches under a key.
+            std::size_t erase_value(const KeyT& key,
+                                    const ValueT& value,
+                                    const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    const std::vector<std::uint8_t> value_bytes =
+                        ValueCodec::encode(value);
+                    OrderedElementCandidateSet candidates(bounds);
+                    resolve_live_elements(
+                        key, candidates,
+                        [&value_bytes](std::size_t,
+                                       const OrderedElementStateRecord& record) {
+                            return record.value == value_bytes;
+                        });
+                    const std::vector<OrderedElementId> ids =
+                        candidates.sorted_ids();
+                    erase_selected(ids);
+                    return ids.size();
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Resolves and erases all current values under a key.
+            std::size_t erase_key(const KeyT& key,
+                                  const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    OrderedElementCandidateSet candidates(bounds);
+                    resolve_live_elements(
+                        key, candidates,
+                        [](std::size_t, const OrderedElementStateRecord&) {
+                            return true;
+                        });
+                    const std::vector<OrderedElementId> ids =
+                        candidates.sorted_ids();
+                    erase_selected(ids);
+                    return ids.size();
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
             /// \brief Commits captured mutations and delivery atomically.
             LogicalDeliveryEnvelope commit_to_outbox(
                     ILogicalDeliveryOutbox& outbox,
@@ -313,6 +381,77 @@ namespace sync {
             }
 
         private:
+            static bool contains_origin(const std::vector<NodeId>& origins,
+                                        const NodeId& origin) {
+                for (std::size_t i = 0u; i < origins.size(); ++i) {
+                    if (compare_node_id(origins[i], origin) == 0) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            template<typename Selector>
+            bool resolve_live_elements(
+                    const KeyT& key,
+                    OrderedElementCandidateSet& candidates,
+                    Selector select) const {
+                const std::vector<std::uint8_t> key_bytes = KeyCodec::encode(key);
+                std::vector<OrderedElementId> index_ids =
+                    m_adapter.m_state.live_ids_for_key(
+                        m_txn.handle(), key_bytes, &candidates);
+                std::vector<OrderedElementId> state_ids =
+                    m_adapter.m_state.live_state_ids_for_key(
+                        m_txn.handle(), key_bytes, &candidates);
+                std::sort(index_ids.begin(), index_ids.end(), OrderedElementIdLess());
+                std::sort(state_ids.begin(), state_ids.end(), OrderedElementIdLess());
+                if (index_ids != state_ids) {
+                    throw std::runtime_error(
+                        "Ordered destructive key index and state records differ");
+                }
+
+                std::vector<ValueT> physical_values;
+                m_adapter.m_table.db_collect_values(
+                    key, physical_values, m_txn.handle(),
+                    [&candidates]() {
+                        candidates.inspect_record();
+                    });
+                if (physical_values.size() != index_ids.size()) {
+                    throw std::runtime_error(
+                        "Ordered destructive table and state counts differ");
+                }
+
+                std::vector<NodeId> verified_origins;
+                bool selected = false;
+                for (std::size_t i = 0u; i < index_ids.size(); ++i) {
+                    if (!contains_origin(verified_origins, index_ids[i].origin)) {
+                        m_adapter.m_state.verify_introduced_high_water(
+                            m_txn.handle(), index_ids[i].origin, &candidates);
+                        verified_origins.push_back(index_ids[i].origin);
+                    }
+                    candidates.inspect_record();
+                    OrderedElementStateRecord record;
+                    if (!m_adapter.m_state.get(
+                            m_txn.handle(), index_ids[i], record) ||
+                        !record.live || record.key != key_bytes ||
+                        record.value != ValueCodec::encode(physical_values[i])) {
+                        throw std::runtime_error(
+                            "Ordered destructive table and state value order differs");
+                    }
+                    if (select(i, record)) {
+                        candidates.select(index_ids[i]);
+                        selected = true;
+                    }
+                }
+                return selected;
+            }
+
+            void erase_selected(const std::vector<OrderedElementId>& ids) {
+                for (std::size_t i = 0u; i < ids.size(); ++i) {
+                    erase(ids[i]);
+                }
+            }
+
             std::size_t find_pending_append(const OrderedElementId& id) const {
                 for (std::size_t i = 0u; i < m_pending.size(); ++i) {
                     if (m_pending[i].opcode ==

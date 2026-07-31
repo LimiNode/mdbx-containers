@@ -96,7 +96,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. `KeyMultiValueTableLogicalAdapter` explicitly captures unordered insert, key erase, all-matching-value erase, and clear under one-writer or causally serialized updates. |
-| `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Broad key/value/clear capture has a bounded exact-id expansion design but remains unimplemented. |
+| `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value capture expands selectors to exact ids; `clear()` remains a separate pending operation. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
 Do not add `record_op()` paths for unsupported table types without first
@@ -660,7 +660,7 @@ opcodes.
 
 ##### Bounded broad local erasure contract
 
-The planned typed capture-session API is:
+The typed capture-session API is:
 
 ```text
 struct BroadEraseBounds {
@@ -674,11 +674,12 @@ size_t erase_key(key, const BroadEraseBounds& bounds)
 size_t clear(const BroadEraseBounds& bounds)
 ```
 
-These methods are not implemented yet. Their names distinguish the potentially
-broad selectors from `erase(OrderedElementId)`. They preserve the corresponding
-local table semantics: `erase_at()` returns false for a missing index,
-`erase_value()` removes every repeated exact value under the key, `erase_key()`
-removes every value under the key, and `clear()` removes every live element.
+The implemented `erase_at()`, `erase_value()`, and `erase_key()` methods
+distinguish potentially broad selectors from `erase(OrderedElementId)`. They
+preserve the corresponding local table semantics: `erase_at()` returns false
+for a missing index, `erase_value()` removes every repeated exact value under
+the key, and `erase_key()` removes every value under the key. `clear()` remains
+pending as a separately bounded complete-schema operation.
 Committing a session with no pending changes retains the existing empty-envelope
 semantics and consumes one ordered delivery sequence.
 

@@ -16,6 +16,12 @@
 
 namespace mdbxc {
 
+    namespace sync {
+        template<class KeyT, class ValueT, class KeyCodec, class ValueCodec,
+                 class Options>
+        class KeyOrderedMultiValueTableDestructiveLogicalAdapter;
+    }
+
     /// \class KeyOrderedMultiValueTable
     /// \ingroup mdbxc_tables
     /// \brief Multi-value table where value order is part of the contract.
@@ -36,9 +42,10 @@ namespace mdbxc {
     /// significant and reconciliation by unordered multiset semantics is desired.
     ///
     /// \note Sync v0.1 emits no raw \c ChangeOp for this wrapper. The opt-in
-    ///       \c KeyOrderedMultiValueTableLogicalAdapter instead captures only
-    ///       append history through one ordered logical-delivery origin;
-    ///       destructive operations remain local-only.
+    ///       schema-v1 logical adapter captures append history only. The
+    ///       separate schema-v2 destructive logical adapter captures exact
+    ///       element erasures, including bounded local selector expansion,
+    ///       through one authoritative ordered-delivery origin.
     ///
     /// \note \c MDBX_DB_ACCEDE is accepted only for DBIs created with a
     ///       compatible \c KeyOrderedMultiValueTable storage contract: the same
@@ -46,6 +53,9 @@ namespace mdbxc {
     ///       duplicate values encoded with this table's internal order prefix.
     template<class KeyT, class ValueT, class Options = DefaultTableOptions>
     class KeyOrderedMultiValueTable final : public BaseTable {
+        template<class, class, class, class, class>
+        friend class sync::KeyOrderedMultiValueTableDestructiveLogicalAdapter;
+
     public:
         typedef std::pair<KeyT, ValueT> value_type;
 
@@ -677,6 +687,33 @@ namespace mdbxc {
             }
             check_mdbx(rc, "Failed to seek key");
             while (rc == MDBX_SUCCESS) {
+                values.push_back(deserialize_value<ValueT>(strip_order(db_val)));
+                rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_NEXT_DUP);
+            }
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "Failed to read ordered duplicate values");
+            }
+        }
+
+        template<typename BeforeInspect>
+        void db_collect_values(const KeyT& key,
+                               std::vector<ValueT>& values,
+                               MDBX_txn* txn,
+                               BeforeInspect before_inspect) const {
+            CursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
+                       "Failed to open MDBX cursor");
+
+            SerializeScratch sc_key;
+            MDBX_val db_key = serialize_key<Options::safe_integer_key>(key, sc_key);
+            MDBX_val db_val;
+            int rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_SET_KEY);
+            if (rc == MDBX_NOTFOUND) {
+                return;
+            }
+            check_mdbx(rc, "Failed to seek key");
+            while (rc == MDBX_SUCCESS) {
+                before_inspect();
                 values.push_back(deserialize_value<ValueT>(strip_order(db_val)));
                 rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_NEXT_DUP);
             }

@@ -3,11 +3,10 @@
 All notable changes to this project will be documented in this file.
 
 ## Unreleased
-- Documented the future bounded broad-erasure contract for destructive ordered
-  capture. Key/value selectors and clear use canonical logical-codec bytes and
-  must resolve a complete candidate- and scan-bounded set of immutable element
-  ids before mutation while emitting only exact `EraseElement` operations;
-  implementation remains deferred.
+- Added bounded `erase_at()`, `erase_value()`, and `erase_key()` selector
+  expansion to destructive ordered capture. They resolve canonical logical-codec
+  selectors to exact immutable ids before mutation and emit only `EraseElement`
+  operations; `clear()` remains a separate pending operation.
 - Added persistent `OrderedElementId` and state-store primitives for the
   initial destructive `KeyOrderedMultiValueTable` logical schema v2.
 - Added a schema-version-2 destructive logical adapter for
