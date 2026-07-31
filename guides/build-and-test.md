@@ -138,6 +138,9 @@ cmake -S . -B tmp/build-bench \
 
 cmake --build tmp/build-bench --target sync_tick_hub_benchmark
 tmp/build-bench/bin/benchmarks/sync_tick_hub_benchmark
+
+cmake --build tmp/build-bench --target ordered_destructive_state_benchmark
+tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark
 ```
 
 On Windows the executable has the `.exe` suffix, for example:
@@ -155,6 +158,11 @@ CI also builds this benchmark target and runs a small custom scenario as a
 smoke check; full measurement runs remain manual.
 See [`benchmarks/README-sync.md`](../benchmarks/README-sync.md) for scenario
 parameters, CSV columns, and measurement guidelines.
+`ordered_destructive_state_benchmark` is a separate manual CSV baseline for the
+full destructive ordered-state reverse scan and per-origin high-water scan. It
+accepts optional positional `origins elements_per_origin key_count iterations`
+arguments; use it before proposing a cache, index, or bound for those
+correctness paths.
 The benchmark supports named presets:
 
 ```bash

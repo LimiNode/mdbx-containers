@@ -128,3 +128,31 @@ pull algorithm is unlikely to move total throughput for that workload.
    scenario arguments.
 6. Use this benchmark for sync-core changes only. It does not estimate HTTP,
    WebSocket, IPC, or encryption costs.
+
+## Ordered Destructive State Baseline
+
+`ordered_destructive_state_benchmark` measures the two deliberately linear
+validation paths used by destructive schema version 2:
+
+- `live_state_ids_for_key()` reverse-scans the full state DBI to find all live
+  element ids for one canonical key and detect entries missing from the DUPSORT
+  index;
+- `verify_introduced_high_water()` scans one origin prefix before admitting a
+  new id.
+
+It is a manual bounds baseline, not a throughput claim and not a CTest target.
+Use identical arguments and build settings when comparing revisions:
+
+```bash
+cmake --build tmp/build-bench --target ordered_destructive_state_benchmark
+tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark
+tmp/build-bench/bin/benchmarks/ordered_destructive_state_benchmark \
+    16 512 32 100
+```
+
+The optional positional arguments are `origins`, `elements_per_origin`,
+`key_count`, and `iterations`. CSV rows separately report `element_records` and
+`state_records`; the latter includes the allocation counter and introduced
+high-water record for each origin. `elapsed_ms` includes read-transaction open,
+the measured scan, and rollback. Use results from representative workloads
+before adding an index, cache, or fixed limit to either correctness path.
