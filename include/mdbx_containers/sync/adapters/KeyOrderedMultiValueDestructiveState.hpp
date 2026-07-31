@@ -268,7 +268,8 @@ namespace sync {
         /// admitting a lower id that would disagree with DUPSORT id order.
         void verify_introduced_high_water(
                 MDBX_txn* txn,
-                const NodeId& origin) const {
+                const NodeId& origin,
+                OrderedElementCandidateSet* candidates = nullptr) const {
             txn = checked_txn(
                 txn, "OrderedElementStateStore::verify_introduced_high_water");
             if (compare_node_id(origin, make_zero_node()) == 0) {
@@ -286,6 +287,7 @@ namespace sync {
                 int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
                                          MDBX_SET_RANGE);
                 while (rc == MDBX_SUCCESS && has_prefix(raw_key, prefix)) {
+                    inspect_record(candidates);
                     const OrderedElementId id = decode_element_key(raw_key);
                     decode_state_value(raw_value);
                     if (id.sequence > highest_persisted) {
@@ -308,7 +310,7 @@ namespace sync {
             std::uint64_t introduced = 0u;
             if (!read_sequence_if_present(
                     txn, state, make_introduced_key(origin), introduced,
-                    "Ordered element introduced high-water mark") ||
+                    "Ordered element introduced high-water mark", candidates) ||
                 introduced < highest_persisted) {
                 throw std::runtime_error(
                     "Ordered element introduced high-water mark is corrupt");
@@ -367,11 +369,13 @@ namespace sync {
                            "Ordered element introduced high-water write failed");
         }
 
-        void tombstone(MDBX_txn* txn, const OrderedElementId& id) const {
+        void tombstone(MDBX_txn* txn,
+                       const OrderedElementId& id,
+                       OrderedElementCandidateSet* candidates = nullptr) const {
             txn = checked_txn(txn, "OrderedElementStateStore::tombstone");
             require_id(id);
             OrderedElementStateRecord record;
-            if (!get(txn, id, record)) {
+            if (!get(txn, id, record, candidates)) {
                 throw std::runtime_error("Ordered element id is missing");
             }
             if (!record.live) {
@@ -397,11 +401,13 @@ namespace sync {
         /// \brief Removes a newly allocated live element without a tombstone.
         /// \details Used when one local typed capture session coalesces its own
         /// append and erase. The origin counter remains advanced.
-        void erase_live(MDBX_txn* txn, const OrderedElementId& id) const {
+        void erase_live(MDBX_txn* txn,
+                        const OrderedElementId& id,
+                        OrderedElementCandidateSet* candidates = nullptr) const {
             txn = checked_txn(txn, "OrderedElementStateStore::erase_live");
             require_id(id);
             OrderedElementStateRecord record;
-            if (!get(txn, id, record) || !record.live) {
+            if (!get(txn, id, record, candidates) || !record.live) {
                 throw std::runtime_error("Ordered live element is missing");
             }
             const MDBX_dbi state = open_state(txn);
@@ -420,7 +426,8 @@ namespace sync {
 
         bool get(MDBX_txn* txn,
                  const OrderedElementId& id,
-                 OrderedElementStateRecord& out) const {
+                 OrderedElementStateRecord& out,
+                 OrderedElementCandidateSet* candidates = nullptr) const {
             txn = checked_txn(txn, "OrderedElementStateStore::get");
             require_id(id);
             const MDBX_dbi state = open_state(txn);
@@ -430,13 +437,15 @@ namespace sync {
             const int rc = mdbx_get(txn, state, &raw_key, &raw_value);
             if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, "Ordered element state read failed");
+            inspect_record(candidates);
             out = decode_state_value(raw_value);
             return true;
         }
 
         std::vector<OrderedElementId> live_ids_for_key(
                 MDBX_txn* txn,
-                const std::vector<std::uint8_t>& key) const {
+                const std::vector<std::uint8_t>& key,
+                OrderedElementCandidateSet* candidates = nullptr) const {
             txn = checked_txn(txn, "OrderedElementStateStore::live_ids_for_key");
             const MDBX_dbi by_key = open_by_key(txn);
             MDBX_cursor* cursor = nullptr;
@@ -448,9 +457,10 @@ namespace sync {
                 MDBX_val raw_value;
                 int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value, MDBX_SET_KEY);
                 while (rc == MDBX_SUCCESS) {
+                    inspect_record(candidates);
                     const OrderedElementId id = decode_index_value(raw_value);
                     OrderedElementStateRecord record;
-                    if (!get(txn, id, record)) {
+                    if (!get(txn, id, record, candidates)) {
                         throw std::runtime_error(
                             "Ordered element key index references missing state");
                     }
@@ -477,7 +487,8 @@ namespace sync {
         /// \details Used to detect state entries missing from the DUPSORT index.
         std::vector<OrderedElementId> live_state_ids_for_key(
                 MDBX_txn* txn,
-                const std::vector<std::uint8_t>& key) const {
+                const std::vector<std::uint8_t>& key,
+                OrderedElementCandidateSet* candidates = nullptr) const {
             txn = checked_txn(
                 txn, "OrderedElementStateStore::live_state_ids_for_key");
             const MDBX_dbi state = open_state(txn);
@@ -491,6 +502,7 @@ namespace sync {
                 int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value,
                                          MDBX_FIRST);
                 while (rc == MDBX_SUCCESS) {
+                    inspect_record(candidates);
                     const std::uint8_t* bytes =
                         static_cast<const std::uint8_t*>(raw_key.iov_base);
                     if (bytes == nullptr || raw_key.iov_len == 0u) {
@@ -543,6 +555,12 @@ namespace sync {
         MDBX_dbi open_state(MDBX_txn* txn) const {
             return open_named_existing(txn, m_state_dbi_name,
                                        static_cast<MDBX_db_flags_t>(0));
+        }
+
+        static void inspect_record(OrderedElementCandidateSet* candidates) {
+            if (candidates != nullptr) {
+                candidates->inspect_record();
+            }
         }
 
         MDBX_dbi open_by_key(MDBX_txn* txn) const {
@@ -668,12 +686,14 @@ namespace sync {
                 MDBX_dbi dbi,
                 const std::vector<std::uint8_t>& key,
                 std::uint64_t& out,
-                const char* context) {
+                const char* context,
+                OrderedElementCandidateSet* candidates = nullptr) {
             MDBX_val raw_key = make_val(key);
             MDBX_val raw_value;
             const int rc = mdbx_get(txn, dbi, &raw_key, &raw_value);
             if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, context);
+            inspect_record(candidates);
             if (raw_value.iov_len != 8u || raw_value.iov_base == nullptr) {
                 throw std::runtime_error(std::string(context) + " is corrupt");
             }

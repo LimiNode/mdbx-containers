@@ -499,6 +499,68 @@ void test_ordered_element_state_rejects_malformed_records_in_origin_scan() {
     cleanup(path);
 }
 
+void test_ordered_element_state_accounts_bounded_high_water_point_read() {
+    const std::string path = "test_ordered_element_state_bounded_high_water.mdbx";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0xB1u);
+    const std::vector<std::uint8_t> key(1u, 0xAAu);
+    const std::vector<std::uint8_t> value(1u, 0xBBu);
+    mdbxc::sync::OrderedElementStateStore store(
+        connection->env_handle(), "bounded_high_water_state",
+        "bounded_high_water_by_key");
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        store.initialize_empty(transaction.handle());
+        const mdbxc::sync::OrderedElementId id =
+            store.allocate_id(transaction.handle(), origin);
+        store.put_live(transaction.handle(), id, key, value);
+        transaction.commit();
+    }
+
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+        const mdbxc::sync::BroadEraseBounds bounds = { 1u, 2u };
+        mdbxc::sync::OrderedElementCandidateSet candidates(bounds);
+        store.verify_introduced_high_water(
+            transaction.handle(), origin, &candidates);
+        if (candidates.scanned_records() != 2u) {
+            throw std::runtime_error(
+                "bounded high-water accounting did not count point read");
+        }
+        transaction.rollback();
+    }
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+        const mdbxc::sync::BroadEraseBounds bounds = { 1u, 1u };
+        mdbxc::sync::OrderedElementCandidateSet candidates(bounds);
+        bool rejected = false;
+        try {
+            store.verify_introduced_high_water(
+                transaction.handle(), origin, &candidates);
+        } catch (const std::length_error&) {
+            rejected = true;
+        }
+        transaction.rollback();
+        if (!rejected) {
+            throw std::runtime_error(
+                "bounded high-water point read exceeded no scan limit");
+        }
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 void test_broad_erase_candidate_set_enforces_bounds_and_order() {
     const mdbxc::sync::NodeId first_origin = make_node(0x11u);
     const mdbxc::sync::NodeId second_origin = make_node(0x21u);
@@ -558,6 +620,7 @@ int main() {
     test_ordered_element_state_rejects_corrupt_introduced_high_water();
     test_ordered_element_state_rejects_second_origin_high_water_corruption();
     test_ordered_element_state_rejects_malformed_records_in_origin_scan();
+    test_ordered_element_state_accounts_bounded_high_water_point_read();
     test_broad_erase_candidate_set_enforces_bounds_and_order();
     return 0;
 }

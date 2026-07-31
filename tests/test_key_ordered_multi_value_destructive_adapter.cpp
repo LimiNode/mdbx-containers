@@ -475,6 +475,205 @@ void test_destructive_capture_rolls_back_injected_native_commit_failure() {
     cleanup(path);
 }
 
+void test_destructive_capture_resolves_bounded_broad_erasure() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_broad_erasure.mdbx";
+    const std::string primary = "ordered_broad_values";
+    const std::string state = "ordered_broad_state";
+    const std::string by_key = "ordered_broad_by_key";
+    const std::string schema = "app.ordered_broad.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x63u);
+    const mdbxc::sync::DbId local_db = make_node(0xA3u);
+    const mdbxc::sync::DbId destination = make_node(0xB3u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(1, "first");
+        session->append(1, "same");
+        session->append(1, "same");
+        session->append(2, "other");
+        session->commit_to_outbox(engine, destination);
+    }
+
+    const mdbxc::sync::BroadEraseBounds bounds = { 4u, 64u };
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        if (!session->erase_at(1, 1u, bounds) ||
+            session->erase_value(1, "same", bounds) != 1u ||
+            session->erase_key(2, bounds) != 1u) {
+            throw std::runtime_error("bounded broad erasure selection is incorrect");
+        }
+        const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+            session->commit_to_outbox(engine, destination);
+        if (envelope.frame.changes.size() != 3u) {
+            throw std::runtime_error("broad erasure did not emit exact erase changes");
+        }
+        for (std::size_t i = 0u; i < envelope.frame.changes.size(); ++i) {
+            if (envelope.frame.changes[i].opcode !=
+                mdbxc::sync::KeyOrderedMultiValueDestructiveLogicalErase) {
+                throw std::runtime_error("broad erasure emitted a non-exact opcode");
+            }
+        }
+    }
+    if (table.find(1).size() != 1u || table.find(1)[0] != "first" ||
+        !table.find(2).empty()) {
+        throw std::runtime_error("bounded broad erasure changed the wrong values");
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::BroadEraseBounds no_selection = { 0u, 64u };
+        bool rejected = false;
+        try {
+            session->erase_key(1, no_selection);
+        } catch (const std::length_error&) {
+            rejected = true;
+        }
+        const std::vector<std::string> values = table.find(1);
+        if (!rejected || values.size() != 1u || values[0] != "first") {
+            throw std::runtime_error(
+                "broad selection-limit failure did not roll back the session");
+        }
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::BroadEraseBounds no_scan = { 4u, 0u };
+        bool rejected = false;
+        try {
+            session->erase_at(99, 0u, no_scan);
+        } catch (const std::length_error&) {
+            rejected = true;
+        }
+        const std::vector<std::string> values = table.find(1);
+        if (!rejected || values.size() != 1u || values[0] != "first") {
+            throw std::runtime_error(
+                "broad scan-limit failure did not roll back the session");
+        }
+    }
+
+    if (table.find(1).size() != 1u || table.find(1)[0] != "first") {
+        throw std::runtime_error("failed broad erasure changed durable table state");
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(3, "transient");
+        if (session->erase_value(3, "transient", bounds) != 1u ||
+            session->pending_size() != 0u) {
+            throw std::runtime_error(
+                "broad erasure did not coalesce a pending append");
+        }
+        const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+            session->commit_to_outbox(engine, destination);
+        if (!envelope.frame.changes.empty() || !table.find(3).empty()) {
+            throw std::runtime_error(
+                "coalesced broad erasure leaked a physical or logical record");
+        }
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_capture_bounds_post_selection_mutation_scans() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_mutation_bounds.mdbx";
+    const std::string primary = "ordered_mutation_bound_values";
+    const std::string state = "ordered_mutation_bound_state";
+    const std::string by_key = "ordered_mutation_bound_by_key";
+    const std::string schema = "app.ordered_mutation_bound.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x65u);
+    const mdbxc::sync::DbId local_db = make_node(0xA5u);
+    const mdbxc::sync::DbId destination = make_node(0xB5u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(1, "first");
+        session->append(1, "second");
+        session->commit_to_outbox(engine, destination);
+    }
+
+    std::size_t selection_limit = 0u;
+    bool selection_found = false;
+    for (std::size_t limit = 0u; limit < 256u; ++limit) {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        try {
+            if (session->erase_at(1, 99u, { 2u, limit })) {
+                throw std::runtime_error("missing ordered index was selected");
+            }
+            selection_limit = limit;
+            selection_found = true;
+            break;
+        } catch (const std::length_error&) {
+        }
+    }
+    if (!selection_found) {
+        throw std::runtime_error("could not establish ordered selection bound");
+    }
+
+    std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+        adapter.begin_capture_session();
+    bool rejected = false;
+    try {
+        session->erase_at(1, 0u, { 2u, selection_limit });
+    } catch (const std::length_error&) {
+        rejected = true;
+    }
+    if (!rejected || table.find(1).size() != 2u ||
+        table.find(1)[0] != "first" || table.find(1)[1] != "second") {
+        throw std::runtime_error(
+            "post-selection scan limit did not roll back ordered erasure");
+    }
+    bool reuse_rejected = false;
+    try {
+        session->erase_at(1, 0u, { 2u, 256u });
+    } catch (const std::logic_error&) {
+        reuse_rejected = true;
+    }
+    if (!reuse_rejected) {
+        throw std::runtime_error(
+            "post-selection scan-limit failure left capture active");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 void test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates() {
     const std::string path = "test_key_ordered_multi_value_destructive_replay.mdbx";
     const std::string primary = "ordered_replay_values";
@@ -1145,6 +1344,8 @@ int main() {
     test_destructive_preflight_rejects_foreign_append_id();
     test_destructive_capture_coalesces_and_commits_to_outbox();
     test_destructive_capture_rolls_back_injected_native_commit_failure();
+    test_destructive_capture_resolves_bounded_broad_erasure();
+    test_destructive_capture_bounds_post_selection_mutation_scans();
     test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates();
     test_destructive_preflight_rejects_untracked_physical_value();
     test_destructive_preflight_rejects_state_index_corruption();

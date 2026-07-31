@@ -261,17 +261,75 @@ namespace sync {
             void erase(const OrderedElementId& id) {
                 ensure_active();
                 try {
-                    Connection::SyncCaptureSuppressionScope suppress_capture(
-                        *m_adapter.m_table.connection(), m_txn.handle());
-                    const std::size_t pending_index = find_pending_append(id);
-                    if (pending_index != m_pending.size()) {
-                        m_adapter.erase_live_element(m_txn.handle(), id, false);
-                        m_pending.erase(m_pending.begin() +
-                            static_cast<std::ptrdiff_t>(pending_index));
-                    } else {
-                        m_adapter.erase_live_element(m_txn.handle(), id, true);
-                        m_pending.push_back(m_adapter.make_erase(id));
-                    }
+                    erase_resolved(id, nullptr);
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Resolves and erases one current per-key append position.
+            bool erase_at(const KeyT& key,
+                          std::size_t index,
+                          const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    OrderedElementCandidateSet candidates(bounds);
+                    const bool found = resolve_live_elements(
+                        key, candidates,
+                        [index](std::size_t current,
+                                const OrderedElementStateRecord&) {
+                            return current == index;
+                        });
+                    if (!found) return false;
+                    erase_selected(candidates.sorted_ids(), &candidates);
+                    return true;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Resolves and erases all canonical value matches under a key.
+            std::size_t erase_value(const KeyT& key,
+                                    const ValueT& value,
+                                    const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    const std::vector<std::uint8_t> value_bytes =
+                        ValueCodec::encode(value);
+                    OrderedElementCandidateSet candidates(bounds);
+                    resolve_live_elements(
+                        key, candidates,
+                        [&value_bytes](std::size_t,
+                                       const OrderedElementStateRecord& record) {
+                            return record.value == value_bytes;
+                        });
+                    const std::vector<OrderedElementId> ids =
+                        candidates.sorted_ids();
+                    erase_selected(ids, &candidates);
+                    return ids.size();
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Resolves and erases all current values under a key.
+            std::size_t erase_key(const KeyT& key,
+                                  const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    OrderedElementCandidateSet candidates(bounds);
+                    resolve_live_elements(
+                        key, candidates,
+                        [](std::size_t, const OrderedElementStateRecord&) {
+                            return true;
+                        });
+                    const std::vector<OrderedElementId> ids =
+                        candidates.sorted_ids();
+                    erase_selected(ids, &candidates);
+                    return ids.size();
                 } catch (...) {
                     rollback_and_deactivate();
                     throw;
@@ -313,6 +371,94 @@ namespace sync {
             }
 
         private:
+            static bool contains_origin(const std::vector<NodeId>& origins,
+                                        const NodeId& origin) {
+                for (std::size_t i = 0u; i < origins.size(); ++i) {
+                    if (compare_node_id(origins[i], origin) == 0) {
+                        return true;
+                    }
+                }
+                return false;
+            }
+
+            template<typename Selector>
+            bool resolve_live_elements(
+                    const KeyT& key,
+                    OrderedElementCandidateSet& candidates,
+                    Selector select) const {
+                const std::vector<std::uint8_t> key_bytes = KeyCodec::encode(key);
+                std::vector<OrderedElementId> index_ids =
+                    m_adapter.m_state.live_ids_for_key(
+                        m_txn.handle(), key_bytes, &candidates);
+                std::vector<OrderedElementId> state_ids =
+                    m_adapter.m_state.live_state_ids_for_key(
+                        m_txn.handle(), key_bytes, &candidates);
+                std::sort(index_ids.begin(), index_ids.end(), OrderedElementIdLess());
+                std::sort(state_ids.begin(), state_ids.end(), OrderedElementIdLess());
+                if (index_ids != state_ids) {
+                    throw std::runtime_error(
+                        "Ordered destructive key index and state records differ");
+                }
+
+                std::vector<ValueT> physical_values;
+                m_adapter.m_table.db_collect_values(
+                    key, physical_values, m_txn.handle(),
+                    [&candidates]() {
+                        candidates.inspect_record();
+                    });
+                if (physical_values.size() != index_ids.size()) {
+                    throw std::runtime_error(
+                        "Ordered destructive table and state counts differ");
+                }
+
+                std::vector<NodeId> verified_origins;
+                bool selected = false;
+                for (std::size_t i = 0u; i < index_ids.size(); ++i) {
+                    if (!contains_origin(verified_origins, index_ids[i].origin)) {
+                        m_adapter.m_state.verify_introduced_high_water(
+                            m_txn.handle(), index_ids[i].origin, &candidates);
+                        verified_origins.push_back(index_ids[i].origin);
+                    }
+                    OrderedElementStateRecord record;
+                    if (!m_adapter.m_state.get(
+                            m_txn.handle(), index_ids[i], record, &candidates) ||
+                        !record.live || record.key != key_bytes ||
+                        record.value != ValueCodec::encode(physical_values[i])) {
+                        throw std::runtime_error(
+                            "Ordered destructive table and state value order differs");
+                    }
+                    if (select(i, record)) {
+                        candidates.select(index_ids[i]);
+                        selected = true;
+                    }
+                }
+                return selected;
+            }
+
+            void erase_resolved(const OrderedElementId& id,
+                                OrderedElementCandidateSet* candidates) {
+                Connection::SyncCaptureSuppressionScope suppress_capture(
+                    *m_adapter.m_table.connection(), m_txn.handle());
+                const std::size_t pending_index = find_pending_append(id);
+                if (pending_index != m_pending.size()) {
+                    m_adapter.erase_live_element(
+                        m_txn.handle(), id, false, candidates);
+                    m_pending.erase(m_pending.begin() +
+                        static_cast<std::ptrdiff_t>(pending_index));
+                } else {
+                    m_adapter.erase_live_element(
+                        m_txn.handle(), id, true, candidates);
+                    m_pending.push_back(m_adapter.make_erase(id));
+                }
+            }
+
+            void erase_selected(const std::vector<OrderedElementId>& ids,
+                                OrderedElementCandidateSet* candidates) {
+                for (std::size_t i = 0u; i < ids.size(); ++i) {
+                    erase_resolved(ids[i], candidates);
+                }
+            }
+
             std::size_t find_pending_append(const OrderedElementId& id) const {
                 for (std::size_t i = 0u; i < m_pending.size(); ++i) {
                     if (m_pending[i].opcode ==
@@ -645,14 +791,15 @@ namespace sync {
 
         void erase_live_element(MDBX_txn* txn,
                                 const OrderedElementId& id,
-                                bool preserve_tombstone) const {
+                                bool preserve_tombstone,
+                                OrderedElementCandidateSet* candidates = nullptr) const {
             OrderedElementStateRecord record;
-            if (!m_state.get(txn, id, record) || !record.live) {
+            if (!m_state.get(txn, id, record, candidates) || !record.live) {
                 throw std::runtime_error("Ordered element is not live");
             }
             const KeyT key = decode_canonical_key(record.key);
             const std::vector<OrderedElementId> ids =
-                m_state.live_ids_for_key(txn, record.key);
+                m_state.live_ids_for_key(txn, record.key, candidates);
             std::size_t index = ids.size();
             for (std::size_t i = 0u; i < ids.size(); ++i) {
                 if (ids[i] == id) {
@@ -660,25 +807,48 @@ namespace sync {
                     break;
                 }
             }
-            if (index == ids.size() || !m_table.erase_at(key, index, txn)) {
+            if (index == ids.size()) {
+                throw std::runtime_error("Ordered element key index is missing id");
+            }
+            bool erased = false;
+            if (candidates == nullptr) {
+                erased = m_table.erase_at(key, index, txn);
+            } else {
+                erased = m_table.db_erase_at(
+                    key, index, txn,
+                    [candidates]() {
+                        candidates->inspect_record();
+                    });
+            }
+            if (!erased) {
                 throw std::runtime_error("Ordered element physical value is missing");
             }
             if (preserve_tombstone) {
-                m_state.tombstone(txn, id);
+                m_state.tombstone(txn, id, candidates);
             } else {
-                m_state.erase_live(txn, id);
+                m_state.erase_live(txn, id, candidates);
             }
-            ensure_key_parity(txn, key, record.key);
+            ensure_key_parity(txn, key, record.key, candidates);
         }
 
         void ensure_key_parity(MDBX_txn* txn,
                                const KeyT& key,
-                               const std::vector<std::uint8_t>& key_bytes) const {
-            const std::vector<ValueT> values = m_table.find(key, txn);
+                               const std::vector<std::uint8_t>& key_bytes,
+                               OrderedElementCandidateSet* candidates = nullptr) const {
+            std::vector<ValueT> values;
+            if (candidates == nullptr) {
+                values = m_table.find(key, txn);
+            } else {
+                m_table.db_collect_values(
+                    key, values, txn,
+                    [candidates]() {
+                        candidates->inspect_record();
+                    });
+            }
             std::vector<OrderedElementId> ids =
-                m_state.live_ids_for_key(txn, key_bytes);
+                m_state.live_ids_for_key(txn, key_bytes, candidates);
             std::vector<OrderedElementId> state_ids =
-                m_state.live_state_ids_for_key(txn, key_bytes);
+                m_state.live_state_ids_for_key(txn, key_bytes, candidates);
             std::sort(ids.begin(), ids.end(), OrderedElementIdLess());
             std::sort(state_ids.begin(), state_ids.end(), OrderedElementIdLess());
             if (values.size() != ids.size() || ids != state_ids) {
@@ -687,7 +857,7 @@ namespace sync {
             }
             for (std::size_t i = 0u; i < ids.size(); ++i) {
                 OrderedElementStateRecord record;
-                if (!m_state.get(txn, ids[i], record) || !record.live ||
+                if (!m_state.get(txn, ids[i], record, candidates) || !record.live ||
                     record.key != key_bytes ||
                     record.value != ValueCodec::encode(values[i])) {
                     throw std::runtime_error(
