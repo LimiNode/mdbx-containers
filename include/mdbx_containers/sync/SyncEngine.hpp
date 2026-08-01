@@ -23,10 +23,13 @@
 /// supplied transaction and are therefore valid only for its lifetime.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <memory>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
@@ -138,17 +141,43 @@ namespace sync {
             bool has_last_seq;
         };
 
+        struct FullSnapshotContinuation {
+            std::size_t next_operation = 0u;
+            std::uint64_t chunk_index = 0u;
+        };
+
+        struct FullSnapshotSession {
+            NodeId source_node_id{};
+            DbId source_db_uuid{};
+            NodeId requester{};
+            std::string snapshot_id;
+            SyncCursor source_tail;
+            FullSnapshotScope replacement_scope =
+                FullSnapshotScope::ManifestOnly;
+            std::vector<FullSnapshotManifestEntry> manifest;
+            std::vector<ChangeOp> operations;
+            std::map<std::string, FullSnapshotContinuation> continuations;
+            std::chrono::steady_clock::time_point last_access;
+            std::mutex mutex;
+        };
+
     public:
         /// \brief Constructs an engine bound to \p conn.
         /// \param conn Shared connection that owns the env and stores.
         /// \param policy Conflict resolution policy (default: \c Reject).
         explicit SyncEngine(std::shared_ptr<Connection> conn,
-                            ConflictPolicy policy = ConflictPolicy::Reject)
-            : m_conn(std::move(conn)), m_policy(policy) {
+                            ConflictPolicy policy = ConflictPolicy::Reject,
+                            const FullSnapshotExportOptions&
+                                full_snapshot_options =
+                                    FullSnapshotExportOptions())
+            : m_conn(std::move(conn)),
+              m_policy(policy),
+              m_full_snapshot_options(full_snapshot_options) {
             if (m_policy == ConflictPolicy::LastWriterWins) {
                 throw std::invalid_argument(
                     "ConflictPolicy::LastWriterWins is not implemented");
             }
+            validate_full_snapshot_export_options(m_full_snapshot_options);
         }
 
         /// \brief Initialises the local \c node_id and \c db_uuid.
@@ -198,6 +227,18 @@ namespace sync {
 
         /// \brief Returns the conflict resolution policy.
         ConflictPolicy policy() const noexcept { return m_policy; }
+
+        /// \brief Replaces the explicit source manifest used for full snapshots.
+        /// \details An empty manifest disables source export. Reconfiguration
+        /// invalidates all in-memory snapshot sessions, so callers must not
+        /// change it while an export is in progress.
+        void set_full_snapshot_export_options(
+                const FullSnapshotExportOptions& options) {
+            validate_full_snapshot_export_options(options);
+            std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+            m_full_snapshot_options = options;
+            m_full_snapshot_sessions.clear();
+        }
 
         /// \brief Registers or verifies a persistent logical table schema.
         /// \details This is the normal lifecycle entry point for application
@@ -990,8 +1031,8 @@ namespace sync {
             return "unknown";
         }
 
-        /// \brief Handles a pull request: reads the local changelog
-        /// for batches newer than the requester's cursor.
+        /// \brief Handles an incremental pull or explicitly configured
+        /// full-snapshot export request.
         /// \details When \c request.have is empty, replays all retained
         /// changelog batches from seq=1 for all known origins. This is not
         /// a full database snapshot. Non-empty cursors still
@@ -1003,7 +1044,10 @@ namespace sync {
         /// \c request.max_batches or the soft page budget
         /// \c request.max_bytes rather than running out of changelog entries.
         /// A single retained batch may exceed \c max_bytes but is rejected
-        /// when it exceeds \c request.max_single_batch_bytes.
+        /// when it exceeds \c request.max_single_batch_bytes. Full snapshots
+        /// require an empty receiver cursor and an explicit source manifest;
+        /// they materialize stable, bounded source pages, while import remains
+        /// a separate lifecycle operation.
         PullResponse handle_pull(const PullRequest& request) {
             PullResponse out;
             if (!db_id_matches(request.db_id)) {
@@ -1013,11 +1057,7 @@ namespace sync {
                 return out;
             }
             if (request.request_full_snapshot) {
-                out.ok = false;
-                out.error = "PullRequest::request_full_snapshot is not implemented";
-                out.error_code =
-                    SyncResponseErrorCode::UnsupportedFullSnapshot;
-                return out;
+                return handle_full_snapshot_pull(request);
             }
 
             MDBX_txn* txn = nullptr;
@@ -1245,6 +1285,410 @@ namespace sync {
 
             MDBX_cursor* raw;
         };
+
+        static bool is_reserved_snapshot_dbi(const std::string& name) {
+            return name.size() >= 7u &&
+                name.compare(0u, 7u, "_mdbxc_") == 0;
+        }
+
+        static void validate_full_snapshot_export_options(
+                const FullSnapshotExportOptions& options) {
+            if (options.manifest.empty()) {
+                return;
+            }
+            if (options.max_materialized_operations == 0u ||
+                options.max_materialized_bytes == 0u ||
+                options.max_active_sessions == 0u ||
+                options.session_idle_timeout <= std::chrono::seconds::zero()) {
+                throw std::invalid_argument(
+                    "full snapshot export limits must be non-zero");
+            }
+            switch (options.replacement_scope) {
+                case FullSnapshotScope::ManifestOnly:
+                case FullSnapshotScope::CompleteUserDatabase:
+                    break;
+                default:
+                    throw std::invalid_argument(
+                        "invalid full snapshot replacement scope");
+            }
+            for (std::size_t i = 0u; i < options.manifest.size(); ++i) {
+                const FullSnapshotManifestEntry& entry = options.manifest[i];
+                if (entry.dbi_name.empty() ||
+                    is_reserved_snapshot_dbi(entry.dbi_name)) {
+                    throw std::invalid_argument(
+                        "full snapshot manifest contains a reserved or empty DBI");
+                }
+                if (i != 0u &&
+                    options.manifest[i - 1u].dbi_name >= entry.dbi_name) {
+                    throw std::invalid_argument(
+                        "full snapshot manifest must be sorted and unique");
+                }
+            }
+        }
+
+        static std::uint64_t snapshot_materialized_bytes_for(
+                const std::string& dbi_name,
+                const MDBX_val& key,
+                const MDBX_val& value) {
+            const std::uint64_t max =
+                (std::numeric_limits<std::uint64_t>::max)();
+            if (dbi_name.size() > max || key.iov_len > max || value.iov_len > max) {
+                throw std::length_error("full snapshot materialization size overflow");
+            }
+            const std::uint64_t name_size =
+                static_cast<std::uint64_t>(dbi_name.size());
+            const std::uint64_t key_size = static_cast<std::uint64_t>(key.iov_len);
+            const std::uint64_t value_size = static_cast<std::uint64_t>(value.iov_len);
+            const std::uint64_t operation_size =
+                static_cast<std::uint64_t>(sizeof(ChangeOp));
+            if (operation_size > max - name_size ||
+                key_size > max - name_size - operation_size ||
+                value_size > max - name_size - operation_size - key_size) {
+                throw std::length_error("full snapshot materialization size overflow");
+            }
+            return name_size + operation_size + key_size + value_size;
+        }
+
+        static void append_full_snapshot_operation(
+                FullSnapshotSession& session,
+                const FullSnapshotExportOptions& options,
+                const std::string& dbi_name,
+                std::uint32_t dbi_flags,
+                ChangeOpType op_type,
+                const MDBX_val* key,
+                const MDBX_val* value,
+                std::uint64_t& materialized_bytes) {
+            if (static_cast<std::uint64_t>(session.operations.size()) >=
+                options.max_materialized_operations) {
+                throw std::length_error(
+                    "full snapshot exceeds max_materialized_operations");
+            }
+            MDBX_val empty = { nullptr, 0u };
+            const MDBX_val& actual_key = key == nullptr ? empty : *key;
+            const MDBX_val& actual_value = value == nullptr ? empty : *value;
+            const std::uint64_t add = snapshot_materialized_bytes_for(
+                dbi_name, actual_key, actual_value);
+            if (add > options.max_materialized_bytes - materialized_bytes) {
+                throw std::length_error(
+                    "full snapshot exceeds max_materialized_bytes");
+            }
+
+            ChangeOp op;
+            op.op_type = op_type;
+            op.dbi_name = dbi_name;
+            op.dbi_flags = dbi_flags;
+            if (actual_key.iov_len != 0u) {
+                const std::uint8_t* bytes =
+                    static_cast<const std::uint8_t*>(actual_key.iov_base);
+                op.storage_key.assign(bytes, bytes + actual_key.iov_len);
+            }
+            if (actual_value.iov_len != 0u) {
+                const std::uint8_t* bytes =
+                    static_cast<const std::uint8_t*>(actual_value.iov_base);
+                op.value.assign(bytes, bytes + actual_value.iov_len);
+            }
+            session.operations.push_back(std::move(op));
+            materialized_bytes += add;
+        }
+
+        std::string next_full_snapshot_id() {
+            std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+            ++m_next_full_snapshot_session_id;
+            return std::string("snapshot-") +
+                std::to_string(m_next_full_snapshot_session_id);
+        }
+
+        void prune_expired_full_snapshot_sessions_locked() {
+            const std::chrono::steady_clock::time_point now =
+                std::chrono::steady_clock::now();
+            std::map<std::string,
+                     std::shared_ptr<FullSnapshotSession>>::iterator it =
+                m_full_snapshot_sessions.begin();
+            while (it != m_full_snapshot_sessions.end()) {
+                const std::chrono::steady_clock::duration idle =
+                    now - it->second->last_access;
+                if (idle >= m_full_snapshot_options.session_idle_timeout) {
+                    m_full_snapshot_sessions.erase(it++);
+                } else {
+                    ++it;
+                }
+            }
+        }
+
+        std::shared_ptr<FullSnapshotSession> materialize_full_snapshot(
+                const FullSnapshotExportOptions& options,
+                const std::string& snapshot_id,
+                const NodeId& requester) const {
+            std::shared_ptr<FullSnapshotSession> session(
+                new FullSnapshotSession());
+            session->snapshot_id = snapshot_id;
+            session->requester = requester;
+            session->manifest = options.manifest;
+            session->replacement_scope = options.replacement_scope;
+            session->last_access = std::chrono::steady_clock::now();
+
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            MetaStore meta(m_conn->env_handle());
+            meta.open(txn.handle());
+            session->source_node_id = meta.get_node_id(txn.handle());
+            session->source_db_uuid = meta.get_db_uuid(txn.handle());
+            if (compare_node_id(session->source_node_id, NodeId()) == 0 ||
+                compare_node_id(session->source_db_uuid, NodeId()) == 0) {
+                throw std::logic_error(
+                    "full snapshot source identity is not initialized");
+            }
+
+            const MDBX_dbi changelog_dbi = open_changelog_ro(txn.handle());
+            if (changelog_dbi != 0) {
+                const std::vector<PullOrigin> origins =
+                    collect_known_origins(txn.handle(), changelog_dbi);
+                copy_known_tail(origins, session->source_tail);
+            }
+
+            std::uint64_t materialized_bytes = 0u;
+            for (std::size_t i = 0u; i < session->manifest.size(); ++i) {
+                const FullSnapshotManifestEntry& entry = session->manifest[i];
+                MDBX_dbi dbi = 0;
+                const MDBX_db_flags_t open_flags =
+                    static_cast<MDBX_db_flags_t>(
+                        persistent_dbi_flags(entry.dbi_flags));
+                int rc = mdbx_dbi_open(txn.handle(), entry.dbi_name.c_str(),
+                                       open_flags, &dbi);
+                if (rc == MDBX_NOTFOUND) {
+                    throw std::runtime_error(
+                        "full snapshot manifest DBI does not exist: " +
+                        entry.dbi_name);
+                }
+                check_mdbx(rc, "full snapshot failed to open DBI '" +
+                            entry.dbi_name + "'");
+
+                unsigned actual_raw = 0u;
+                check_mdbx(mdbx_dbi_flags(txn.handle(), dbi, &actual_raw),
+                           "full snapshot failed to read DBI flags");
+                const std::uint32_t actual_flags = persistent_dbi_flags(
+                    static_cast<std::uint32_t>(actual_raw));
+                if (actual_flags != entry.dbi_flags) {
+                    throw std::runtime_error(
+                        "full snapshot manifest DBI flags mismatch: " +
+                        entry.dbi_name);
+                }
+
+                append_full_snapshot_operation(*session, options,
+                    entry.dbi_name, actual_flags, ChangeOpType::ClearTable,
+                    nullptr, nullptr, materialized_bytes);
+
+                MDBX_cursor* raw = nullptr;
+                check_mdbx(mdbx_cursor_open(txn.handle(), dbi, &raw),
+                           "full snapshot failed to open DBI cursor");
+                CursorGuard cursor(raw);
+                MDBX_val key;
+                MDBX_val value;
+                rc = mdbx_cursor_get(raw, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    append_full_snapshot_operation(*session, options,
+                        entry.dbi_name, actual_flags, ChangeOpType::Put,
+                        &key, &value, materialized_bytes);
+                    rc = mdbx_cursor_get(raw, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc, "full snapshot failed to scan DBI '" +
+                               entry.dbi_name + "'");
+                }
+            }
+            return session;
+        }
+
+        static std::string continuation_for(
+                FullSnapshotSession& session,
+                std::size_t next_operation,
+                std::uint64_t next_chunk_index) {
+            std::map<std::string, FullSnapshotContinuation>::const_iterator it =
+                session.continuations.begin();
+            for (; it != session.continuations.end(); ++it) {
+                if (it->second.next_operation == next_operation &&
+                    it->second.chunk_index == next_chunk_index) {
+                    return it->first;
+                }
+            }
+            const std::string token = session.snapshot_id + ":" +
+                std::to_string(next_chunk_index) + ":" +
+                std::to_string(next_operation);
+            FullSnapshotContinuation continuation;
+            continuation.next_operation = next_operation;
+            continuation.chunk_index = next_chunk_index;
+            session.continuations[token] = continuation;
+            return token;
+        }
+
+        static PullResponse make_full_snapshot_page(
+                FullSnapshotSession& session,
+                const PullRequest& request,
+                std::size_t start_operation,
+                std::uint64_t chunk_index) {
+            if (request.max_single_batch_bytes == 0u) {
+                throw std::length_error(
+                    "full snapshot max_single_batch_bytes must be non-zero");
+            }
+            const std::uint64_t hard_limit = request.max_single_batch_bytes;
+            const std::uint64_t soft_limit = request.max_bytes;
+            FullSnapshotChunk chunk;
+            chunk.source_node_id = session.source_node_id;
+            chunk.source_db_uuid = session.source_db_uuid;
+            chunk.snapshot_id = session.snapshot_id;
+            chunk.source_tail = session.source_tail;
+            chunk.chunk_index = chunk_index;
+            chunk.replacement_scope = session.replacement_scope;
+            chunk.manifest = session.manifest;
+            chunk.batch.origin_node_id = session.source_node_id;
+            chunk.batch.seq = 0u;
+            chunk.batch.version = ChangeBatchCodec::batch_version();
+
+            std::size_t next_operation = start_operation;
+            std::vector<std::uint8_t> last_encoded;
+            FullSnapshotChunk last_chunk;
+            while (next_operation < session.operations.size()) {
+                chunk.batch.ops.push_back(session.operations[next_operation]);
+                const std::size_t candidate_next = next_operation + 1u;
+                chunk.has_more = candidate_next < session.operations.size();
+                chunk.continuation = chunk.has_more
+                    ? continuation_for(session, candidate_next, chunk_index + 1u)
+                    : std::string();
+                chunk.batch.batch_flags = chunk.has_more
+                    ? static_cast<std::uint32_t>(BATCH_HAS_MORE)
+                    : static_cast<std::uint32_t>(BATCH_NONE);
+                const std::vector<std::uint8_t> encoded =
+                    FullSnapshotCodec::encode(chunk);
+                if (encoded.size() > hard_limit) {
+                    if (last_encoded.empty()) {
+                        throw std::length_error(
+                            "full snapshot operation exceeds max_single_batch_bytes");
+                    }
+                    break;
+                }
+                if (!last_encoded.empty() && soft_limit != 0u &&
+                    encoded.size() > soft_limit) {
+                    break;
+                }
+                last_chunk = chunk;
+                last_encoded = encoded;
+                next_operation = candidate_next;
+            }
+            if (last_encoded.empty()) {
+                throw std::length_error("full snapshot page contains no operations");
+            }
+
+            PullResponse out;
+            out.ok = true;
+            out.is_full_snapshot = true;
+            out.snapshot_chunk = last_chunk;
+            out.has_more = last_chunk.has_more;
+            out.remote_tail = session.source_tail;
+            out.remote_tail_known = true;
+            return out;
+        }
+
+        PullResponse handle_full_snapshot_pull(const PullRequest& request) {
+            PullResponse out;
+            if (request.full_snapshot_id.empty() !=
+                request.full_snapshot_continuation.empty()) {
+                out.ok = false;
+                out.error =
+                    "full snapshot session id and continuation must both be empty or set";
+                out.error_code = SyncResponseErrorCode::SnapshotSessionInvalid;
+                return out;
+            }
+            if (!request.have.last_seq_by_origin.empty()) {
+                out.ok = false;
+                out.error = "full snapshot requires an empty receiver cursor";
+                out.error_code = SyncResponseErrorCode::SnapshotSessionInvalid;
+                return out;
+            }
+
+            std::shared_ptr<FullSnapshotSession> session;
+            std::size_t start_operation = 0u;
+            std::uint64_t chunk_index = 0u;
+            if (request.full_snapshot_id.empty()) {
+                FullSnapshotExportOptions options;
+                {
+                    std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+                    prune_expired_full_snapshot_sessions_locked();
+                    options = m_full_snapshot_options;
+                    if (options.manifest.empty()) {
+                        out.ok = false;
+                        out.error = "full snapshot source export is not configured";
+                        out.error_code =
+                            SyncResponseErrorCode::SnapshotNotConfigured;
+                        return out;
+                    }
+                    if (m_full_snapshot_sessions.size() +
+                        m_full_snapshot_creating >= options.max_active_sessions) {
+                        out.ok = false;
+                        out.error = "full snapshot session capacity is exhausted";
+                        out.error_code = SyncResponseErrorCode::SnapshotSessionBusy;
+                        out.error_retryable = true;
+                        return out;
+                    }
+                    ++m_full_snapshot_creating;
+                }
+                try {
+                    session = materialize_full_snapshot(
+                        options, next_full_snapshot_id(), request.requester);
+                } catch (...) {
+                    std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+                    --m_full_snapshot_creating;
+                    throw;
+                }
+                {
+                    std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+                    --m_full_snapshot_creating;
+                    prune_expired_full_snapshot_sessions_locked();
+                    m_full_snapshot_sessions[session->snapshot_id] = session;
+                }
+            } else {
+                std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+                prune_expired_full_snapshot_sessions_locked();
+                std::map<std::string,
+                         std::shared_ptr<FullSnapshotSession>>::const_iterator it =
+                    m_full_snapshot_sessions.find(request.full_snapshot_id);
+                if (it == m_full_snapshot_sessions.end()) {
+                    out.ok = false;
+                    out.error = "full snapshot session is unknown or expired";
+                    out.error_code = SyncResponseErrorCode::SnapshotSessionInvalid;
+                    return out;
+                }
+                session = it->second;
+                session->last_access = std::chrono::steady_clock::now();
+            }
+
+            std::lock_guard<std::mutex> lock(session->mutex);
+            if (compare_node_id(session->requester, request.requester) != 0) {
+                out.ok = false;
+                out.error = "full snapshot requester does not own this session";
+                out.error_code = SyncResponseErrorCode::SnapshotSessionInvalid;
+                return out;
+            }
+            if (!request.full_snapshot_id.empty()) {
+                std::map<std::string, FullSnapshotContinuation>::const_iterator it =
+                    session->continuations.find(request.full_snapshot_continuation);
+                if (it == session->continuations.end()) {
+                    out.ok = false;
+                    out.error = "full snapshot continuation is invalid";
+                    out.error_code = SyncResponseErrorCode::SnapshotSessionInvalid;
+                    return out;
+                }
+                start_operation = it->second.next_operation;
+                chunk_index = it->second.chunk_index;
+            }
+            try {
+                return make_full_snapshot_page(*session, request,
+                                               start_operation, chunk_index);
+            } catch (const std::length_error& e) {
+                out.ok = false;
+                out.error = e.what();
+                out.error_code = SyncResponseErrorCode::BatchTooLarge;
+                return out;
+            }
+        }
 
         /// \brief Returns true when \p request_db_id matches the local
         /// \c db_uuid. A zero \p request_db_id is rejected: callers must
@@ -1981,6 +2425,12 @@ namespace sync {
         std::shared_ptr<Connection> m_conn;
         ConflictPolicy              m_policy;
         LogicalTableRegistry        m_logical_registry;
+        FullSnapshotExportOptions   m_full_snapshot_options;
+        mutable std::mutex          m_full_snapshot_mutex;
+        std::map<std::string, std::shared_ptr<FullSnapshotSession>>
+                                    m_full_snapshot_sessions;
+        std::uint64_t               m_next_full_snapshot_session_id = 0u;
+        std::size_t                  m_full_snapshot_creating = 0u;
     };
 
 } // namespace sync

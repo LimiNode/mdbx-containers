@@ -1532,23 +1532,26 @@ B: applies each page as above
     -> onward sync is incremental pull-from-have
 ```
 
-The reserved `seq=0, BATCH_HAS_MORE` full export/import format remains planned
-for v0.1 and is not the current cold-replica implementation.
-`FullSnapshotProtocol.hpp` now defines and validates a preparatory chunk
-codec: every chunk carries a source identity, immutable source changelog tail,
-stable `snapshot_id`, chunk index, replacement scope, opaque next-page token,
-manifest version, immutable named-user-DBI manifest, and a nested raw batch
-with `seq=0`. Transport codec v5 carries the explicit session request and one
-snapshot chunk in `PullResponse`; it rejects mixed incremental/snapshot pages
-and malformed session state. `SyncEngine` does not accept the request yet: the
-source-export session, cursor bootstrap semantics, and atomic replacement apply
-path still need to be implemented before the flag can be enabled.
-`PullRequest::request_full_snapshot=true` is rejected explicitly until the
-transport and replacement apply path are implemented. In v0.1 this is a
-sync-level protocol rejection carried
-as `PullResponse{ok=false, error=..., error_code=UnsupportedFullSnapshot}`; it
-does not produce a transport retry hint because the server returned a valid
-sync response rather than a transport failure.
+The reserved `seq=0, BATCH_HAS_MORE` full export/import format is not the
+current cold-replica implementation yet. `FullSnapshotProtocol.hpp` defines and
+validates its chunk codec: every chunk carries a source identity, immutable
+source changelog tail, stable `snapshot_id`, chunk index, replacement scope,
+opaque next-page token, manifest version, immutable named-user-DBI manifest,
+and a nested raw batch with `seq=0`. Transport codec v5 carries the explicit
+session request and one snapshot chunk in `PullResponse`; it rejects mixed
+incremental/snapshot pages and malformed session state.
+
+`SyncEngine` can export an explicit `FullSnapshotExportOptions::manifest`: it
+materializes configured user DBIs in one read transaction, bounds active
+sessions and materialized data, and returns stable pages. An empty source
+manifest returns `SnapshotNotConfigured`; unknown, expired, or mismatched
+continuations or a different requester return `SnapshotSessionInvalid`; bounded
+session capacity returns retryable `SnapshotSessionBusy`.
+
+Snapshot import, applied-cursor bootstrap, and worker fallback are still not
+implemented. Consequently a snapshot export is not yet an automatic recovery
+path for `SnapshotRequired`; callers must not treat source export alone as a
+working replica-replacement workflow.
 If changelog pruning removed entries needed by the requester's cursor,
 `handle_pull()` returns `SnapshotRequired` with no batches. This is also a
 valid sync response, not a transport failure.

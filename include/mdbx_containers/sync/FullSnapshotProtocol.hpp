@@ -6,6 +6,7 @@
 /// \brief Explicit full-snapshot chunk contract and codec.
 
 #include <algorithm>
+#include <chrono>
 #include <cstdint>
 #include <cstring>
 #include <limits>
@@ -35,6 +36,21 @@ namespace sync {
     enum class FullSnapshotScope : std::uint8_t {
         ManifestOnly = 0u,
         CompleteUserDatabase = 1u
+    };
+
+    /// \brief Explicit source-side configuration for materialized snapshots.
+    /// \details The engine never scans MainDB to guess named user DBIs. A
+    /// caller declares the exportable DBIs, including empty tables, and bounds
+    /// the one-session materialization before enabling full-snapshot pull.
+    struct FullSnapshotExportOptions {
+        std::vector<FullSnapshotManifestEntry> manifest;
+        FullSnapshotScope replacement_scope = FullSnapshotScope::ManifestOnly;
+        std::uint64_t max_materialized_operations = 1000000u;
+        std::uint64_t max_materialized_bytes =
+            256ULL * 1024ULL * 1024ULL;
+        std::uint32_t max_active_sessions = 4u;
+        std::chrono::seconds session_idle_timeout =
+            std::chrono::seconds(300);
     };
 
     /// \brief One chunk of a full database export.

@@ -1587,7 +1587,7 @@ void test_engine_handle_pull_wrong_db_id() {
     cleanup(p);
 }
 
-void test_engine_rejects_full_snapshot_request() {
+void test_engine_rejects_unconfigured_full_snapshot_request() {
     using namespace mdbxc;
     const std::string p = "test_engine_full_snapshot_request.mdbx";
     cleanup(p);
@@ -1608,12 +1608,122 @@ void test_engine_rejects_full_snapshot_request() {
     if (!resp.batches.empty()) {
         throw std::runtime_error("full snapshot rejection returned batches");
     }
-    if (resp.error.find("request_full_snapshot") == std::string::npos) {
+    if (resp.error.find("not configured") == std::string::npos) {
         throw std::runtime_error("full snapshot rejection error is not explicit");
     }
-    if (resp.error_code != sync::SyncResponseErrorCode::UnsupportedFullSnapshot ||
+    if (resp.error_code != sync::SyncResponseErrorCode::SnapshotNotConfigured ||
         resp.error_retryable) {
         throw std::runtime_error("full snapshot rejection code incorrect");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_exports_stable_full_snapshot_pages() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_full_snapshot_export.mdbx";
+    cleanup(p);
+
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::FullSnapshotExportOptions options;
+    sync::FullSnapshotManifestEntry entry;
+    entry.dbi_name = "documents";
+    entry.dbi_flags = 0u;
+    options.manifest.push_back(entry);
+    options.max_materialized_operations = 16u;
+    options.max_materialized_bytes = 4096u;
+    options.max_active_sessions = 1u;
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    const sync::NodeId source_node = make_node(0xA2);
+    const sync::NodeId db_id = make_node(0xD2);
+    engine.initialize_local_identity(source_node, db_id);
+
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("one", "1");
+    documents.insert_or_assign("two", "2");
+    documents.insert_or_assign("three", "3");
+
+    sync::PullRequest request;
+    request.requester = make_node(0xB2);
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 1u;
+    request.max_single_batch_bytes = 8192u;
+
+    sync::PullResponse response = engine.handle_pull(request);
+    if (!response.ok || !response.is_full_snapshot ||
+        !response.batches.empty() || !response.has_more) {
+        throw std::runtime_error("first full snapshot page is invalid");
+    }
+    if (response.snapshot_chunk.chunk_index != 0u ||
+        response.snapshot_chunk.snapshot_id.empty() ||
+        response.snapshot_chunk.continuation.empty() ||
+        response.snapshot_chunk.manifest.size() != 1u ||
+        response.snapshot_chunk.manifest[0].dbi_name != "documents") {
+        throw std::runtime_error("first full snapshot session metadata is invalid");
+    }
+
+    const sync::PullResponse busy = engine.handle_pull(request);
+    if (busy.ok ||
+        busy.error_code != sync::SyncResponseErrorCode::SnapshotSessionBusy ||
+        !busy.error_retryable) {
+        throw std::runtime_error("full snapshot session capacity is not bounded");
+    }
+
+    sync::PullRequest foreign_request = request;
+    foreign_request.requester = make_node(0xC2);
+    foreign_request.full_snapshot_id = response.snapshot_chunk.snapshot_id;
+    foreign_request.full_snapshot_continuation =
+        response.snapshot_chunk.continuation;
+    const sync::PullResponse foreign = engine.handle_pull(foreign_request);
+    if (foreign.ok ||
+        foreign.error_code != sync::SyncResponseErrorCode::SnapshotSessionInvalid) {
+        throw std::runtime_error("full snapshot session accepted a foreign requester");
+    }
+
+    documents.insert_or_assign("late", "not-in-snapshot");
+
+    std::size_t clear_count = 0u;
+    std::size_t put_count = 0u;
+    for (;;) {
+        const std::vector<sync::ChangeOp>& ops = response.snapshot_chunk.batch.ops;
+        for (std::size_t i = 0u; i < ops.size(); ++i) {
+            if (ops[i].op_type == sync::ChangeOpType::ClearTable) {
+                ++clear_count;
+            } else if (ops[i].op_type == sync::ChangeOpType::Put) {
+                ++put_count;
+                const std::string key(ops[i].storage_key.begin(),
+                                      ops[i].storage_key.end());
+                if (key == "late") {
+                    throw std::runtime_error(
+                        "full snapshot included a post-session source write");
+                }
+            } else {
+                throw std::runtime_error("full snapshot contains a non-physical op");
+            }
+        }
+        if (!response.has_more) {
+            break;
+        }
+        request.full_snapshot_id = response.snapshot_chunk.snapshot_id;
+        request.full_snapshot_continuation =
+            response.snapshot_chunk.continuation;
+        response = engine.handle_pull(request);
+        if (!response.ok || !response.is_full_snapshot ||
+            response.snapshot_chunk.snapshot_id != request.full_snapshot_id) {
+            throw std::runtime_error("full snapshot continuation was rejected");
+        }
+    }
+    if (clear_count != 1u || put_count != 3u) {
+        throw std::runtime_error("full snapshot materialization has wrong content");
+    }
+
+    request.full_snapshot_continuation = "foreign-token";
+    const sync::PullResponse invalid = engine.handle_pull(request);
+    if (invalid.ok ||
+        invalid.error_code != sync::SyncResponseErrorCode::SnapshotSessionInvalid) {
+        throw std::runtime_error("invalid full snapshot continuation was accepted");
     }
 
     conn->disconnect();
@@ -2228,8 +2338,10 @@ int main() {
           &test_sync_apply_observer_reports_clear_and_delete_dbi_names },
         { "test_engine_push_multi_batch_gap_cursor",&test_engine_push_multi_batch_gap_reports_persistent_cursor },
         { "test_engine_handle_pull_wrong_db_id",&test_engine_handle_pull_wrong_db_id },
-        { "test_engine_rejects_full_snapshot_request",
-          &test_engine_rejects_full_snapshot_request },
+        { "test_engine_rejects_unconfigured_full_snapshot_request",
+          &test_engine_rejects_unconfigured_full_snapshot_request },
+        { "test_engine_exports_stable_full_snapshot_pages",
+          &test_engine_exports_stable_full_snapshot_pages },
         { "test_engine_changelog_page_rejects_full_snapshot_request",
           &test_engine_changelog_page_rejects_full_snapshot_request },
         { "test_engine_pull_reports_snapshot_required_after_prune",
