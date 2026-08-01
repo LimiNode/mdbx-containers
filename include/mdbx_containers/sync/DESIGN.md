@@ -646,14 +646,33 @@ persistent-layout-v1 does not substitute an unchecked count, generation, or
 hash shortcut. The adapter must never infer or synthesize an element id for a
 raw row during a replicated destructive write.
 
-The reverse scan is an intentional correctness-first implementation. Its
-per-key cost is linear in all persisted element-state records. A separate
-benchmark-and-bounds follow-up must establish a measured need before adding a
-reverse index or another optimization; this layout must not weaken parity
-validation merely to avoid that scan. High-water integrity validation likewise
-scans the persisted records for one origin before allocation or admission of a
-new id. It remains part of the same benchmark-and-bounds follow-up; no cached
+The reverse scan is the default correctness-first implementation. Its per-key
+cost is linear in all persisted element-state records, and the ordered
+reverse-scan benchmark reports that cost separately from the DUPSORT lookup.
+This path remains the fail-closed fallback and must not be removed merely to
+avoid the scan. High-water integrity validation likewise scans the persisted
+records for one origin before allocation or admission of a new id; no cached
 shortcut may hide durable state corruption.
+
+An explicit opt-in fast path is available after a complete validation through
+`LogicalCaptureSession::validate_key_index()`. It returns a transaction-bound
+`OrderedElementKeyIndexProof` for one canonical key. The proof carries a
+non-reusable session lifetime token in addition to the transaction, key, and
+mutation revision. It is valid only for that capture session and rejects after
+the session is destroyed, even if object or MDBX transaction addresses are
+reused. `max_selected_elements` also bounds the complete materialized proof ID
+set; validation fails before adding another ID when that bound is exceeded.
+The trusted selector methods `erase_at_trusted()`, `erase_value_trusted()`, and
+`erase_key_trusted()` reject a stale or foreign proof and reuse its validated
+id set instead of repeating the full reverse state scan. They still apply the
+candidate and inspected-record bounds and retain physical primary, key-index,
+and state point checks before mutation. Proof validation and each later trusted
+selector call have separate `BroadEraseBounds` budgets; the scan count is not
+carried from one call to the next. Callers must not modify the underlying table
+outside the session between proof creation and trusted use. Proofs are
+ephemeral and must never be persisted or treated as a corruption-recovery
+mechanism; when no proof is available, the ordinary full-validation selectors
+remain the required path.
 
 The initial v2 adapter resolves an element through its persistent state and uses
 the current per-key live-id order to call `erase_at()` inside the same ordered
@@ -705,7 +724,11 @@ complete candidate set or creates the first tombstone.
 After that prevalidation, bounded selector mutation reuses resolved key/id
 metadata and deletes positions in descending per-key order. It does not repeat
 the full reverse state scan after each id. Physical cursor reads and all state
-or index point reads remain part of the same `max_scanned_records` budget.
+or index point reads remain part of the same `max_scanned_records` budget. An
+opt-in transaction-bound proof can also reuse the complete validated id set
+across selector calls; proof creation itself is bounded by the full ID-set
+materialization limit, the proof path is never implicit, and the ordinary
+fail-closed resolver remains the fallback.
 Committing a session with no pending changes retains the existing empty-envelope
 semantics and consumes one ordered delivery sequence.
 
@@ -830,8 +853,8 @@ requires recovery or re-baselining instead.
 Remaining hardening before this initial v2 adapter can grow into a broader
 destructive surface includes:
 
-- implementation of the bounded `erase_at`, matching-value, key, and clear
-  capture-session contract above; a separate bounded `replace_with()` design;
+- a separate bounded `replace_with()` design and any proof invalidation or
+  recovery policy needed for future broader selectors;
 - a duplicate `AppendElement` with identical bytes, the same id with different
   bytes, append of a tombstoned id, duplicate ids in one frame, an
   append-then-erase remote duplicate pair, and unknown destructive opcodes;

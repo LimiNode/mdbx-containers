@@ -1193,6 +1193,217 @@ void test_destructive_capture_uses_transaction_bound_key_index_proof() {
     cleanup(path);
 }
 
+void test_destructive_capture_key_index_proof_rejects_corruption() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_key_index_proof_corrupt.mdbx";
+    const std::string primary = "ordered_proof_corrupt_values";
+    const std::string state = "ordered_proof_corrupt_state";
+    const std::string by_key = "ordered_proof_corrupt_by_key";
+    const std::string schema = "app.ordered_proof_corrupt.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x6Au);
+    const mdbxc::sync::DbId local_db = make_node(0xAAu);
+    const mdbxc::sync::DbId destination = make_node(0xBAu);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(1, "value");
+        session->commit_to_outbox(engine, destination);
+    }
+
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        const std::vector<std::uint8_t> key_bytes = IntKeyCodec::encode(1);
+        const std::vector<mdbxc::sync::OrderedElementId> ids =
+            adapter.state_store().live_ids_for_key(
+                transaction.handle(), key_bytes);
+        if (ids.size() != 1u) {
+            throw std::runtime_error(
+                "ordered proof corruption fixture did not find index entry");
+        }
+        MDBX_dbi by_key_dbi = 0;
+        mdbxc::check_mdbx(mdbx_dbi_open(
+            transaction.handle(), by_key.c_str(),
+            static_cast<MDBX_db_flags_t>(0), &by_key_dbi),
+            "ordered proof corruption index open failed");
+        const std::vector<std::uint8_t> index_value =
+            mdbxc::sync::encode_ordered_element_id_index(ids[0]);
+        MDBX_val raw_key = make_raw_val(key_bytes);
+        MDBX_val raw_value = make_raw_val(index_value);
+        mdbxc::check_mdbx(
+            mdbx_del(transaction.handle(), by_key_dbi, &raw_key, &raw_value),
+            "ordered proof corruption index delete failed");
+        transaction.commit();
+    }
+
+    std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+        adapter.begin_capture_session();
+    bool rejected = false;
+    try {
+        (void)session->validate_key_index(1, { 2u, 32u });
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    if (!rejected || table.find(1).size() != 1u) {
+        throw std::runtime_error(
+            "ordered key index proof accepted a corrupted state");
+    }
+    bool reuse_rejected = false;
+    try {
+        (void)session->erase_key(1, { 2u, 32u });
+    } catch (const std::logic_error&) {
+        reuse_rejected = true;
+    }
+    if (!reuse_rejected) {
+        throw std::runtime_error(
+            "corrupted ordered proof session remained active");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_capture_key_index_proof_rejects_cross_session() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_key_index_proof_cross_session.mdbx";
+    const std::string primary = "ordered_proof_cross_values";
+    const std::string state = "ordered_proof_cross_state";
+    const std::string by_key = "ordered_proof_cross_by_key";
+    const std::string schema = "app.ordered_proof_cross.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x6Bu);
+    const mdbxc::sync::DbId local_db = make_node(0xABu);
+    const mdbxc::sync::DbId destination = make_node(0xBBu);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(1, "first");
+        session->append(1, "second");
+        session->commit_to_outbox(engine, destination);
+    }
+
+    mdbxc::sync::OrderedElementKeyIndexProof proof;
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        proof = session->validate_key_index(1, { 2u, 32u });
+        session->rollback();
+    }
+
+    std::unique_ptr<adapter_type::LogicalCaptureSession> next_session =
+        adapter.begin_capture_session();
+    bool rejected = false;
+    try {
+        (void)next_session->erase_key_trusted(1, proof, { 2u, 32u });
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    if (!rejected || table.find(1).size() != 2u) {
+        throw std::runtime_error(
+            "ordered key index proof was accepted by another capture session");
+    }
+    bool inactive = false;
+    try {
+        (void)next_session->erase_key(1, { 2u, 32u });
+    } catch (const std::logic_error&) {
+        inactive = true;
+    }
+    if (!inactive) {
+        throw std::runtime_error(
+            "cross-session proof rejection did not deactivate the session");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
+void test_destructive_capture_key_index_proof_respects_size_bound() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_key_index_proof_bound.mdbx";
+    const std::string primary = "ordered_proof_bound_values";
+    const std::string state = "ordered_proof_bound_state";
+    const std::string by_key = "ordered_proof_bound_by_key";
+    const std::string schema = "app.ordered_proof_bound.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x6Cu);
+    const mdbxc::sync::DbId local_db = make_node(0xACu);
+    const mdbxc::sync::DbId destination = make_node(0xBCu);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(1, "first");
+        session->append(1, "second");
+        session->commit_to_outbox(engine, destination);
+    }
+
+    std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+        adapter.begin_capture_session();
+    bool rejected = false;
+    try {
+        (void)session->validate_key_index(1, { 1u, 32u });
+    } catch (const std::length_error&) {
+        rejected = true;
+    }
+    if (!rejected || session->pending_size() != 0u ||
+        table.find(1).size() != 2u) {
+        throw std::runtime_error(
+            "ordered key index proof exceeded its materialization bound");
+    }
+    bool inactive = false;
+    try {
+        (void)session->erase_key(1, { 2u, 32u });
+    } catch (const std::logic_error&) {
+        inactive = true;
+    }
+    if (!inactive) {
+        throw std::runtime_error(
+            "proof size rejection did not deactivate the session");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 void test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates() {
     const std::string path = "test_key_ordered_multi_value_destructive_replay.mdbx";
     const std::string primary = "ordered_replay_values";
@@ -1870,6 +2081,9 @@ int main() {
     test_destructive_capture_clear_checks_tombstone_only_origin_high_water();
     test_destructive_capture_trusted_clear_avoids_repeated_state_scans();
     test_destructive_capture_uses_transaction_bound_key_index_proof();
+    test_destructive_capture_key_index_proof_rejects_corruption();
+    test_destructive_capture_key_index_proof_rejects_cross_session();
+    test_destructive_capture_key_index_proof_respects_size_bound();
     test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates();
     test_destructive_preflight_rejects_untracked_physical_value();
     test_destructive_preflight_rejects_state_index_corruption();

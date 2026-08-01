@@ -157,20 +157,28 @@ the default is zero. CSV rows separately report total, Live, and Tombstone
 element records, the full state-record count, and live DUPSORT index records.
 CSV now has separate rows for `live_ids_for_key_index` and
 `live_state_ids_for_key`. The first measures the DUPSORT lookup; the second
-measures the full reverse validation scan. `estimated_scanned_records` is a
-workload bound, not an internal counter. `elapsed_ms` includes read-transaction
-open, the measured scan, and rollback. Use results from representative
-workloads before adding an index, cache, or fixed limit to either correctness
-path.
+measures the full reverse validation scan. The
+`verify_introduced_high_water` row measures the per-origin integrity scan.
+`estimated_scanned_records_per_iteration` is the estimated record work for one
+iteration of that row, not an internal counter. The index estimate includes
+one DUPSORT record and one state point read per matching id; the reverse
+estimate includes the complete state scan; the high-water estimate includes
+each origin's element records and its introduced high-water record.
+`matched_live_ids` is cumulative across all `iterations`. `elapsed_ms` includes
+read-transaction open, the measured scan, and rollback. Use results from
+representative workloads before adding an index, cache, or fixed limit to
+either correctness path.
 
-The reverse-validation row is intentionally the reference path. Any future
-trusted no-rescan path must retain this path as a fallback and must document
-the proof that makes its bounded scan safe. `BroadEraseBounds::max_scanned_records`
-must be large enough for the selected operation while this validation path is
-enabled; a smaller bound is expected to reject before mutation.
+The reverse-validation row is intentionally the reference path. The
+proof-based trusted selector path is implemented as an explicit opt-in: it may
+reuse a complete transaction-bound validation proof, but must retain this row
+as its fail-closed fallback and keep the physical/state point checks. A
+`BroadEraseBounds::max_scanned_records` value must be large enough for the
+selected operation while the ordinary validation path is enabled; a smaller
+bound is expected to reject before mutation.
 
 Bounded destructive capture now uses prevalidated exact ids for its mutation
 phase and does not repeat this full reverse scan for every selected id. The
 corresponding regression retains a tombstone-heavy state with one Live element
-and a deliberately tight scan budget; use this benchmark to compare larger
-state and tombstone distributions before changing that trusted path.
+and a deliberately tight scan budget. Use this benchmark to compare larger
+state and tombstone distributions before changing the scan or proof contract.
