@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Added an opt-in transaction-bound ordered key-index proof for trusted
+  destructive selector resolution. The default full reverse validation remains
+  the fail-closed fallback; trusted selector calls still enforce their bounds
+  and physical/state point checks, and stale or foreign proofs are rejected.
 - Added `KeyMultiValueTable::erase_one()` and schema-v2 logical
   `EraseOneValue`. Schema v2 typed multivalue capture supports
   multiplicity-preserving `reconcile()` by publishing exact surplus deletes and

@@ -122,8 +122,12 @@ delivery. The logical core uses the following contracts:
   identity and tombstones; its typed capture session atomically commits local
   mutations and an ordered outbox envelope. Bounded `erase_at`, key/value
   erase, and clear capture resolve canonical logical-codec selectors to exact
-  ids with separate candidate and inspected-record bounds. Replace and other
-  broad state construction remain separately deferred. Transferring the
+  ids with separate candidate and inspected-record bounds. The default resolver
+  performs full reverse validation; an opt-in transaction-bound proof from
+  `validate_key_index()` allows trusted selector calls to reuse a validated id
+  set without repeating that reverse scan, while stale or foreign proofs fail
+  closed. Replace and other broad state construction remain separately
+  deferred. Transferring the
   authoritative origin is an
   application-coordinated schema-marker cutover; it is not automatic failover
   and requires old-outbox drain plus replay-marker retention through the chosen
