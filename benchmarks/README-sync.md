@@ -155,9 +155,19 @@ The optional positional arguments are `origins`, `elements_per_origin`,
 `tombstones_per_origin` ids of every origin are persisted as Tombstone records;
 the default is zero. CSV rows separately report total, Live, and Tombstone
 element records, the full state-record count, and live DUPSORT index records.
-`elapsed_ms` includes read-transaction open, the measured scan, and rollback.
-Use results from representative workloads before adding an index, cache, or
-fixed limit to either correctness path.
+CSV now has separate rows for `live_ids_for_key_index` and
+`live_state_ids_for_key`. The first measures the DUPSORT lookup; the second
+measures the full reverse validation scan. `estimated_scanned_records` is a
+workload bound, not an internal counter. `elapsed_ms` includes read-transaction
+open, the measured scan, and rollback. Use results from representative
+workloads before adding an index, cache, or fixed limit to either correctness
+path.
+
+The reverse-validation row is intentionally the reference path. Any future
+trusted no-rescan path must retain this path as a fallback and must document
+the proof that makes its bounded scan safe. `BroadEraseBounds::max_scanned_records`
+must be large enough for the selected operation while this validation path is
+enabled; a smaller bound is expected to reject before mutation.
 
 Bounded destructive capture now uses prevalidated exact ids for its mutation
 phase and does not repeat this full reverse scan for every selected id. The
