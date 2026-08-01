@@ -1,0 +1,366 @@
+#pragma once
+#ifndef MDBX_CONTAINERS_HEADER_SYNC_FULL_SNAPSHOT_PROTOCOL_HPP_INCLUDED
+#define MDBX_CONTAINERS_HEADER_SYNC_FULL_SNAPSHOT_PROTOCOL_HPP_INCLUDED
+
+/// \file FullSnapshotProtocol.hpp
+/// \brief Explicit full-snapshot chunk contract and codec.
+
+#include <algorithm>
+#include <cstdint>
+#include <cstring>
+#include <limits>
+#include <stdexcept>
+#include <string>
+#include <vector>
+
+#include "ChangeBatchCodec.hpp"
+#include "CodecBounds.hpp"
+#include "common.hpp"
+
+namespace mdbxc {
+namespace sync {
+
+    /// \brief One named user DBI in an immutable snapshot manifest.
+    struct FullSnapshotManifestEntry {
+        std::string dbi_name;
+        std::uint32_t dbi_flags = 0u;
+    };
+
+    /// \brief One chunk of a full database export.
+    /// \details Snapshot chunks are not changelog batches. They carry a
+    /// stable source identity, an immutable manifest, and a nested raw batch
+    /// whose sequence is always zero. A future transport may accept this
+    /// contract only after validating the complete manifest and snapshot
+    /// continuation before any user-DBI mutation.
+    struct FullSnapshotChunk {
+        NodeId source_node_id{};
+        DbId source_db_uuid{};
+        std::string snapshot_id;
+        std::uint64_t chunk_index = 0u;
+        bool has_more = false;
+        std::vector<FullSnapshotManifestEntry> manifest;
+        ChangeBatch batch;
+    };
+
+    /// \brief Strict codec for the reserved full-snapshot wire boundary.
+    /// \details This codec is preparatory. v0.1 pull responders still reject
+    /// \c PullRequest::request_full_snapshot until a transport dispatcher and
+    /// validated replacement apply path are available.
+    class FullSnapshotCodec {
+    public:
+        static const std::uint8_t* magic() {
+            static const std::uint8_t value[8] =
+                { 'M', 'D', 'B', 'X', 'C', 'S', 'N', 'P' };
+            return value;
+        }
+
+        static std::size_t magic_size() { return 8u; }
+        static std::uint16_t codec_version() { return 1u; }
+
+        static std::vector<std::uint8_t> encode(
+                const FullSnapshotChunk& chunk,
+                const CodecBounds* bounds = nullptr) {
+            validate(chunk, bounds);
+            const std::vector<std::uint8_t> nested =
+                ChangeBatchCodec::encode(chunk.batch, bounds);
+            std::vector<std::uint8_t> out;
+            append_bytes(out, magic(), magic_size());
+            detail::append_u16_le(out, codec_version());
+            append_bytes(out, chunk.source_node_id.data(),
+                         chunk.source_node_id.size());
+            append_bytes(out, chunk.source_db_uuid.data(),
+                         chunk.source_db_uuid.size());
+            append_string(out, chunk.snapshot_id);
+            detail::append_u64_le(out, chunk.chunk_index);
+            out.push_back(chunk.has_more ? 1u : 0u);
+            detail::append_u32_le(
+                out, static_cast<std::uint32_t>(chunk.manifest.size()));
+            for (std::size_t i = 0u; i < chunk.manifest.size(); ++i) {
+                append_string(out, chunk.manifest[i].dbi_name);
+                detail::append_u32_le(out, chunk.manifest[i].dbi_flags);
+            }
+            if (nested.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+                throw std::length_error("full snapshot nested batch exceeds u32");
+            }
+            detail::append_u32_le(out, static_cast<std::uint32_t>(nested.size()));
+            append_bytes(out, nested.empty() ? nullptr : &nested[0], nested.size());
+            validate_encoded_size(out, bounds);
+            return out;
+        }
+
+        static FullSnapshotChunk decode(
+                const std::vector<std::uint8_t>& encoded,
+                const CodecBounds* bounds = nullptr) {
+            validate_encoded_size(encoded, bounds);
+            Cursor cursor = make_cursor(encoded);
+            check_bytes(cursor, magic(), magic_size());
+            if (read_u16_le(cursor) != codec_version()) {
+                throw std::runtime_error("Unsupported full snapshot codec version");
+            }
+            FullSnapshotChunk out;
+            read_bytes(cursor, out.source_node_id.data(), out.source_node_id.size());
+            read_bytes(cursor, out.source_db_uuid.data(), out.source_db_uuid.size());
+            out.snapshot_id = read_string(
+                cursor, bounds == nullptr ? 256u : bounds->max_snapshot_id_len,
+                "full snapshot id exceeds max_snapshot_id_len");
+            out.chunk_index = read_u64_le(cursor);
+            const std::uint8_t has_more = read_u8(cursor);
+            if (has_more > 1u) {
+                throw std::runtime_error("Invalid full snapshot continuation flag");
+            }
+            out.has_more = has_more != 0u;
+            const std::uint32_t manifest_count = read_u32_le(cursor);
+            if (bounds != nullptr &&
+                manifest_count > bounds->max_snapshot_manifest_entries) {
+                throw std::length_error(
+                    "full snapshot manifest exceeds max_snapshot_manifest_entries");
+            }
+            out.manifest.resize(manifest_count);
+            for (std::uint32_t i = 0u; i < manifest_count; ++i) {
+                out.manifest[i].dbi_name = read_string(
+                    cursor, bounds == nullptr ? 256u : bounds->max_dbi_name_len,
+                    "full snapshot manifest DBI name exceeds max_dbi_name_len");
+                out.manifest[i].dbi_flags = read_u32_le(cursor);
+            }
+            const std::uint32_t nested_size = read_u32_le(cursor);
+            const std::uint8_t* nested_data = read_pointer(cursor, nested_size);
+            std::vector<std::uint8_t> nested(nested_size);
+            if (nested_size != 0u) {
+                std::memcpy(&nested[0], nested_data, nested_size);
+            }
+            out.batch = ChangeBatchCodec::decode_exact(nested, bounds);
+            if (cursor.pos != cursor.size) {
+                throw std::runtime_error("Trailing bytes after full snapshot chunk");
+            }
+            validate(out, bounds);
+            return out;
+        }
+
+        static void validate(const FullSnapshotChunk& chunk,
+                             const CodecBounds* bounds = nullptr) {
+            if (is_zero_id(chunk.source_node_id) ||
+                is_zero_id(chunk.source_db_uuid)) {
+                throw std::runtime_error(
+                    "Full snapshot source identity is incomplete");
+            }
+            if (chunk.snapshot_id.empty()) {
+                throw std::invalid_argument("Full snapshot id is empty");
+            }
+            if (bounds != nullptr &&
+                chunk.snapshot_id.size() > bounds->max_snapshot_id_len) {
+                throw std::length_error(
+                    "full snapshot id exceeds max_snapshot_id_len");
+            }
+            if (bounds != nullptr &&
+                chunk.manifest.size() > bounds->max_snapshot_manifest_entries) {
+                throw std::length_error(
+                    "full snapshot manifest exceeds max_snapshot_manifest_entries");
+            }
+            if (chunk.manifest.empty()) {
+                throw std::invalid_argument("Full snapshot manifest is empty");
+            }
+            for (std::size_t i = 0u; i < chunk.manifest.size(); ++i) {
+                const FullSnapshotManifestEntry& entry = chunk.manifest[i];
+                if (entry.dbi_name.empty() || is_reserved_dbi(entry.dbi_name)) {
+                    throw std::invalid_argument(
+                        "Full snapshot manifest contains a reserved or empty DBI");
+                }
+                if (i != 0u &&
+                    chunk.manifest[i - 1u].dbi_name >= entry.dbi_name) {
+                    throw std::invalid_argument(
+                        "Full snapshot manifest must be sorted and unique");
+                }
+                if (entry.dbi_name.size() >
+                    (bounds == nullptr ? static_cast<std::size_t>(256u) :
+                        bounds->max_dbi_name_len)) {
+                    throw std::length_error(
+                        "full snapshot manifest DBI name exceeds max_dbi_name_len");
+                }
+            }
+            if (chunk.batch.version != ChangeBatchCodec::batch_version() ||
+                chunk.batch.seq != 0u ||
+                chunk.batch.origin_node_id != chunk.source_node_id) {
+                throw std::invalid_argument(
+                    "Full snapshot batch must use source identity and seq=0");
+            }
+            const std::uint32_t expected_flags =
+                chunk.has_more ? static_cast<std::uint32_t>(BATCH_HAS_MORE) :
+                    static_cast<std::uint32_t>(BATCH_NONE);
+            if (chunk.batch.batch_flags != expected_flags) {
+                throw std::invalid_argument(
+                    "Full snapshot continuation does not match batch flags");
+            }
+            for (std::size_t i = 0u; i < chunk.batch.ops.size(); ++i) {
+                if (is_reserved_dbi(chunk.batch.ops[i].dbi_name)) {
+                    throw std::invalid_argument(
+                        "Full snapshot contains a reserved DBI operation");
+                }
+                std::uint32_t manifest_flags = 0u;
+                if (!manifest_entry_flags(chunk.manifest,
+                                          chunk.batch.ops[i].dbi_name,
+                                          manifest_flags)) {
+                    throw std::invalid_argument(
+                        "Full snapshot operation is outside its manifest");
+                }
+                if (chunk.batch.ops[i].dbi_flags != manifest_flags) {
+                    throw std::invalid_argument(
+                        "Full snapshot operation DBI flags differ from manifest");
+                }
+            }
+        }
+
+    private:
+        struct Cursor {
+            const std::uint8_t* data;
+            std::size_t size;
+            std::size_t pos;
+        };
+
+        static bool is_reserved_dbi(const std::string& name) {
+            return name.size() >= 7u && name.compare(0u, 7u, "_mdbxc_") == 0;
+        }
+
+        static bool is_zero_id(const NodeId& id) {
+            for (std::size_t i = 0u; i < id.size(); ++i) {
+                if (id[i] != 0u) return false;
+            }
+            return true;
+        }
+
+        static bool manifest_entry_flags(
+                const std::vector<FullSnapshotManifestEntry>& manifest,
+                const std::string& name,
+                std::uint32_t& flags) {
+            for (std::size_t i = 0u; i < manifest.size(); ++i) {
+                if (manifest[i].dbi_name == name) {
+                    flags = manifest[i].dbi_flags;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        static void append_bytes(std::vector<std::uint8_t>& out,
+                                 const std::uint8_t* data,
+                                 std::size_t size) {
+            if (size == 0u) return;
+            if (data == nullptr ||
+                size > (std::numeric_limits<std::size_t>::max)() - out.size()) {
+                throw std::length_error("full snapshot size overflow");
+            }
+            const std::size_t old_size = out.size();
+            out.resize(old_size + size);
+            std::memcpy(&out[old_size], data, size);
+        }
+
+        static void append_string(std::vector<std::uint8_t>& out,
+                                  const std::string& value) {
+            if (value.size() > (std::numeric_limits<std::uint32_t>::max)()) {
+                throw std::length_error("full snapshot string exceeds u32");
+            }
+            detail::append_u32_le(out, static_cast<std::uint32_t>(value.size()));
+            append_bytes(out,
+                         value.empty() ? nullptr :
+                             reinterpret_cast<const std::uint8_t*>(value.data()),
+                         value.size());
+        }
+
+        static Cursor make_cursor(const std::vector<std::uint8_t>& encoded) {
+            Cursor out = { encoded.empty() ? nullptr : &encoded[0],
+                           encoded.size(), 0u };
+            return out;
+        }
+
+        static void require(Cursor& cursor, std::size_t size) {
+            if (size > cursor.size - cursor.pos) {
+                throw std::runtime_error("Truncated full snapshot chunk");
+            }
+        }
+
+        static void check_bytes(Cursor& cursor, const std::uint8_t* expected,
+                                std::size_t size) {
+            require(cursor, size);
+            if (std::memcmp(cursor.data + cursor.pos, expected, size) != 0) {
+                throw std::runtime_error("Invalid full snapshot magic");
+            }
+            cursor.pos += size;
+        }
+
+        static std::uint8_t read_u8(Cursor& cursor) {
+            require(cursor, 1u);
+            return cursor.data[cursor.pos++];
+        }
+
+        static std::uint16_t read_u16_le(Cursor& cursor) {
+            require(cursor, 2u);
+            const std::uint16_t out =
+                static_cast<std::uint16_t>(cursor.data[cursor.pos]) |
+                static_cast<std::uint16_t>(cursor.data[cursor.pos + 1u] << 8u);
+            cursor.pos += 2u;
+            return out;
+        }
+
+        static std::uint32_t read_u32_le(Cursor& cursor) {
+            require(cursor, 4u);
+            std::uint32_t out = 0u;
+            for (std::size_t i = 0u; i < 4u; ++i) {
+                out |= static_cast<std::uint32_t>(cursor.data[cursor.pos + i])
+                    << (8u * i);
+            }
+            cursor.pos += 4u;
+            return out;
+        }
+
+        static std::uint64_t read_u64_le(Cursor& cursor) {
+            require(cursor, 8u);
+            std::uint64_t out = 0u;
+            for (std::size_t i = 0u; i < 8u; ++i) {
+                out |= static_cast<std::uint64_t>(cursor.data[cursor.pos + i])
+                    << (8u * i);
+            }
+            cursor.pos += 8u;
+            return out;
+        }
+
+        static const std::uint8_t* read_pointer(Cursor& cursor,
+                                                 std::size_t size) {
+            require(cursor, size);
+            const std::uint8_t* out = cursor.data + cursor.pos;
+            cursor.pos += size;
+            return out;
+        }
+
+        static void read_bytes(Cursor& cursor, std::uint8_t* out,
+                               std::size_t size) {
+            const std::uint8_t* data = read_pointer(cursor, size);
+            if (size != 0u) std::memcpy(out, data, size);
+        }
+
+        static std::string read_string(Cursor& cursor,
+                                       std::size_t max_size,
+                                       const char* error) {
+            const std::uint32_t size = read_u32_le(cursor);
+            if (size > max_size) {
+                throw std::length_error(error);
+            }
+            const std::uint8_t* data = read_pointer(cursor, size);
+            return size == 0u
+                ? std::string()
+                : std::string(reinterpret_cast<const char*>(data), size);
+        }
+
+        static void validate_encoded_size(
+                const std::vector<std::uint8_t>& encoded,
+                const CodecBounds* bounds) {
+            if (bounds != nullptr &&
+                encoded.size() > bounds->max_snapshot_chunk_bytes) {
+                throw std::length_error(
+                    "full snapshot chunk exceeds max_snapshot_chunk_bytes");
+            }
+        }
+    };
+
+} // namespace sync
+} // namespace mdbxc
+
+#endif // MDBX_CONTAINERS_HEADER_SYNC_FULL_SNAPSHOT_PROTOCOL_HPP_INCLUDED

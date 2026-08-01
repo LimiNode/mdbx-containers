@@ -33,6 +33,7 @@
 #include "sync/CodecBounds.hpp"
 #include "sync/ChangeBatch.hpp"
 #include "sync/ChangeBatchCodec.hpp"
+#include "sync/FullSnapshotProtocol.hpp"
 #include "sync/ChangeAccumulator.hpp"
 #include "sync/SyncCaptureScope.hpp"
 #include "sync/cancellation.hpp"
