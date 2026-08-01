@@ -30,18 +30,22 @@ namespace sync {
     };
 
     /// \brief Declares which user-DBI content a snapshot may replace.
-    /// \details \c ManifestOnly preserves receiver-only user DBIs. Complete
-    /// replacement is an explicit receiver opt-in and is not enabled by the
-    /// initial importer.
+    /// \details \c ManifestOnly replaces only manifest DBIs and never
+    /// bootstraps global raw-sync progress. \c CompleteUserDatabase replaces
+    /// every named user DBI and is the only scope that may bootstrap the
+    /// per-origin applied cursor for subsequent incremental replication.
     enum class FullSnapshotScope : std::uint8_t {
         ManifestOnly = 0u,
         CompleteUserDatabase = 1u
     };
 
     /// \brief Explicit source-side configuration for materialized snapshots.
-    /// \details The engine never scans MainDB to guess named user DBIs. A
-    /// caller declares the exportable DBIs, including empty tables, and bounds
-    /// the one-session materialization before enabling full-snapshot pull.
+    /// \details For \c ManifestOnly, c manifest explicitly declares the
+    /// exportable DBIs, including empty tables. For
+    /// \c CompleteUserDatabase, c manifest must be empty: the engine
+    /// enumerates every named non-reserved DBI in MainDB under one read
+    /// transaction. Both modes bound one-session materialization before
+    /// enabling full-snapshot pull.
     struct FullSnapshotExportOptions {
         std::vector<FullSnapshotManifestEntry> manifest;
         FullSnapshotScope replacement_scope = FullSnapshotScope::ManifestOnly;
@@ -56,9 +60,8 @@ namespace sync {
     /// \brief One chunk of a full database export.
     /// \details Snapshot chunks are not changelog batches. They carry a
     /// stable source identity, an immutable manifest, and a nested raw batch
-    /// whose sequence is always zero. A future transport may accept this
-    /// contract only after validating the complete manifest and snapshot
-    /// continuation before any user-DBI mutation.
+    /// whose sequence is always zero. The transport validates the complete
+    /// manifest and snapshot continuation before any user-DBI mutation.
     struct FullSnapshotChunk {
         NodeId source_node_id{};
         DbId source_db_uuid{};
@@ -84,9 +87,8 @@ namespace sync {
 
     /// \brief Strict codec for the explicit full-snapshot wire boundary.
     /// \details Configured sources export bounded snapshot sessions through
-    /// \c PullRequest::request_full_snapshot. The initial receiver accepts
-    /// only \c ManifestOnly pages into a fresh replica and commits the staged
-    /// replacement plan atomically at the final page.
+    /// \c PullRequest::request_full_snapshot. Receivers stage pages and
+    /// commit the validated replacement plan atomically at the final page.
     class FullSnapshotCodec {
     public:
         static const std::uint8_t* magic() {

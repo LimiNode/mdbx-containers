@@ -1740,9 +1740,7 @@ void test_engine_full_snapshot_tail_includes_applied_origins() {
     const sync::DbId db_id = make_node(0xD7);
     std::shared_ptr<Connection> conn = open_env(p);
     sync::FullSnapshotExportOptions options;
-    sync::FullSnapshotManifestEntry entry;
-    entry.dbi_name = "documents";
-    options.manifest.push_back(entry);
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
     sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
     engine.initialize_local_identity(source_node, db_id);
 
@@ -1767,6 +1765,52 @@ void test_engine_full_snapshot_tail_includes_applied_origins() {
         response.snapshot_chunk.source_tail.last_seq_for(remote_origin) != 1u) {
         throw std::runtime_error(
             "snapshot source tail omitted an applied remote origin");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_exports_complete_full_snapshot_inventory() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_full_snapshot_inventory.mdbx";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xA8);
+    const sync::DbId db_id = make_node(0xD8);
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    KeyValueTable<std::string, std::string> audit(conn, "audit");
+    documents.insert_or_assign("document", "value");
+    audit.insert_or_assign("audit", "value");
+
+    sync::PullRequest request;
+    request.requester = make_node(0xB8);
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::PullResponse response = engine.handle_pull(request);
+    if (!response.ok || !response.is_full_snapshot || response.has_more ||
+        response.snapshot_chunk.replacement_scope !=
+            sync::FullSnapshotScope::CompleteUserDatabase ||
+        response.snapshot_chunk.manifest.size() != 2u ||
+        response.snapshot_chunk.manifest[0].dbi_name != "audit" ||
+        response.snapshot_chunk.manifest[1].dbi_name != "documents") {
+        throw std::runtime_error(
+            "complete full snapshot did not inventory all user DBIs");
+    }
+    for (std::size_t i = 0u;
+         i < response.snapshot_chunk.manifest.size(); ++i) {
+        if (response.snapshot_chunk.manifest[i].dbi_name.find("_mdbxc_") ==
+            0u) {
+            throw std::runtime_error(
+                "complete full snapshot exported a reserved DBI");
+        }
     }
 
     conn->disconnect();
@@ -2387,6 +2431,8 @@ int main() {
           &test_engine_exports_stable_full_snapshot_pages },
         { "test_engine_full_snapshot_tail_includes_applied_origins",
           &test_engine_full_snapshot_tail_includes_applied_origins },
+        { "test_engine_exports_complete_full_snapshot_inventory",
+          &test_engine_exports_complete_full_snapshot_inventory },
         { "test_engine_changelog_page_rejects_full_snapshot_request",
           &test_engine_changelog_page_rejects_full_snapshot_request },
         { "test_engine_pull_reports_snapshot_required_after_prune",

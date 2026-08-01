@@ -1293,7 +1293,22 @@ namespace sync {
 
         static void validate_full_snapshot_export_options(
                 const FullSnapshotExportOptions& options) {
-            if (options.manifest.empty()) {
+            switch (options.replacement_scope) {
+                case FullSnapshotScope::ManifestOnly:
+                case FullSnapshotScope::CompleteUserDatabase:
+                    break;
+                default:
+                    throw std::invalid_argument(
+                        "invalid full snapshot replacement scope");
+            }
+            if (options.replacement_scope ==
+                    FullSnapshotScope::CompleteUserDatabase &&
+                !options.manifest.empty()) {
+                throw std::invalid_argument(
+                    "complete full snapshot export enumerates its manifest");
+            }
+            if (options.replacement_scope == FullSnapshotScope::ManifestOnly &&
+                options.manifest.empty()) {
                 return;
             }
             if (options.max_materialized_operations == 0u ||
@@ -1302,14 +1317,6 @@ namespace sync {
                 options.session_idle_timeout <= std::chrono::seconds::zero()) {
                 throw std::invalid_argument(
                     "full snapshot export limits must be non-zero");
-            }
-            switch (options.replacement_scope) {
-                case FullSnapshotScope::ManifestOnly:
-                case FullSnapshotScope::CompleteUserDatabase:
-                    break;
-                default:
-                    throw std::invalid_argument(
-                        "invalid full snapshot replacement scope");
             }
             for (std::size_t i = 0u; i < options.manifest.size(); ++i) {
                 const FullSnapshotManifestEntry& entry = options.manifest[i];
@@ -1324,6 +1331,73 @@ namespace sync {
                         "full snapshot manifest must be sorted and unique");
                 }
             }
+        }
+
+        static bool full_snapshot_export_is_configured(
+                const FullSnapshotExportOptions& options) {
+            return options.replacement_scope ==
+                FullSnapshotScope::CompleteUserDatabase ||
+                !options.manifest.empty();
+        }
+
+        std::vector<FullSnapshotManifestEntry>
+        enumerate_complete_snapshot_manifest(MDBX_txn* txn) const {
+            MDBX_dbi main_dbi = 0;
+            check_mdbx(
+                mdbx_dbi_open(
+                    txn, static_cast<const char*>(MDBX_CHK_MAIN),
+                    static_cast<MDBX_db_flags_t>(0), &main_dbi),
+                "full snapshot failed to open MainDB for complete inventory");
+
+            std::vector<FullSnapshotManifestEntry> manifest;
+            MDBX_cursor* raw = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, main_dbi, &raw),
+                       "full snapshot failed to open MainDB cursor");
+            CursorGuard cursor(raw);
+            MDBX_val key;
+            MDBX_val value;
+            int rc = mdbx_cursor_get(raw, &key, &value, MDBX_FIRST);
+            while (rc == MDBX_SUCCESS) {
+                MDBX_dbi dbi = 0;
+                const int open_rc = mdbx_dbi_open2(
+                    txn, &key, MDBX_DB_ACCEDE, &dbi);
+                if (open_rc == MDBX_SUCCESS) {
+                    const char* name_data =
+                        static_cast<const char*>(key.iov_base);
+                    const std::string name(name_data, key.iov_len);
+                    if (!is_reserved_snapshot_dbi(name)) {
+                        unsigned raw_flags = 0u;
+                        check_mdbx(
+                            mdbx_dbi_flags(txn, dbi, &raw_flags),
+                            "full snapshot failed to read complete DBI flags");
+                        FullSnapshotManifestEntry entry;
+                        entry.dbi_name = name;
+                        entry.dbi_flags = persistent_dbi_flags(
+                            static_cast<std::uint32_t>(raw_flags));
+                        manifest.push_back(entry);
+                    }
+                } else if (open_rc != MDBX_INCOMPATIBLE &&
+                           open_rc != MDBX_NOTFOUND) {
+                    check_mdbx(
+                        open_rc,
+                        "full snapshot failed to inspect MainDB entry");
+                }
+                rc = mdbx_cursor_get(raw, &key, &value, MDBX_NEXT);
+            }
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc,
+                           "full snapshot failed to scan complete DBI inventory");
+            }
+            std::sort(manifest.begin(), manifest.end(),
+                [](const FullSnapshotManifestEntry& left,
+                   const FullSnapshotManifestEntry& right) {
+                    return left.dbi_name < right.dbi_name;
+                });
+            if (manifest.empty()) {
+                throw std::runtime_error(
+                    "complete full snapshot source has no user DBIs");
+            }
+            return manifest;
         }
 
         static std::uint64_t snapshot_materialized_bytes_for(
@@ -1423,7 +1497,6 @@ namespace sync {
                 new FullSnapshotSession());
             session->snapshot_id = snapshot_id;
             session->requester = requester;
-            session->manifest = options.manifest;
             session->replacement_scope = options.replacement_scope;
             session->last_access = std::chrono::steady_clock::now();
 
@@ -1438,18 +1511,26 @@ namespace sync {
                     "full snapshot source identity is not initialized");
             }
 
-            const MDBX_dbi changelog_dbi = open_changelog_ro(txn.handle());
-            session->source_tail = read_applied_cursor(
-                txn.handle(), SyncCursor());
-            if (changelog_dbi != 0) {
-                const std::vector<PullOrigin> origins =
-                    collect_known_origins(txn.handle(), changelog_dbi);
-                SyncCursor changelog_tail;
-                if (!copy_known_tail(origins, changelog_tail)) {
-                    throw std::runtime_error(
-                        "full snapshot source changelog tail is incomplete");
+            session->manifest = options.replacement_scope ==
+                    FullSnapshotScope::CompleteUserDatabase
+                ? enumerate_complete_snapshot_manifest(txn.handle())
+                : options.manifest;
+
+            if (options.replacement_scope ==
+                    FullSnapshotScope::CompleteUserDatabase) {
+                const MDBX_dbi changelog_dbi = open_changelog_ro(txn.handle());
+                session->source_tail = read_applied_cursor(
+                    txn.handle(), SyncCursor());
+                if (changelog_dbi != 0) {
+                    const std::vector<PullOrigin> origins =
+                        collect_known_origins(txn.handle(), changelog_dbi);
+                    SyncCursor changelog_tail;
+                    if (!copy_known_tail(origins, changelog_tail)) {
+                        throw std::runtime_error(
+                            "full snapshot source changelog tail is incomplete");
+                    }
+                    merge_sync_cursor_max(session->source_tail, changelog_tail);
                 }
-                merge_sync_cursor_max(session->source_tail, changelog_tail);
             }
 
             std::uint64_t materialized_bytes = 0u;
@@ -1620,7 +1701,7 @@ namespace sync {
                     std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
                     prune_expired_full_snapshot_sessions_locked();
                     options = m_full_snapshot_options;
-                    if (options.manifest.empty()) {
+                    if (!full_snapshot_export_is_configured(options)) {
                         out.ok = false;
                         out.error = "full snapshot source export is not configured";
                         out.error_code =
