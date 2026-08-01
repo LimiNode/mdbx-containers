@@ -67,6 +67,12 @@ namespace sync {
         std::size_t max_scanned_records;
     };
 
+    /// \brief Bounds for a destructive ordered replacement.
+    struct ReplaceWithBounds {
+        BroadEraseBounds existing;
+        std::size_t max_replacement_elements;
+    };
+
     /// \brief Bounded, deterministic candidate set for exact element erasure.
     /// \details Broad selectors resolve to immutable ids before mutating the
     /// table. This helper centralizes both limits and canonical id ordering so

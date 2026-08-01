@@ -512,6 +512,46 @@ namespace sync {
                 }
             }
 
+            /// \brief Replaces the complete live set with desired occurrences.
+            /// \details All desired keys and values are encoded before the
+            /// first physical mutation. Existing live occurrences are then
+            /// erased exactly and desired occurrences are appended with fresh
+            /// immutable ids. The operation is single-origin schema-v2
+            /// capture; it introduces no new wire opcode and remains bounded
+            /// by both the existing-state and replacement limits.
+            void replace_with(
+                    const std::vector<typename table_type::value_type>& desired,
+                    const ReplaceWithBounds& bounds) {
+                ensure_active();
+                try {
+                    if (desired.size() > bounds.max_replacement_elements) {
+                        throw std::length_error(
+                            "Ordered destructive replacement limit exceeded");
+                    }
+                    for (std::size_t i = 0u; i < desired.size(); ++i) {
+                        const std::vector<std::uint8_t> key_bytes =
+                            KeyCodec::encode(desired[i].first);
+                        const std::vector<std::uint8_t> value_bytes =
+                            ValueCodec::encode(desired[i].second);
+                        if (KeyCodec::encode(KeyCodec::decode(key_bytes)) !=
+                                key_bytes ||
+                            ValueCodec::encode(ValueCodec::decode(value_bytes)) !=
+                                value_bytes) {
+                            throw std::runtime_error(
+                                "Ordered destructive replacement value is non-canonical");
+                        }
+                    }
+
+                    clear(bounds.existing);
+                    for (std::size_t i = 0u; i < desired.size(); ++i) {
+                        append(desired[i].first, desired[i].second);
+                    }
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
             /// \brief Commits captured mutations and delivery atomically.
             LogicalDeliveryEnvelope commit_to_outbox(
                     ILogicalDeliveryOutbox& outbox,

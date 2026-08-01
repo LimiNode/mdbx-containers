@@ -792,10 +792,13 @@ may derive ids from raw physical rows, skip tombstone creation, or publish a
 partial frame. Receiver apply remains unchanged because it sees only exact
 `EraseElement` operations.
 
-`replace_with()` is not part of this contract. It needs a separately bounded
-combined plan for removals, new id allocation, repeated input values, and final
-per-key order. Baseline import, multi-origin histories, physical-prefix
-optimization, and tombstone pruning likewise remain separate extensions.
+`replace_with()` is implemented for the single-authoritative-origin schema-v2
+capture session. It first validates the complete desired vector, then expands
+the replacement into exact `EraseElement` and `AppendElement` changes with
+fresh immutable ids in one transaction. Its existing-state and desired-size
+bounds are mandatory; no replacement-specific wire opcode is introduced.
+Baseline import, multi-origin histories, physical-prefix optimization, and
+tombstone pruning likewise remain separate extensions.
 
 Implementation acceptance requires C++11/C++17 coverage for empty and non-empty
 selectors under a zero selected-element budget; exact scan-budget success and

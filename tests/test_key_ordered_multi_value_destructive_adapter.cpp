@@ -2067,6 +2067,80 @@ void test_ordered_delivery_rejects_incompatible_auxiliary_dbi() {
     cleanup(path);
 }
 
+void test_destructive_capture_replaces_bounded_live_set() {
+    const std::string path = "test_key_ordered_multi_value_destructive_replace.mdbx";
+    const std::string primary = "ordered_replace_values";
+    const std::string state = "ordered_replace_state";
+    const std::string by_key = "ordered_replace_by_key";
+    const std::string schema = "app.ordered_replace.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0xE8u);
+    const mdbxc::sync::DbId local_db = make_node(0xF8u);
+    const mdbxc::sync::DbId destination = make_node(0x08u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(1, "old");
+        session->commit_to_outbox(engine, destination);
+    }
+    {
+        std::vector<table_type::value_type> desired;
+        desired.push_back(table_type::value_type(3, "new"));
+        desired.push_back(table_type::value_type(3, "new"));
+        const mdbxc::sync::ReplaceWithBounds bounds =
+            { { 8u, 256u }, 4u };
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->replace_with(desired, bounds);
+        if (session->pending_size() != 3u || !table.find(1).empty() ||
+            table.find(3).size() != 2u) {
+            throw std::runtime_error(
+                "bounded destructive replacement produced wrong local state");
+        }
+        session->commit_to_outbox(engine, destination);
+    }
+    if (table.find(3).size() != 2u || table.find(3)[0] != "new" ||
+        table.find(3)[1] != "new") {
+        throw std::runtime_error(
+            "bounded destructive replacement did not preserve duplicates");
+    }
+
+    bool bound_rejected = false;
+    try {
+        std::vector<table_type::value_type> too_many;
+        too_many.push_back(table_type::value_type(4, "rejected"));
+        const mdbxc::sync::ReplaceWithBounds no_replacement =
+            { { 8u, 256u }, 0u };
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->replace_with(too_many, no_replacement);
+    } catch (const std::length_error&) {
+        bound_rejected = true;
+    }
+    if (!bound_rejected || table.find(3).size() != 2u ||
+        !table.find(4).empty()) {
+        throw std::runtime_error(
+            "bounded destructive replacement did not fail closed");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 } // namespace
 
 int main() {
@@ -2094,5 +2168,6 @@ int main() {
     test_destructive_preflight_rejects_corrupt_introduced_high_water();
     test_destructive_ordering_and_duplicate_append_contract();
     test_ordered_delivery_survives_environment_reopen();
+    test_destructive_capture_replaces_bounded_live_set();
     return 0;
 }
