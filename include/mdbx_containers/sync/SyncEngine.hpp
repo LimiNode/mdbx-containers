@@ -161,6 +161,20 @@ namespace sync {
             std::mutex mutex;
         };
 
+        struct FullSnapshotImportSession {
+            NodeId source_node_id{};
+            DbId source_db_uuid{};
+            std::string snapshot_id;
+            SyncCursor source_tail;
+            FullSnapshotScope replacement_scope =
+                FullSnapshotScope::ManifestOnly;
+            std::uint32_t manifest_version = 0u;
+            std::vector<FullSnapshotManifestEntry> manifest;
+            std::uint64_t next_chunk_index = 0u;
+            std::uint64_t staged_bytes = 0u;
+            std::vector<ChangeOp> operations;
+        };
+
     public:
         /// \brief Constructs an engine bound to \p conn.
         /// \param conn Shared connection that owns the env and stores.
@@ -238,6 +252,45 @@ namespace sync {
             std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
             m_full_snapshot_options = options;
             m_full_snapshot_sessions.clear();
+        }
+
+        /// \brief Replaces the bounds for in-memory full snapshot import staging.
+        /// \details Reconfiguration discards an incomplete import because its
+        /// pending pages were never durable and must not outlive their bounds.
+        void set_full_snapshot_import_options(
+                const FullSnapshotImportOptions& options) {
+            validate_full_snapshot_import_options(options);
+            std::lock_guard<std::mutex> lock(m_full_snapshot_import_mutex);
+            m_full_snapshot_import_options = options;
+            m_full_snapshot_import_session.reset();
+        }
+
+        /// \brief Stages or atomically applies one full snapshot chunk.
+        /// \details Only \c ManifestOnly replacement is currently accepted.
+        /// Every page is validated against immutable metadata from page zero.
+        /// No destination user DBI changes before the final page; that page
+        /// verifies a fresh manifest target, applies the complete staged plan,
+        /// and bootstraps the applied cursor in one write transaction.
+        FullSnapshotImportResult apply_full_snapshot_chunk(
+                const FullSnapshotChunk& chunk) {
+            FullSnapshotCodec::validate(chunk);
+            FullSnapshotImportResult result;
+            Connection::SyncApplyNotification notification;
+            {
+                std::lock_guard<std::mutex> lock(
+                    m_full_snapshot_import_mutex);
+                try {
+                    result = apply_full_snapshot_chunk_locked(chunk,
+                                                              notification);
+                } catch (...) {
+                    m_full_snapshot_import_session.reset();
+                    throw;
+                }
+            }
+            if (result.completed) {
+                m_conn->notify_sync_apply_observers(notification);
+            }
+            return result;
         }
 
         /// \brief Registers or verifies a persistent logical table schema.
@@ -1794,6 +1847,181 @@ namespace sync {
             }
         }
 
+        static bool full_snapshot_metadata_matches(
+                const FullSnapshotImportSession& session,
+                const FullSnapshotChunk& chunk) {
+            return compare_node_id(session.source_node_id,
+                                   chunk.source_node_id) == 0 &&
+                compare_node_id(session.source_db_uuid,
+                                chunk.source_db_uuid) == 0 &&
+                session.snapshot_id == chunk.snapshot_id &&
+                session.source_tail.last_seq_by_origin ==
+                    chunk.source_tail.last_seq_by_origin &&
+                session.replacement_scope == chunk.replacement_scope &&
+                session.manifest_version == chunk.manifest_version &&
+                full_snapshot_manifest_equal(session.manifest, chunk.manifest);
+        }
+
+        void append_full_snapshot_import_chunk(
+                FullSnapshotImportSession& session,
+                const FullSnapshotChunk& chunk) const {
+            const std::uint64_t operation_count =
+                static_cast<std::uint64_t>(session.operations.size());
+            const std::uint64_t incoming_count =
+                static_cast<std::uint64_t>(chunk.batch.ops.size());
+            if (operation_count >
+                    m_full_snapshot_import_options.max_staged_operations ||
+                incoming_count >
+                    m_full_snapshot_import_options.max_staged_operations -
+                        operation_count) {
+                throw std::length_error(
+                    "full snapshot import exceeds max_staged_operations");
+            }
+
+            std::uint64_t additional_bytes = 0u;
+            for (std::size_t i = 0u; i < chunk.batch.ops.size(); ++i) {
+                const std::uint64_t operation_bytes =
+                    full_snapshot_operation_bytes(chunk.batch.ops[i]);
+                if (operation_bytes >
+                        m_full_snapshot_import_options.max_staged_bytes -
+                            session.staged_bytes - additional_bytes) {
+                    throw std::length_error(
+                        "full snapshot import exceeds max_staged_bytes");
+                }
+                additional_bytes += operation_bytes;
+            }
+            session.operations.insert(session.operations.end(),
+                                      chunk.batch.ops.begin(),
+                                      chunk.batch.ops.end());
+            session.staged_bytes += additional_bytes;
+        }
+
+        static void require_fresh_full_snapshot_target(
+                MDBX_txn* txn,
+                MetaStore& meta,
+                const FullSnapshotImportSession& session) {
+            if (compare_node_id(meta.get_db_uuid(txn),
+                                session.source_db_uuid) != 0) {
+                throw std::invalid_argument(
+                    "full snapshot source db_uuid does not match destination");
+            }
+            if (meta.get_local_seq(txn) != 0u) {
+                throw std::logic_error(
+                    "full snapshot destination has local changelog history");
+            }
+            SyncCursor applied;
+            if (!read_applied_cursor(txn, applied).last_seq_by_origin.empty()) {
+                throw std::logic_error(
+                    "full snapshot destination has an applied cursor");
+            }
+
+            for (std::size_t i = 0u; i < session.manifest.size(); ++i) {
+                const FullSnapshotManifestEntry& entry = session.manifest[i];
+                MDBX_dbi dbi = 0;
+                int error_code = MDBX_SUCCESS;
+                if (!open_existing_user_dbi(txn, entry.dbi_name,
+                                            entry.dbi_flags, dbi,
+                                            error_code)) {
+                    throw std::runtime_error(
+                        "full snapshot destination DBI flags mismatch: " +
+                        entry.dbi_name);
+                }
+                if (dbi == 0) continue;
+
+                unsigned actual_raw = 0u;
+                check_mdbx(mdbx_dbi_flags(txn, dbi, &actual_raw),
+                           "full snapshot failed to read destination DBI flags");
+                if (persistent_dbi_flags(static_cast<std::uint32_t>(actual_raw)) !=
+                    entry.dbi_flags) {
+                    throw std::runtime_error(
+                        "full snapshot destination DBI flags mismatch: " +
+                        entry.dbi_name);
+                }
+                MDBX_stat stat;
+                check_mdbx(mdbx_dbi_stat(txn, dbi, &stat, sizeof(stat)),
+                           "full snapshot failed to inspect destination DBI");
+                if (stat.ms_entries != 0u) {
+                    throw std::logic_error(
+                        "full snapshot destination DBI is not empty: " +
+                        entry.dbi_name);
+                }
+            }
+        }
+
+        FullSnapshotImportResult apply_full_snapshot_chunk_locked(
+                const FullSnapshotChunk& chunk,
+                Connection::SyncApplyNotification& notification) {
+            if (chunk.replacement_scope != FullSnapshotScope::ManifestOnly) {
+                throw std::invalid_argument(
+                    "full snapshot importer supports ManifestOnly replacement only");
+            }
+            if (!m_full_snapshot_import_session) {
+                if (chunk.chunk_index != 0u) {
+                    throw std::invalid_argument(
+                        "full snapshot import must begin at chunk zero");
+                }
+                std::unique_ptr<FullSnapshotImportSession> session(
+                    new FullSnapshotImportSession());
+                session->source_node_id = chunk.source_node_id;
+                session->source_db_uuid = chunk.source_db_uuid;
+                session->snapshot_id = chunk.snapshot_id;
+                session->source_tail = chunk.source_tail;
+                session->replacement_scope = chunk.replacement_scope;
+                session->manifest_version = chunk.manifest_version;
+                session->manifest = chunk.manifest;
+                m_full_snapshot_import_session = std::move(session);
+            }
+
+            FullSnapshotImportSession& session =
+                *m_full_snapshot_import_session;
+            if (chunk.chunk_index != session.next_chunk_index ||
+                !full_snapshot_metadata_matches(session, chunk)) {
+                throw std::invalid_argument(
+                    "full snapshot chunk does not match the active import session");
+            }
+            append_full_snapshot_import_chunk(session, chunk);
+            ++session.next_chunk_index;
+
+            FullSnapshotImportResult result;
+            result.next_chunk_index = session.next_chunk_index;
+            if (chunk.has_more) return result;
+
+            {
+                const Connection::SyncApplyWriteGuard sync_apply_guard =
+                    m_conn->sync_apply_write_guard();
+                auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+                MetaStore meta(m_conn->env_handle());
+                meta.open(txn.handle());
+                require_fresh_full_snapshot_target(txn.handle(), meta, session);
+
+                std::unordered_map<std::string, MDBX_dbi> dbi_cache;
+                for (std::size_t i = 0u; i < session.operations.size(); ++i) {
+                    apply_one_op(txn.handle(), session.operations[i], dbi_cache);
+                }
+
+                AppliedStore applied(m_conn->env_handle());
+                applied.open(txn.handle());
+                for (std::map<NodeId, std::uint64_t>::const_iterator it =
+                        session.source_tail.last_seq_by_origin.begin();
+                     it != session.source_tail.last_seq_by_origin.end(); ++it) {
+                    applied.set_last_applied_seq(txn.handle(), it->first,
+                                                 it->second);
+                }
+                txn.commit();
+
+                std::vector<std::string> affected_dbi_names;
+                for (std::size_t i = 0u; i < session.manifest.size(); ++i) {
+                    add_unique_dbi_name(affected_dbi_names,
+                                        session.manifest[i].dbi_name);
+                }
+                notification = m_conn->mark_sync_apply_committed(
+                    1u, session.operations.size(), affected_dbi_names);
+            }
+            m_full_snapshot_import_session.reset();
+            result.completed = true;
+            return result;
+        }
+
         /// \brief Returns true when \p request_db_id matches the local
         /// \c db_uuid. A zero \p request_db_id is rejected: callers must
         /// know the database identity before issuing pull/push requests.
@@ -1996,6 +2224,47 @@ namespace sync {
 
         static std::uint32_t persistent_dbi_flags(std::uint32_t dbi_flags) {
             return dbi_flags & persistent_dbi_flags_mask();
+        }
+
+        static void validate_full_snapshot_import_options(
+                const FullSnapshotImportOptions& options) {
+            if (options.max_staged_operations == 0u ||
+                options.max_staged_bytes == 0u) {
+                throw std::invalid_argument(
+                    "full snapshot import bounds must be non-zero");
+            }
+        }
+
+        static bool full_snapshot_manifest_equal(
+                const std::vector<FullSnapshotManifestEntry>& lhs,
+                const std::vector<FullSnapshotManifestEntry>& rhs) {
+            if (lhs.size() != rhs.size()) return false;
+            for (std::size_t i = 0u; i < lhs.size(); ++i) {
+                if (lhs[i].dbi_name != rhs[i].dbi_name ||
+                    lhs[i].dbi_flags != rhs[i].dbi_flags) {
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        static std::uint64_t full_snapshot_operation_bytes(
+                const ChangeOp& op) {
+            const std::uint64_t fixed =
+                static_cast<std::uint64_t>(sizeof(ChangeOp));
+            const std::uint64_t name =
+                static_cast<std::uint64_t>(op.dbi_name.size());
+            const std::uint64_t key =
+                static_cast<std::uint64_t>(op.storage_key.size());
+            const std::uint64_t value =
+                static_cast<std::uint64_t>(op.value.size());
+            if (name > (std::numeric_limits<std::uint64_t>::max)() - fixed ||
+                key > (std::numeric_limits<std::uint64_t>::max)() - fixed - name ||
+                value > (std::numeric_limits<std::uint64_t>::max)() - fixed - name - key) {
+                throw std::length_error(
+                    "full snapshot operation size overflow");
+            }
+            return fixed + name + key + value;
         }
 
         struct BatchDbiFlags {
@@ -2547,6 +2816,10 @@ namespace sync {
                                     m_full_snapshot_sessions;
         std::uint64_t               m_next_full_snapshot_session_id = 0u;
         std::size_t                  m_full_snapshot_creating = 0u;
+        FullSnapshotImportOptions    m_full_snapshot_import_options;
+        mutable std::mutex           m_full_snapshot_import_mutex;
+        std::unique_ptr<FullSnapshotImportSession>
+                                    m_full_snapshot_import_session;
     };
 
 } // namespace sync

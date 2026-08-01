@@ -1033,9 +1033,10 @@ key, which is why `seq` is big-endian in the key.
 Pull detects when `request.have + 1` is older than the earliest retained
 changelog record for a known origin and returns
 `PullResponse{ok=false, error_code=SnapshotRequired}` instead of streaming a
-later non-contiguous batch. Until the reserved full snapshot protocol exists,
-callers must provision a fresh replica or use an application-defined snapshot
-outside sync v0.1.
+later non-contiguous batch. The initial full snapshot importer requires a
+fresh replica and an explicit caller-driven session; worker fallback is not
+implemented, so applications may still provision a fresh replica or use an
+application-defined snapshot outside sync v0.1.
 
 ### `_mdbxc_origins` (OriginIndexStore)
 
@@ -1436,8 +1437,8 @@ Locked contract:
   classification is available. `error_retryable` describes protocol-level
   recovery, not blind replay of the identical request: for example a
   `SequenceGap` apply conflict is retryable after the caller catches up from a
-  fresher cursor, while DBI flag conflicts and unsupported full snapshots are
-  permanent until the caller changes behavior. `SnapshotRequired` means the
+  fresher cursor, while DBI flag conflicts and an unconfigured snapshot source
+  are permanent until the caller changes behavior. `SnapshotRequired` means the
   requested changelog range was pruned and cannot be recovered through
   incremental pull. `BatchTooLarge` means a retained changelog entry exceeds
   the requester's hard per-batch limit and is permanent until the requester
@@ -1532,14 +1533,14 @@ B: applies each page as above
     -> onward sync is incremental pull-from-have
 ```
 
-The reserved `seq=0, BATCH_HAS_MORE` full export/import format is not the
-current cold-replica implementation yet. `FullSnapshotProtocol.hpp` defines and
-validates its chunk codec: every chunk carries a source identity, immutable
-per-origin replication tail, stable `snapshot_id`, chunk index, replacement scope,
-opaque next-page token, manifest version, immutable named-user-DBI manifest,
-and a nested raw batch with `seq=0`. Transport codec v5 carries the explicit
-session request and one snapshot chunk in `PullResponse`; it rejects mixed
-incremental/snapshot pages and malformed session state.
+The reserved `seq=0, BATCH_HAS_MORE` full snapshot format is separate from
+retained changelog replay. `FullSnapshotProtocol.hpp` defines and validates its
+chunk codec: every chunk carries a source identity, immutable per-origin
+replication tail, stable `snapshot_id`, chunk index, replacement scope, opaque next-page
+token, manifest version, immutable named-user-DBI manifest, and a nested raw
+batch with `seq=0`. Transport codec v5 carries the explicit session request and
+one snapshot chunk in `PullResponse`; it rejects mixed incremental/snapshot
+pages and malformed session state.
 
 `SyncEngine` can export an explicit `FullSnapshotExportOptions::manifest`: it
 materializes configured user DBIs in one read transaction, bounds active
@@ -1548,10 +1549,20 @@ manifest returns `SnapshotNotConfigured`; unknown, expired, or mismatched
 continuations or a different requester return `SnapshotSessionInvalid`; bounded
 session capacity returns retryable `SnapshotSessionBusy`.
 
-Snapshot import, applied-cursor bootstrap, and worker fallback are still not
-implemented. Consequently a snapshot export is not yet an automatic recovery
-path for `SnapshotRequired`; callers must not treat source export alone as a
-working replica-replacement workflow.
+`SyncEngine::apply_full_snapshot_chunk()` implements the first manual receiver
+path for `ManifestOnly` snapshots. It stages all pages in bounded process memory
+and validates immutable page-zero metadata on every continuation. Only the
+final page opens a write transaction: it requires zero local changelog sequence,
+an empty applied cursor, and empty manifest DBIs, then applies the staged
+`ClearTable` / `Put` plan and writes the advertised source tail to
+`_mdbxc_applied` atomically. Any interruption, malformed continuation, bound
+failure, or non-fresh target fails before a user-DBI commit. Existing
+receiver-only DBIs outside the manifest remain untouched.
+
+Worker fallback from `SnapshotRequired`, persisted importer restart state, and
+`CompleteUserDatabase` replacement are still not implemented. Consequently a
+snapshot request is not yet an automatic recovery path; a caller must drive the
+source session and the manual importer explicitly.
 If changelog pruning removed entries needed by the requester's cursor,
 `handle_pull()` returns `SnapshotRequired` with no batches. This is also a
 valid sync response, not a transport failure.
@@ -1559,15 +1570,16 @@ valid sync response, not a transport failure.
 sync-level response errors through round results, stage events, and status
 snapshots without treating them as permanent transport failures.
 
-### Deferred full snapshot protocol
+### Remaining full snapshot work
 
-The future full snapshot protocol must be explicit rather than another spelling
-of retained changelog replay. The reserved request shape is
+The full snapshot protocol is explicit rather than another spelling of retained
+changelog replay. The reserved request shape is
 `PullRequest::request_full_snapshot=true`; responders that implement it should
 return snapshot chunks only when the caller requested that mode, never as an
 implicit fallback from a normal incremental pull.
 
-Required protocol properties before enabling the flag:
+The implemented source session and fresh-replica importer preserve these
+properties. The remaining worker and resume work must preserve them too:
 
 - A full snapshot export is a named snapshot session. The first response must
   return an opaque `snapshot_id` and all later pages must present the same id;
