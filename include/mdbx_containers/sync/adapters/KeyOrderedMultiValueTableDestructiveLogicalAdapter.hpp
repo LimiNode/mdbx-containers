@@ -209,6 +209,8 @@ namespace sync {
                 : m_adapter(adapter),
                   m_txn(adapter.m_table.connection()->transaction(
                       TransactionMode::WRITABLE)),
+                  m_identity(
+                      std::make_shared<OrderedElementKeyIndexProofIdentity>()),
                   m_active(true),
                   m_mutation_revision(0u) {
                 const LogicalApplyResult marker_result =
@@ -286,11 +288,12 @@ namespace sync {
                     OrderedElementCandidateSet candidates(bounds);
                     OrderedElementKeyIndexProof proof;
                     proof.transaction = m_txn.handle();
-                    proof.owner_session = this;
+                    proof.identity = m_identity;
                     proof.mutation_revision = m_mutation_revision;
                     proof.key = key_bytes;
                     proof.ids = m_adapter.m_state.validate_live_ids_for_key(
-                        m_txn.handle(), key_bytes, &candidates);
+                        m_txn.handle(), key_bytes, &candidates,
+                        bounds.max_selected_elements);
                     return proof;
                 } catch (...) {
                     rollback_and_deactivate();
@@ -612,7 +615,8 @@ namespace sync {
                     OrderedElementCandidateSet& candidates,
                     Selector select) const {
                 const std::vector<std::uint8_t> key_bytes = KeyCodec::encode(key);
-                if (proof.owner_session != this ||
+                if (proof.identity.get() == nullptr ||
+                    proof.identity != m_identity ||
                     proof.transaction != m_txn.handle() ||
                     proof.mutation_revision != m_mutation_revision ||
                     proof.key != key_bytes) {
@@ -847,6 +851,7 @@ namespace sync {
             Transaction m_txn;
             NodeId m_origin;
             std::vector<LogicalChange> m_pending;
+            std::shared_ptr<const OrderedElementKeyIndexProofIdentity> m_identity;
             bool m_active;
             std::size_t m_mutation_revision;
         };

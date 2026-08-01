@@ -10,6 +10,7 @@
 #include <cstring>
 #include <cstdint>
 #include <limits>
+#include <memory>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -208,6 +209,10 @@ namespace sync {
         }
     };
 
+    /// \brief Non-reusable lifetime identity for one capture session.
+    struct OrderedElementKeyIndexProofIdentity {
+    };
+
     /// \brief A transaction-bound proof that state and key index agree.
     /// \details The proof is issued by a destructive capture session after a
     /// complete state/index validation. It is only valid for that session,
@@ -219,7 +224,7 @@ namespace sync {
         friend class KeyOrderedMultiValueTableDestructiveLogicalAdapter;
 
         MDBX_txn* transaction = nullptr;
-        const void* owner_session = nullptr;
+        std::shared_ptr<const OrderedElementKeyIndexProofIdentity> identity;
         std::size_t mutation_revision = 0u;
         std::vector<std::uint8_t> key;
         std::vector<OrderedElementId> ids;
@@ -548,7 +553,9 @@ namespace sync {
         std::vector<OrderedElementId> live_ids_for_key(
                 MDBX_txn* txn,
                 const std::vector<std::uint8_t>& key,
-                OrderedElementCandidateSet* candidates = nullptr) const {
+                OrderedElementCandidateSet* candidates = nullptr,
+                std::size_t max_output_ids =
+                    (std::numeric_limits<std::size_t>::max)()) const {
             txn = checked_txn(txn, "OrderedElementStateStore::live_ids_for_key");
             const MDBX_dbi by_key = open_by_key(txn);
             MDBX_cursor* cursor = nullptr;
@@ -561,6 +568,10 @@ namespace sync {
                 int rc = mdbx_cursor_get(cursor, &raw_key, &raw_value, MDBX_SET_KEY);
                 while (rc == MDBX_SUCCESS) {
                     inspect_record(candidates);
+                    if (out.size() >= max_output_ids) {
+                        throw std::length_error(
+                            "Ordered key index proof size limit exceeded");
+                    }
                     const OrderedElementId id = decode_index_value(raw_value);
                     OrderedElementStateRecord record;
                     if (!get(txn, id, record, candidates)) {
@@ -591,7 +602,9 @@ namespace sync {
         std::vector<OrderedElementId> live_state_ids_for_key(
                 MDBX_txn* txn,
                 const std::vector<std::uint8_t>& key,
-                OrderedElementCandidateSet* candidates = nullptr) const {
+                OrderedElementCandidateSet* candidates = nullptr,
+                std::size_t max_output_ids =
+                    (std::numeric_limits<std::size_t>::max)()) const {
             txn = checked_txn(
                 txn, "OrderedElementStateStore::live_state_ids_for_key");
             const MDBX_dbi state = open_state(txn);
@@ -624,6 +637,10 @@ namespace sync {
                         const OrderedElementStateRecord record =
                             decode_state_value(raw_value);
                         if (record.live && record.key == key) {
+                            if (out.size() >= max_output_ids) {
+                                throw std::length_error(
+                                    "Ordered state proof size limit exceeded");
+                            }
                             out.push_back(id);
                         }
                     } else {
@@ -651,11 +668,13 @@ namespace sync {
         std::vector<OrderedElementId> validate_live_ids_for_key(
                 MDBX_txn* txn,
                 const std::vector<std::uint8_t>& key,
-                OrderedElementCandidateSet* candidates = nullptr) const {
+                OrderedElementCandidateSet* candidates = nullptr,
+                std::size_t max_output_ids =
+                    (std::numeric_limits<std::size_t>::max)()) const {
             std::vector<OrderedElementId> index_ids =
-                live_ids_for_key(txn, key, candidates);
+                live_ids_for_key(txn, key, candidates, max_output_ids);
             std::vector<OrderedElementId> state_ids =
-                live_state_ids_for_key(txn, key, candidates);
+                live_state_ids_for_key(txn, key, candidates, max_output_ids);
             std::sort(index_ids.begin(), index_ids.end(), OrderedElementIdLess());
             std::sort(state_ids.begin(), state_ids.end(), OrderedElementIdLess());
             if (index_ids != state_ids) {
