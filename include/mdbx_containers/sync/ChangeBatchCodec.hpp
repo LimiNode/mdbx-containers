@@ -145,6 +145,12 @@ namespace sync {
                                  op.revision_key.size());
                 }
             }
+            if (bounds != nullptr &&
+                out.size() > static_cast<std::size_t>(
+                    bounds->max_batch_total_bytes)) {
+                throw std::length_error(
+                    "encoded change batch exceeds max_batch_total_bytes");
+            }
             return out;
         }
 
