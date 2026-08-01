@@ -127,9 +127,10 @@ delivery. The logical core uses the following contracts:
   `validate_key_index()` uses a non-reusable session lifetime token and applies
   `max_selected_elements` to the complete materialized ID set. Trusted selector
   calls can reuse that validated set without repeating the reverse scan, using
-  a separate budget; stale or foreign proofs fail closed. Replace and other
-  broad state construction remain separately deferred. Transferring the
-  authoritative origin is an
+  a separate budget; stale or foreign proofs fail closed. Typed bounded
+  `replace_with()` is implemented for single-authoritative-origin schema v2;
+  baseline import and other broad state-construction protocols remain deferred.
+  Transferring the authoritative origin is an
   application-coordinated schema-marker cutover; it is not automatic failover
   and requires old-outbox drain plus replay-marker retention through the chosen
   retry horizon.
