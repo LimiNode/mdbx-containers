@@ -816,15 +816,22 @@ Tombstones are retained indefinitely in the first destructive implementation.
 They must not be pruned by time or by a local outbox acknowledgement. Safe
 compaction needs a separately specified global delivery/recovery horizon that
 covers every participating replica and any snapshot/bootstrap path; it is not
-part of this extension. A future compaction API must receive, persist, and
-validate that horizon per origin. It may remove a tombstone only when every
-replica's durable applied frontier and every retained snapshot/bootstrap
-watermark are beyond the tombstone's introduction sequence, and when no sender
-can still retry an older outbox envelope. Local time, one peer's ACK, local
-outbox emptiness, or the current table contents are insufficient evidence.
-Horizon validation and tombstone deletion must commit atomically, with a
-restart-safe record of the accepted horizon; otherwise compaction remains
-disabled.
+part of this extension. Persistent-layout-v1 Tombstones are not compactable:
+they retain only an element id and no identity for the ordered delivery that
+published `EraseElement`. An element id sequence is not an outbox delivery
+sequence and must never be compared with an applied-delivery frontier or a
+snapshot watermark.
+
+A future compaction API needs a later Tombstone layout or a separate persisted
+compaction certificate/index. For each Tombstone it must bind the erase to its
+ordered delivery identity, then receive, persist, and validate a global horizon
+in that delivery sequence space. Safe deletion requires every participating
+replica's durable applied frontier, every retained snapshot/bootstrap coverage
+record, and the sender's retained retry horizon to be beyond that erase
+delivery. Local time, one peer's ACK, local outbox emptiness, or the current
+table contents are insufficient evidence. Horizon validation and Tombstone
+deletion must commit atomically with a restart-safe accepted-horizon record;
+otherwise compaction remains disabled.
 
 The destructive format requires a new logical schema version and an explicit
 persistent-marker migration. Existing append-only data has no stable element
