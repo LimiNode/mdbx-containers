@@ -828,25 +828,39 @@ a fresh destructive schema/table or use this authoritative baseline procedure:
    dispatch and record the retained retry/recovery horizon.
 2. Freeze the old writer and obtain one authoritative logical baseline. Assign
    each immutable id exactly once in that baseline; a local scan on each replica
-   must not independently invent ids.
+   must not independently invent ids. The manifest includes both the complete
+   live tuple set and a canonical per-origin allocation map. The map has one
+   entry for every origin with an element, allocation-counter, or introduced
+   high-water record, including origins represented only by Tombstones or
+   coalesced local ids that are absent from the live set.
 3. On every replica, use one writable transaction to build its primary ordered
    table, element-state and elements-by-key DBIs from that canonical baseline,
-   validate full parity, initialize counters, and install the new persistent
-   marker. The logical `id -> exact KeyCodec/ValueCodec bytes` mapping is
-   identical everywhere, but each replica allocates its own local prefixes and
-   therefore its physical Live rows and key-index duplicates need not be
-   byte-identical to another replica.
-4. Verify the marker, local three-DBI parity and per-origin high-water counters
-   on every participant. Verification must include the required canonical
-   SHA-256 digest over the baseline sorted by `OrderedElementId` wire bytes:
+   validate full parity, install the exact manifest allocation-counter and
+   introduced-high-water values, and install the new persistent marker. The
+   logical `id -> exact KeyCodec/ValueCodec bytes` mapping is identical
+   everywhere, but each replica allocates its own local prefixes and therefore
+   its physical Live rows and key-index duplicates need not be byte-identical
+   to another replica.
+4. Verify the marker, local three-DBI parity and the exact per-origin allocation
+   map on every participant. Verification must include the required canonical
+   SHA-256 digest. Sort every live tuple by `NodeId` bytes and then the numeric
+   `uint64_t` element sequence; do not use the little-endian logical wire bytes
+   as a numeric sort key. After sorting, serialize each id as its logical wire
+   representation and append the tuple data:
 
    ```text
    OrderedElementId || key-size-le32 || key-bytes || value-size-le32 || value-bytes
    ```
 
-   Local prefixes are intentionally excluded. A count is diagnostic only and
-   cannot replace the digest. Only then enable the destructive writer and its
-   `commit_to_outbox()` path.
+   Append the canonical allocation map in lexicographic `NodeId` order, using
+   `NodeId || introduced-high-water-le64 || allocation-counter-le64` for each
+   origin. The source values are exact: the counter retains spent but
+   unintroduced sequences, while the introduced high-water retains every Live
+   or Tombstone id. Local allocation continues from their maximum, but a
+   baseline installer must persist both manifest values rather than invent a
+   local substitute. Local prefixes are intentionally excluded. Counts are
+   diagnostic only and cannot replace the digest. Only then enable the
+   destructive writer and its `commit_to_outbox()` path.
 
 Changing the authoritative origin and changing this schema version are separate
 controlled operations. They may be combined only by a separately specified
@@ -855,11 +869,26 @@ id. After the first committed destructive envelope, replacing the marker with
 the append-only version cannot roll back durable element ids or outbox state; it
 requires recovery or re-baselining instead.
 
+The baseline procedure is an authoritative replacement, not a merge. The
+source must publish one manifest and digest for the complete sorted live set
+and canonical allocation map; every participating receiver verifies that
+identity, the exact three-DBI scope, and each per-origin counter/high-water
+pair before accepting replacement. A partial baseline, a local-only scan, or a
+digest mismatch fails closed before the first physical mutation. The current
+library documents this procedure but does not expose a baseline-import API yet.
+
+Schema-v2 has no implicit multi-origin conflict resolution. A concurrent
+append from an origin other than the persisted authoritative origin is a
+permanent schema conflict, while an `EraseElement` may target a historical id
+only after an explicit controlled cutover. Last-writer-wins, vector clocks,
+CRDT merge, and independent multi-writer outboxes remain future protocols; they
+must not be inferred from the existing ordered-delivery sequence or marker.
+
 Remaining hardening before this initial v2 adapter can grow into a broader
 destructive surface includes:
 
-- a separate bounded `replace_with()` design and any proof invalidation or
-  recovery policy needed for future broader selectors;
+- proof invalidation and recovery policy for future baseline replacement or
+  broader multi-writer selectors;
 - a duplicate `AppendElement` with identical bytes, the same id with different
   bytes, append of a tombstoned id, duplicate ids in one frame, an
   append-then-erase remote duplicate pair, and unknown destructive opcodes;
