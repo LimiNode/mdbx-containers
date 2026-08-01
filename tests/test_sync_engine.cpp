@@ -1809,6 +1809,77 @@ void test_engine_exports_complete_full_snapshot_inventory() {
     cleanup(p);
 }
 
+void test_engine_rejects_complete_snapshot_with_logical_state() {
+    using namespace mdbxc;
+    typedef sync::KeyValueLogicalStringCodec<std::string> StringCodec;
+    typedef sync::KeyValueTableLogicalAdapter<
+        std::string, std::string, StringCodec, StringCodec> LogicalAdapter;
+
+    const std::string p = "test_engine_complete_snapshot_logical_state.mdbx";
+    const std::string schema_id = "app.snapshot.logical_key_value.v1";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xA9);
+    const sync::NodeId logical_origin = make_node(0xB9);
+    const sync::DbId db_id = make_node(0xD9);
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 16u;
+    options.max_materialized_bytes = 4096u;
+    options.max_active_sessions = 1u;
+
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    LogicalAdapter adapter(documents, schema_id);
+    sync::LogicalSchemaRecord record;
+    record.dbi_name = "documents";
+    record.kind = sync::LogicalTableKind::KeyValue;
+    record.schema_version = 1u;
+    record.dbi_names.push_back("documents");
+    engine.register_logical_schema(schema_id, record);
+    engine.register_logical_adapter(adapter);
+
+    sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_id;
+    envelope.origin_node_id = logical_origin;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "snapshot-logical-state";
+    envelope.frame.changes.push_back(
+        adapter.make_upsert("logical", "value"));
+    const sync::LogicalDeliveryAcknowledgement acknowledgement =
+        engine.apply_ordered_logical_delivery_envelope(envelope);
+    if (!acknowledgement.ok ||
+        kv_or_throw(conn, documents, std::string("logical"),
+                    "logical snapshot source value") != "value") {
+        throw std::runtime_error(
+            "failed to prepare logical snapshot source state");
+    }
+
+    sync::PullRequest request;
+    request.requester = make_node(0xC9);
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::PullResponse first = engine.handle_pull(request);
+    const sync::PullResponse second = engine.handle_pull(request);
+    if (first.ok || second.ok || first.is_full_snapshot ||
+        !first.snapshot_chunk.snapshot_id.empty() ||
+        first.error_code !=
+            sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported ||
+        second.error_code !=
+            sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported ||
+        first.error_retryable || second.error_retryable) {
+        throw std::runtime_error(
+            "complete snapshot accepted registered logical state");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 mdbxc::sync::FullSnapshotChunk make_import_chunk(
         const mdbxc::sync::NodeId& source_node,
         const mdbxc::sync::DbId& db_id,
@@ -2876,6 +2947,8 @@ int main() {
           &test_engine_full_snapshot_tail_includes_applied_origins },
         { "test_engine_exports_complete_full_snapshot_inventory",
           &test_engine_exports_complete_full_snapshot_inventory },
+        { "test_engine_rejects_complete_snapshot_with_logical_state",
+          &test_engine_rejects_complete_snapshot_with_logical_state },
         { "test_engine_imports_full_snapshot_and_bootstraps_cursor",
           &test_engine_imports_full_snapshot_and_bootstraps_cursor },
         { "test_engine_manifest_only_snapshot_does_not_bootstrap_cursor",

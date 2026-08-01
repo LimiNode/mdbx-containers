@@ -1557,6 +1557,16 @@ rejected. Unknown, expired, or mismatched continuations or a different requester
 return `SnapshotSessionInvalid`; bounded session capacity returns retryable
 `SnapshotSessionBusy`.
 
+`CompleteUserDatabase` is currently a raw-sync-only recovery scope. Before a
+session is materialized, the source rejects a non-empty persistent schema
+registry with `SnapshotLogicalStateUnsupported`. A physical copy of logical
+adapter DBIs without `_mdbxc_sync_schema`, ordered-delivery frontiers, replay
+markers, and outbox/recovery state cannot safely continue logical delivery.
+`ManifestOnly` is likewise only a manual physical replacement tool: it does
+not claim to repair or bootstrap logical replication. A future logical snapshot
+protocol must atomically define the logical schema, delivery, replay, and
+recovery state it transfers.
+
 `SyncEngine::apply_full_snapshot_chunk()` stages all pages in bounded process
 memory and validates immutable page-zero metadata on every continuation. Only
 the final page opens a write transaction: it requires zero local changelog

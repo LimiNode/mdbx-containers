@@ -417,6 +417,25 @@ void test_response_error_code_rejections() {
     });
 }
 
+void test_logical_snapshot_error_roundtrip() {
+    using namespace mdbxc::sync;
+    PullResponse response;
+    response.ok = false;
+    response.error = "logical snapshot state is unsupported";
+    response.error_code =
+        SyncResponseErrorCode::SnapshotLogicalStateUnsupported;
+
+    const std::vector<std::uint8_t> bytes =
+        TransportMessageCodec::encode_pull_response(response);
+    const PullResponse decoded =
+        TransportMessageCodec::decode_pull_response(bytes);
+    require_true(decoded.error_code ==
+                     SyncResponseErrorCode::SnapshotLogicalStateUnsupported,
+                 "logical snapshot error code mismatch");
+    require_true(!decoded.error_retryable,
+                 "logical snapshot error unexpectedly retryable");
+}
+
 void test_golden_header_shape() {
     using namespace mdbxc::sync;
     const std::vector<std::uint8_t> bytes =
@@ -448,6 +467,7 @@ int main() {
     test_message_header_rejections();
     test_bounds_rejections();
     test_response_error_code_rejections();
+    test_logical_snapshot_error_roundtrip();
     test_golden_header_shape();
     return 0;
 }

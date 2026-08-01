@@ -2844,6 +2844,68 @@ void test_worker_rejects_manifest_only_snapshot_fallback() {
     cleanup(replica_path);
 }
 
+void test_worker_rejects_logical_complete_snapshot_fallback() {
+    using namespace mdbxc;
+    const std::string source_path = "test_worker_logical_snapshot_source.mdbx";
+    const std::string replica_path = "test_worker_logical_snapshot_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xAC);
+    const sync::NodeId replica_node = make_node(0xBC);
+    const sync::DbId db_id = make_node(0xDC);
+    sync::FullSnapshotExportOptions snapshot_options;
+    snapshot_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
+    snapshot_options.max_materialized_operations = 16u;
+    snapshot_options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(
+        source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    source.initialize_local_identity(source_node, db_id);
+    sync::LogicalSchemaRecord record;
+    record.dbi_name = "documents";
+    record.kind = sync::LogicalTableKind::KeyValue;
+    record.schema_version = 1u;
+    record.dbi_names.push_back("documents");
+    source.register_logical_schema("app.worker_snapshot.logical.v1", record);
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(source_conn->env_handle());
+        changelog.open(txn.handle());
+        const std::vector<std::uint8_t> encoded =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(source_node, 3u, "documents", 0x51u));
+        changelog.append(txn.handle(), source_node, 3u, encoded);
+        txn.commit();
+    }
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine replica(replica_conn);
+    replica.initialize_local_identity(replica_node, db_id);
+    sync::DirectSyncPeer peer(&source);
+    sync::SyncWorkerOptions options;
+    options.enable_full_snapshot_fallback = true;
+    options.max_bytes = 8192u;
+    options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker worker(replica, peer, options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (result.ok ||
+        result.sync_error_code !=
+            sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported ||
+        result.sync_error_retryable ||
+        replica.applied_cursor().last_seq_for(source_node) != 0u) {
+        throw std::runtime_error(
+            "worker accepted a logical complete snapshot fallback");
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
 } // namespace
 
 int main() {
@@ -2855,6 +2917,8 @@ int main() {
           &test_worker_snapshot_recovery_preserves_remote_origin_cursor },
         { "test_worker_rejects_manifest_only_snapshot_fallback",
           &test_worker_rejects_manifest_only_snapshot_fallback },
+        { "test_worker_rejects_logical_complete_snapshot_fallback",
+          &test_worker_rejects_logical_complete_snapshot_fallback },
         { "test_worker_run_once_drains_paginated_pull",
           &test_worker_run_once_drains_paginated_pull },
         { "test_worker_start_stop_idle", &test_worker_start_stop_idle },
