@@ -2477,6 +2477,17 @@ void test_key_multi_value_logical_range_boundaries_and_schema_rejection() {
     }
     MDBXC_TEST_ASSERT(v2_rejected);
     MDBXC_TEST_ASSERT(v2_table.count(7, "seven") == 1u);
+    MDBXC_TEST_ASSERT(v2_session->pending_size() == 0u);
+
+    std::vector<mdbxc::sync::LogicalChange> v2_changes;
+    bool v2_commit_rejected = false;
+    try {
+        v2_session->commit(v2_changes);
+    } catch (const std::logic_error&) {
+        v2_commit_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(v2_commit_rejected);
+    MDBXC_TEST_ASSERT(v2_changes.empty());
 
     connection->disconnect();
     cleanup(path);
