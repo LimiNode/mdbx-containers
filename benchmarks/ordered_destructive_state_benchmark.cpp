@@ -193,6 +193,33 @@ std::uint64_t measure_live_state_reverse_scan(
     return observed;
 }
 
+std::uint64_t measure_live_index_scan(
+        const std::shared_ptr<mdbxc::Connection>& connection,
+        const Scenario& scenario,
+        const mdbxc::sync::OrderedElementStateStore& store,
+        const std::vector<std::uint8_t>& key,
+        double& out_ms) {
+    const std::uint64_t expected = expected_target_ids(scenario);
+    std::uint64_t observed = 0u;
+    const std::chrono::steady_clock::time_point started =
+        std::chrono::steady_clock::now();
+    for (std::uint64_t iteration = 0u;
+         iteration < scenario.iterations; ++iteration) {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+        const std::vector<mdbxc::sync::OrderedElementId> ids =
+            store.live_ids_for_key(transaction.handle(), key);
+        transaction.rollback();
+        if (ids.size() != expected) {
+            throw std::runtime_error(
+                "live index scan returned an unexpected id count");
+        }
+        observed += static_cast<std::uint64_t>(ids.size());
+    }
+    out_ms = elapsed_ms(started);
+    return observed;
+}
+
 void measure_origin_scans(const std::shared_ptr<mdbxc::Connection>& connection,
                           const Scenario& scenario,
                           const mdbxc::sync::OrderedElementStateStore& store,
@@ -226,6 +253,9 @@ void run(const Scenario& scenario) {
     std::vector<mdbxc::sync::NodeId> origins;
     seed_state(connection, scenario, store, origins);
 
+    double index_ms = 0.0;
+    const std::uint64_t matched_index_ids = measure_live_index_scan(
+        connection, scenario, store, make_key(0u), index_ms);
     double reverse_ms = 0.0;
     const std::uint64_t matched_live_ids = measure_live_state_reverse_scan(
         connection, scenario, store, make_key(0u), reverse_ms);
@@ -244,18 +274,26 @@ void run(const Scenario& scenario) {
     std::cout
         << "scan,origins,elements_per_origin,key_count,iterations,element_records,"
         << "live_element_records,tombstone_records,state_records,by_key_records,"
-        << "matched_live_ids,elapsed_ms\n"
-        << "live_state_ids_for_key," << scenario.origins << ','
+        << "estimated_scanned_records,matched_live_ids,elapsed_ms\n"
+        << "live_ids_for_key_index," << scenario.origins << ','
         << scenario.elements_per_origin << ',' << scenario.key_count << ','
         << scenario.iterations << ',' << element_records << ','
         << live_element_records << ',' << tombstone_records << ','
         << state_records << ',' << by_key_records << ','
+        << expected_target_ids(scenario) << ',' << matched_index_ids << ','
+        << index_ms << '\n'
+        << "live_state_ids_for_key," << scenario.origins << ','
+        << scenario.elements_per_origin << ',' << scenario.key_count << ','
+        << scenario.iterations << ',' << element_records << ','
+        << live_element_records << ',' << tombstone_records << ','
+        << state_records << ',' << by_key_records << ',' << state_records << ','
         << matched_live_ids << ',' << reverse_ms << '\n'
         << "verify_introduced_high_water," << scenario.origins << ','
         << scenario.elements_per_origin << ',' << scenario.key_count << ','
         << scenario.iterations << ',' << element_records << ','
         << live_element_records << ',' << tombstone_records << ','
         << state_records << ',' << by_key_records << ','
+        << scenario.elements_per_origin << ','
         << 0u << ',' << origin_ms << '\n';
     connection->disconnect();
 }

@@ -166,6 +166,17 @@ records. `elapsed_ms` включает открытие read transaction, изм
 добавления index, cache или фиксированного лимита к любому из путей
 корректности.
 
+CSV также содержит отдельные строки `live_ids_for_key_index` и
+`live_state_ids_for_key`: первая измеряет DUPSORT lookup, вторая - полную
+обратную проверку state DBI. `estimated_scanned_records` показывает границу
+работы сценария, а не внутренний счётчик.
+
+Обратная проверка остаётся эталонным fail-closed путём. Будущий trusted
+no-rescan путь должен сохранять этот fallback и документировать доказательство,
+делающее bounded scan безопасным. `BroadEraseBounds::max_scanned_records`
+должен покрывать выбранную операцию; меньший лимит должен приводить к отказу
+до mutation.
+
 Bounded destructive capture теперь использует предварительно проверенные exact
 id на стадии mutation и не повторяет это полное reverse-сканирование для
 каждого выбранного id. Соответствующий regression сохраняет state с большим
