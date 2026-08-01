@@ -1407,7 +1407,7 @@ payload itself.
 Locked contract:
 
 - Magic: 8 bytes `MDBXCPRT`.
-- Version: u16 little-endian, currently `4`.
+- Version: u16 little-endian, currently `5`.
 - Message type: u8 (`1=PullRequest`, `2=PullResponse`, `3=PushRequest`,
   `4=PushResponse`).
 - Message flags: u32 little-endian, currently zero. Unknown non-zero flags are
@@ -1420,6 +1420,12 @@ Locked contract:
 - `PullResponse` carries both `remote_have` (responder applied cursor) and
   optional `remote_tail` (responder changelog tail) so receivers can report
   catch-up progress without changing pagination semantics.
+- Full-snapshot pull pages use the same `PullRequest`/`PullResponse` envelope,
+  but are explicit: a request has `request_full_snapshot=true`; the first page
+  has empty `full_snapshot_id` and `full_snapshot_continuation`; later requests
+  repeat both opaque values exactly. A response with `is_full_snapshot=true`
+  contains one length-prefixed `FullSnapshotCodec` chunk and no incremental
+  batches. Its `has_more` value must equal the chunk continuation flag.
 - `PullRequest::max_bytes` is a soft page budget. A responder may return one
   retained changelog batch whose encoded size exceeds `max_bytes` when that
   batch is the next required batch. `PullRequest::max_single_batch_bytes` is
@@ -1529,12 +1535,14 @@ B: applies each page as above
 The reserved `seq=0, BATCH_HAS_MORE` full export/import format remains planned
 for v0.1 and is not the current cold-replica implementation.
 `FullSnapshotProtocol.hpp` now defines and validates a preparatory chunk
-codec: every chunk carries a source identity, stable `snapshot_id`, chunk
-index, immutable named-user-DBI manifest, and a nested raw batch with `seq=0`.
-The codec is deliberately not wired into `PullRequest::request_full_snapshot`
-yet. The transport path still needs continuation-token validation, cursor
-bootstrap semantics, and an atomic replacement apply path before the flag can
-be accepted.
+codec: every chunk carries a source identity, immutable source changelog tail,
+stable `snapshot_id`, chunk index, replacement scope, opaque next-page token,
+manifest version, immutable named-user-DBI manifest, and a nested raw batch
+with `seq=0`. Transport codec v5 carries the explicit session request and one
+snapshot chunk in `PullResponse`; it rejects mixed incremental/snapshot pages
+and malformed session state. `SyncEngine` does not accept the request yet: the
+source-export session, cursor bootstrap semantics, and atomic replacement apply
+path still need to be implemented before the flag can be enabled.
 `PullRequest::request_full_snapshot=true` is rejected explicitly until the
 transport and replacement apply path are implemented. In v0.1 this is a
 sync-level protocol rejection carried

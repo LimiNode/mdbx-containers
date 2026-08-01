@@ -12,6 +12,7 @@
 #include "ChangeBatch.hpp"
 #include "cancellation.hpp"
 #include "common.hpp"
+#include "FullSnapshotProtocol.hpp"
 #include "SyncCursor.hpp"
 
 namespace mdbxc {
@@ -62,9 +63,15 @@ namespace sync {
         /// returned alone when it does not exceed \c max_single_batch_bytes.
         std::uint64_t max_bytes   = 4ULL * 1024ULL * 1024ULL;
         /// \brief Requests a full snapshot instead of an incremental delta.
-        /// \details Reserved for a future snapshot protocol. v0.1
-        /// \c SyncEngine responders reject this request explicitly.
+        /// \details The first snapshot request has both session fields empty.
+        /// Later pages repeat the server-issued id and continuation unchanged.
+        /// Responders that have not yet implemented export reject this mode
+        /// explicitly rather than treating it as changelog replay.
         bool         request_full_snapshot = false;
+        /// \brief Opaque id of an already-open full snapshot session.
+        std::string  full_snapshot_id;
+        /// \brief Opaque token for the immediate next snapshot chunk.
+        std::string  full_snapshot_continuation;
         /// \brief Cooperative cancellation token for this transport call.
         /// \details Optional; default-constructed tokens never cancel.
         /// Transports may poll it while waiting on interruptible operations.
@@ -87,6 +94,11 @@ namespace sync {
         bool                     remote_tail_known = false;
         std::vector<ChangeBatch> batches;
         bool                     has_more = false;
+        /// \brief True only when this response carries one full snapshot chunk.
+        /// \details Snapshot pages never also carry incremental batches. When
+        /// set, \c has_more must equal \c snapshot_chunk.has_more.
+        bool                     is_full_snapshot = false;
+        FullSnapshotChunk        snapshot_chunk;
         bool                     ok       = true;
         std::string              error;
         /// \brief Optional machine-readable sync-level error code.

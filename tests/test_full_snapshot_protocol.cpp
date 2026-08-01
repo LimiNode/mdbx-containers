@@ -22,8 +22,10 @@ mdbxc::sync::FullSnapshotChunk make_chunk() {
     out.source_node_id = make_id(0x10u);
     out.source_db_uuid = make_id(0x20u);
     out.snapshot_id = "snapshot-1";
+    out.source_tail.last_seq_by_origin[make_id(0x10u)] = 7u;
     out.chunk_index = 0u;
     out.has_more = true;
+    out.continuation = "next-0";
 
     mdbxc::sync::FullSnapshotManifestEntry manifest_entry;
     manifest_entry.dbi_name = "documents";
@@ -65,7 +67,10 @@ std::size_t manifest_count_offset(
         const mdbxc::sync::FullSnapshotChunk& chunk) {
     return mdbxc::sync::FullSnapshotCodec::magic_size() + 2u +
         chunk.source_node_id.size() + chunk.source_db_uuid.size() + 4u +
-        chunk.snapshot_id.size() + 8u + 1u;
+        chunk.snapshot_id.size() + 4u +
+        chunk.source_tail.last_seq_by_origin.size() *
+            (chunk.source_node_id.size() + 8u) +
+        8u + 1u + 1u + 4u + chunk.continuation.size() + 4u;
 }
 
 std::size_t nested_batch_offset(
@@ -87,8 +92,13 @@ void test_full_snapshot_round_trip() {
     MDBXC_TEST_ASSERT(decoded.source_node_id == source.source_node_id);
     MDBXC_TEST_ASSERT(decoded.source_db_uuid == source.source_db_uuid);
     MDBXC_TEST_ASSERT(decoded.snapshot_id == source.snapshot_id);
+    MDBXC_TEST_ASSERT(decoded.source_tail.last_seq_for(make_id(0x10u)) == 7u);
     MDBXC_TEST_ASSERT(decoded.chunk_index == 0u);
     MDBXC_TEST_ASSERT(decoded.has_more);
+    MDBXC_TEST_ASSERT(decoded.continuation == "next-0");
+    MDBXC_TEST_ASSERT(decoded.replacement_scope ==
+        mdbxc::sync::FullSnapshotScope::ManifestOnly);
+    MDBXC_TEST_ASSERT(decoded.manifest_version == 1u);
     MDBXC_TEST_ASSERT(decoded.manifest.size() == 1u);
     MDBXC_TEST_ASSERT(decoded.manifest[0].dbi_name == "documents");
     MDBXC_TEST_ASSERT(decoded.batch.seq == 0u);
@@ -263,7 +273,7 @@ void test_full_snapshot_manifest_boundary_and_malformed_input() {
     }));
 
     std::vector<std::uint8_t> unknown_version = encoded;
-    unknown_version[8u] = 2u;
+    unknown_version[8u] = 3u;
     unknown_version[9u] = 0u;
     MDBXC_TEST_ASSERT(throws([&unknown_version]() {
         mdbxc::sync::FullSnapshotCodec::decode(unknown_version);
@@ -309,6 +319,44 @@ void test_full_snapshot_rejects_incomplete_identity_and_manifest() {
     }));
 }
 
+void test_full_snapshot_session_contract() {
+    mdbxc::sync::FullSnapshotChunk final_chunk = make_chunk();
+    final_chunk.has_more = false;
+    final_chunk.continuation.clear();
+    final_chunk.batch.batch_flags = mdbxc::sync::BATCH_NONE;
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::FullSnapshotCodec::encode(final_chunk);
+    const mdbxc::sync::FullSnapshotChunk decoded =
+        mdbxc::sync::FullSnapshotCodec::decode(encoded);
+    MDBXC_TEST_ASSERT(!decoded.has_more);
+    MDBXC_TEST_ASSERT(decoded.continuation.empty());
+
+    mdbxc::sync::FullSnapshotChunk missing_token = make_chunk();
+    missing_token.continuation.clear();
+    MDBXC_TEST_ASSERT(throws([&missing_token]() {
+        mdbxc::sync::FullSnapshotCodec::encode(missing_token);
+    }));
+
+    mdbxc::sync::FullSnapshotChunk stale_token = final_chunk;
+    stale_token.continuation = "not-allowed";
+    MDBXC_TEST_ASSERT(throws([&stale_token]() {
+        mdbxc::sync::FullSnapshotCodec::encode(stale_token);
+    }));
+
+    mdbxc::sync::FullSnapshotChunk invalid_scope = make_chunk();
+    invalid_scope.replacement_scope =
+        static_cast<mdbxc::sync::FullSnapshotScope>(9u);
+    MDBXC_TEST_ASSERT(throws([&invalid_scope]() {
+        mdbxc::sync::FullSnapshotCodec::encode(invalid_scope);
+    }));
+
+    mdbxc::sync::CodecBounds bounds;
+    bounds.max_cursor_origins = 0u;
+    MDBXC_TEST_ASSERT(throws([&bounds]() {
+        mdbxc::sync::FullSnapshotCodec::encode(make_chunk(), &bounds);
+    }));
+}
+
 } // namespace
 
 int main() {
@@ -321,5 +369,6 @@ int main() {
     test_full_snapshot_rejects_non_replacement_operations();
     test_full_snapshot_manifest_boundary_and_malformed_input();
     test_full_snapshot_rejects_incomplete_identity_and_manifest();
+    test_full_snapshot_session_contract();
     return 0;
 }
