@@ -8,15 +8,16 @@ All notable changes to this project will be documented in this file.
   source-tail, replacement-scope, manifest-version, and continuation fields.
   `PullRequest`/`PullResponse` now carry explicit snapshot session state and
   chunk pages; this changes the unreleased `TransportMessageCodec` wire version
-  from 4 to 5. `SyncEngine` can materialize an explicitly configured source
-  manifest into bounded, stable pages. `SyncEngine` now also stages explicit
-  `ManifestOnly` pages in bounded memory and atomically imports them only into
-  a fresh replica, bootstrapping `_mdbxc_applied` from the immutable source
-  tail. Persisted importer resume and complete-database replacement remain
-  deferred.
+  from 4 to 5. `SyncEngine` materializes bounded, stable source pages in two
+  explicit scopes: configured `ManifestOnly` replacement copies only its
+  manifest DBIs and never advances global raw-sync progress; automatic
+  `CompleteUserDatabase` inventory replaces all named non-reserved user DBIs
+  and atomically bootstraps `_mdbxc_applied` from the immutable source tail.
+  Persisted importer resume remains deferred.
 - Sync: add opt-in `SyncWorker` fallback for `SnapshotRequired`. It starts a
-  new empty-cursor source session and drains the bounded fresh-replica importer
-  through its final atomic commit. Existing partial replicas and persisted
+  new empty-cursor `CompleteUserDatabase` source session and drains the bounded
+  fresh-replica importer through its final atomic commit. `ManifestOnly` remains
+  a manual physical replacement mode; existing partial replicas and persisted
   importer resume remain unsupported.
 - Sync: document the authoritative-baseline and multi-origin conflict
   boundary for ordered schema-v2. Baseline import and concurrent multi-writer

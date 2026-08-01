@@ -1542,28 +1542,36 @@ batch with `seq=0`. Transport codec v5 carries the explicit session request and
 one snapshot chunk in `PullResponse`; it rejects mixed incremental/snapshot
 pages and malformed session state.
 
-`SyncEngine` can export an explicit `FullSnapshotExportOptions::manifest`: it
-materializes configured user DBIs in one read transaction, bounds active
-sessions and materialized data, and returns stable pages. An empty source
-manifest returns `SnapshotNotConfigured`; unknown, expired, or mismatched
-continuations or a different requester return `SnapshotSessionInvalid`; bounded
-session capacity returns retryable `SnapshotSessionBusy`.
+`SyncEngine` exports two explicit snapshot scopes. `ManifestOnly` materializes
+the caller's configured user-DBI manifest in one read transaction, bounds active
+sessions and materialized data, and returns stable pages. It is a manual
+physical replacement mode: the final import replaces only manifest DBIs and
+never changes `_mdbxc_applied`. `CompleteUserDatabase` requires no caller
+manifest; the engine inventories every named non-reserved user DBI from MainDB
+under the same source read transaction. Its fresh-replica importer rejects a
+destination user DBI outside the exported inventory and, only after the complete
+replacement plan commits, atomically writes the immutable source tail to
+`_mdbxc_applied`. An empty configured `ManifestOnly` source returns
+`SnapshotNotConfigured`; a complete-source inventory with no user DBIs is
+rejected. Unknown, expired, or mismatched continuations or a different requester
+return `SnapshotSessionInvalid`; bounded session capacity returns retryable
+`SnapshotSessionBusy`.
 
-`SyncEngine::apply_full_snapshot_chunk()` implements the first manual receiver
-path for `ManifestOnly` snapshots. It stages all pages in bounded process memory
-and validates immutable page-zero metadata on every continuation. Only the
-final page opens a write transaction: it requires zero local changelog sequence,
-an empty applied cursor, and empty manifest DBIs, then applies the staged
-`ClearTable` / `Put` plan and writes the advertised source tail to
-`_mdbxc_applied` atomically. Any interruption, malformed continuation, bound
-failure, or non-fresh target fails before a user-DBI commit. Existing
-receiver-only DBIs outside the manifest remain untouched.
+`SyncEngine::apply_full_snapshot_chunk()` stages all pages in bounded process
+memory and validates immutable page-zero metadata on every continuation. Only
+the final page opens a write transaction: it requires zero local changelog
+sequence, an empty applied cursor, and empty manifest DBIs, then applies the
+staged `ClearTable` / `Put` plan. Complete replacement additionally requires a
+destination node identity absent from the source tail, so a restored database
+cannot resume local writes with an origin sequence already used by the source.
+Any interruption, malformed continuation, bound failure, or non-fresh target
+fails before a user-DBI commit.
 
-Worker fallback from `SnapshotRequired`, persisted importer restart state, and
-`CompleteUserDatabase` replacement are still not implemented. `SyncWorker`
-can opt in to the fresh-replica `ManifestOnly` fallback: on `SnapshotRequired`
-it starts a new empty-cursor snapshot session and drains every page through the
-final import commit. It does not repair an existing partial replica; a failed
+`SyncWorker` can opt in to `SnapshotRequired` recovery only with a fresh-replica
+`CompleteUserDatabase` session. It starts a new empty-cursor source session and
+drains every page through the final import commit. It never treats
+`ManifestOnly` as a raw-sync fallback, because that scope has no global cursor
+bootstrap. The worker does not repair an existing partial replica; a failed
 fresh-target preflight remains a reported sync error. Persisted importer resume
 is not implemented, so an interrupted worker discards in-memory staging and a
 later retry starts a new source session.
@@ -1582,8 +1590,9 @@ changelog replay. The reserved request shape is
 return snapshot chunks only when the caller requested that mode, never as an
 implicit fallback from a normal incremental pull.
 
-The implemented source session and fresh-replica importer preserve these
-properties. The remaining worker and resume work must preserve them too:
+The implemented source session, fresh-replica importer, and worker fallback
+preserve these properties. Persisted resume and any future selective-scope
+extension must preserve them too:
 
 - A full snapshot export is a named snapshot session. The first response must
   return an opaque `snapshot_id` and all later pages must present the same id;
@@ -1600,10 +1609,10 @@ properties. The remaining worker and resume work must preserve them too:
   manifest version/hash that later pages repeat. A receiver must reject chunks
   whose manifest identity differs from the first page.
 - Receiver-only DBIs are an explicit policy decision, not an accidental side
-  effect. The manifest must say whether the snapshot replaces the complete
-  database scope or only the listed DBIs; complete replacement may clear/drop
-  receiver-only user DBIs only when the caller opted into that scope. Otherwise
-  receiver-only DBIs are preserved or the import fails closed before data apply.
+  effect. `ManifestOnly` preserves DBIs outside its manifest and does not
+  bootstrap global cursor state. `CompleteUserDatabase` inventories all named
+  non-reserved source DBIs and fails closed if a fresh destination contains a
+  user DBI outside that manifest; it does not silently drop receiver-only DBIs.
 - Snapshot chunks must be distinguishable from ordinary changelog batches.
   The reserved shape is `ChangeBatch{seq=0, batch_flags=BATCH_HAS_MORE...}`
   with a snapshot-specific flag or versioned envelope added before release.
@@ -1615,10 +1624,10 @@ properties. The remaining worker and resume work must preserve them too:
   the receiver must clear each exported user DBI before applying that DBI's
   first snapshot entries, then apply later chunks idempotently or reject
   ambiguous resume attempts.
-- Metadata bootstrap is separate from user data import. After the snapshot data
-  is committed, the receiver records applied cursors consistent with the
-  responder's advertised replication tail so the next round can continue through
-  ordinary incremental pull.
+- Metadata bootstrap is separate from user data import. Only after a complete
+  user-database snapshot commits does the receiver record applied cursors
+  consistent with the responder's advertised replication tail. A manifest-only
+  import intentionally leaves global cursor state unchanged.
 - Chunk pagination must use the existing pull limits: `max_bytes` as a soft page
   budget and `max_single_batch_bytes` as a hard limit for a single encoded
   snapshot chunk. If one logical DBI chunk cannot fit under the hard limit, the
@@ -1636,11 +1645,14 @@ properties. The remaining worker and resume work must preserve them too:
   replica directory and fail closed on interruption.
 - `SnapshotRequired` remains the incremental-pull recovery signal. It tells the
   caller that retained changelog replay cannot satisfy the request; the caller
-  may then make a separate `request_full_snapshot=true` request once this
-  protocol exists.
+  may then make a separate `request_full_snapshot=true` request. The worker
+  uses this only for `CompleteUserDatabase` fresh-replica recovery.
 
-Until these details are implemented and covered by round-trip tests,
-`request_full_snapshot=true` remains a permanent sync-level rejection.
+Persisted importer resume and scope-aware partial snapshot continuation are
+still deferred. A partial manifest cannot share the global per-origin cursor:
+that architecture requires stable scope identity, per-scope or per-DBI applied
+progress, scope-filtered changelog pull and retention, and explicit DBI
+membership-change handling.
 
 ## Background worker lifecycle
 

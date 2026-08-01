@@ -2604,9 +2604,8 @@ void test_worker_recovers_fresh_replica_with_full_snapshot() {
     const sync::NodeId replica_node = make_node(0xB9);
     const sync::DbId db_id = make_node(0xD9);
     sync::FullSnapshotExportOptions snapshot_options;
-    sync::FullSnapshotManifestEntry entry;
-    entry.dbi_name = "documents";
-    snapshot_options.manifest.push_back(entry);
+    snapshot_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
     snapshot_options.max_materialized_operations = 16u;
     snapshot_options.max_materialized_bytes = 4096u;
 
@@ -2690,9 +2689,8 @@ void test_worker_snapshot_recovery_preserves_remote_origin_cursor() {
     const sync::NodeId replica_node = make_node(0xCA);
     const sync::DbId db_id = make_node(0xDA);
     sync::FullSnapshotExportOptions snapshot_options;
-    sync::FullSnapshotManifestEntry entry;
-    entry.dbi_name = "documents";
-    snapshot_options.manifest.push_back(entry);
+    snapshot_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
     snapshot_options.max_materialized_operations = 16u;
     snapshot_options.max_materialized_bytes = 4096u;
 
@@ -2779,6 +2777,73 @@ void test_worker_snapshot_recovery_preserves_remote_origin_cursor() {
     cleanup(replica_path);
 }
 
+void test_worker_rejects_manifest_only_snapshot_fallback() {
+    using namespace mdbxc;
+    const std::string source_path = "test_worker_manifest_only_source.mdbx";
+    const std::string replica_path = "test_worker_manifest_only_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xAB);
+    const sync::NodeId replica_node = make_node(0xBB);
+    const sync::DbId db_id = make_node(0xDB);
+    sync::FullSnapshotExportOptions snapshot_options;
+    sync::FullSnapshotManifestEntry entry;
+    entry.dbi_name = "documents";
+    snapshot_options.manifest.push_back(entry);
+    snapshot_options.max_materialized_operations = 16u;
+    snapshot_options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(
+        source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(source_conn, "documents");
+    documents.insert_or_assign("document", "value");
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(source_conn->env_handle());
+        changelog.open(txn.handle());
+        const std::vector<std::uint8_t> encoded =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(source_node, 3u, "documents", 0x51u));
+        changelog.append(txn.handle(), source_node, 3u, encoded);
+        txn.commit();
+    }
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine replica(replica_conn);
+    replica.initialize_local_identity(replica_node, db_id);
+    sync::DirectSyncPeer peer(&source);
+    sync::SyncWorkerOptions options;
+    options.enable_full_snapshot_fallback = true;
+    options.max_bytes = 8192u;
+    options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker worker(replica, peer, options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (result.ok ||
+        result.sync_error_code != sync::SyncResponseErrorCode::SnapshotSessionInvalid ||
+        replica.applied_cursor().last_seq_for(source_node) != 0u) {
+        throw std::runtime_error(
+            "worker accepted ManifestOnly snapshot fallback");
+    }
+    {
+        auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi dbi = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), "documents", static_cast<MDBX_db_flags_t>(0), &dbi);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "ManifestOnly worker fallback changed destination DBI");
+        }
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
 } // namespace
 
 int main() {
@@ -2788,6 +2853,8 @@ int main() {
           &test_worker_recovers_fresh_replica_with_full_snapshot },
         { "test_worker_snapshot_recovery_preserves_remote_origin_cursor",
           &test_worker_snapshot_recovery_preserves_remote_origin_cursor },
+        { "test_worker_rejects_manifest_only_snapshot_fallback",
+          &test_worker_rejects_manifest_only_snapshot_fallback },
         { "test_worker_run_once_drains_paginated_pull",
           &test_worker_run_once_drains_paginated_pull },
         { "test_worker_start_stop_idle", &test_worker_start_stop_idle },

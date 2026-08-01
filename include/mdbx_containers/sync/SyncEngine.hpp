@@ -282,11 +282,13 @@ namespace sync {
         }
 
         /// \brief Stages or atomically applies one full snapshot chunk.
-        /// \details Only \c ManifestOnly replacement is currently accepted.
-        /// Every page is validated against immutable metadata from page zero.
-        /// No destination user DBI changes before the final page; that page
-        /// verifies a fresh manifest target, applies the complete staged plan,
-        /// and bootstraps the applied cursor in one write transaction.
+        /// \details Every page is validated against immutable metadata from
+        /// page zero. No destination user DBI changes before the final page;
+        /// that page verifies a fresh manifest target and applies the complete
+        /// staged plan in one write transaction. \c ManifestOnly replaces only
+        /// its manifest DBIs and leaves global raw-sync progress unchanged.
+        /// \c CompleteUserDatabase replaces the complete named-user-DBI
+        /// inventory and bootstraps the applied cursor from its source tail.
         FullSnapshotImportResult apply_full_snapshot_chunk(
                 const FullSnapshotChunk& chunk) {
             FullSnapshotCodec::validate(chunk);

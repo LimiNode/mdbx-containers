@@ -88,10 +88,12 @@ namespace sync {
         /// \brief Requests an explicit fresh-replica snapshot after
         /// \c SnapshotRequired.
         /// \details Disabled by default. When enabled, the worker starts a
-        /// new full snapshot session with an empty cursor and drains it through
-        /// the final page in the current round. The receiver importer still
-        /// rejects non-fresh targets; this is not an in-place repair path for
-        /// a partially replicated database.
+        /// new \c CompleteUserDatabase snapshot session with an empty cursor
+        /// and drains it through the final page in the current round.
+        /// \c ManifestOnly is a manual physical replacement mode and never a
+        /// raw-sync recovery fallback. The receiver importer still rejects
+        /// non-fresh targets; this is not an in-place repair path for a
+        /// partially replicated database.
         bool enable_full_snapshot_fallback = false;
 
         /// \brief How the background worker handles permanent transport hints.
@@ -261,9 +263,9 @@ namespace sync {
     /// waiting in \c ISyncPeer::pull(), idle sleep, or backoff sleep. Pulled
     /// batches are applied through \c SyncEngine::handle_push(), which opens
     /// and commits a short local write transaction for each pulled page. With
-    /// opt-in full snapshot fallback, the worker instead stages all snapshot
-    /// pages and the engine commits their fresh-replica replacement only after
-    /// the final page.
+    /// opt-in full snapshot fallback, the worker accepts only a
+    /// \c CompleteUserDatabase session, stages all pages, and the engine
+    /// commits its fresh-replica replacement only after the final page.
     /// Stop requests cancel the active request token and call
     /// \c ISyncPeer::request_cancel() at most once for each observed in-flight
     /// peer call. Cancellation is best-effort: \c stop(), \c join(), and the
@@ -794,6 +796,17 @@ namespace sync {
                     result.ok = false;
                     result.error =
                         "full snapshot pull returned an invalid response shape";
+                    return result;
+                }
+                if (response.snapshot_chunk.replacement_scope !=
+                    FullSnapshotScope::CompleteUserDatabase) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error =
+                        "full snapshot fallback requires CompleteUserDatabase scope";
+                    result.sync_error_code =
+                        SyncResponseErrorCode::SnapshotSessionInvalid;
+                    result.sync_error_retryable = false;
                     return result;
                 }
                 ++result.pages_pulled;
