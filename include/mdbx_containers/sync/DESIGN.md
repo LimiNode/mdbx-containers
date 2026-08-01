@@ -96,7 +96,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. Schema v1 captures unordered insert, version-neutral batch `append()`, key erase, all-matching-value erase, and clear; schema v2 adds exact-one erase and typed `reconcile()`; schema v3 adds bounded typed `erase_range()` expanded into exact `EraseKey` changes. All destructive modes require one-writer or causally serialized updates. |
-| `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids. |
+| `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids, and single-origin `replace_with()` expands replacement state into exact changes. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
 Do not add `record_op()` paths for unsupported table types without first
@@ -953,9 +953,9 @@ anchors, see the
 - `KeyMultiValueTable` — raw capture, direct table bulk/range calls, and
   general multi-writer destructive convergence remain deferred beyond the
   typed schema-v1/v2/v3 model described above.
-- `KeyOrderedMultiValueTable` — raw capture, `replace_with()`, baseline import,
-  multi-origin history and tombstone compaction remain deferred beyond the
-  implemented single-origin v2 capture contract. That contract includes
+- `KeyOrderedMultiValueTable` — raw capture, baseline import, multi-origin
+  history and tombstone compaction remain deferred beyond the implemented
+  single-origin v2 capture contract. That contract includes `replace_with()`,
   bounded `erase_at`, key/value erase, and clear, each expanded to exact ids.
 - `AnyValueTable` — heterogeneous values need type-tag propagation on the wire.
 - `IdentityProvider` integration in `BaseTable` — declared in v0.1, no
