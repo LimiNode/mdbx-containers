@@ -2168,6 +2168,98 @@ void test_destructive_capture_replaces_bounded_live_set() {
     cleanup(path);
 }
 
+void test_destructive_replacement_round_trips_to_replica() {
+    const std::string source_path =
+        "test_key_ordered_multi_value_destructive_replace_source.mdbx";
+    const std::string replica_path =
+        "test_key_ordered_multi_value_destructive_replace_replica.mdbx";
+    const std::string primary = "ordered_replace_round_trip_values";
+    const std::string state = "ordered_replace_round_trip_state";
+    const std::string by_key = "ordered_replace_round_trip_by_key";
+    const std::string schema = "app.ordered_replace.round_trip.v2";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    mdbxc::Config source_config;
+    source_config.pathname = source_path;
+    source_config.max_dbs = 16;
+    source_config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> source_connection =
+        mdbxc::Connection::create(source_config);
+
+    mdbxc::Config replica_config;
+    replica_config.pathname = replica_path;
+    replica_config.max_dbs = 16;
+    replica_config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> replica_connection =
+        mdbxc::Connection::create(replica_config);
+
+    const mdbxc::sync::NodeId origin = make_node(0xD9u);
+    const mdbxc::sync::DbId source_db = make_node(0xE9u);
+    const mdbxc::sync::DbId replica_db = make_node(0xF9u);
+    const mdbxc::sync::LogicalSchemaRecord schema_record =
+        make_v2_record(primary, state, by_key, origin);
+
+    mdbxc::sync::SyncEngine source_engine(source_connection);
+    source_engine.initialize_local_identity(origin, source_db);
+    table_type source_table(source_connection, primary);
+    adapter_type source_adapter(source_table, schema, state, by_key);
+    source_engine.initialize_logical_adapter_schema(source_adapter, schema_record);
+
+    mdbxc::sync::SyncEngine replica_engine(replica_connection);
+    replica_engine.initialize_local_identity(make_node(0xEAu), replica_db);
+    table_type replica_table(replica_connection, primary);
+    adapter_type replica_adapter(replica_table, schema, state, by_key);
+    replica_engine.initialize_logical_adapter_schema(replica_adapter, schema_record);
+    replica_engine.register_logical_adapter(replica_adapter);
+
+    mdbxc::sync::LogicalDeliveryEnvelope initial;
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            source_adapter.begin_capture_session();
+        session->append(1, "old");
+        initial = session->commit_to_outbox(source_engine, replica_db);
+    }
+    const mdbxc::sync::LogicalDeliveryAcknowledgement initial_ack =
+        replica_engine.apply_ordered_logical_delivery_envelope(initial);
+    if (!initial_ack.ok || initial_ack.acknowledged_through != 1u ||
+        replica_table.find(1).size() != 1u ||
+        replica_table.find(1)[0] != "old") {
+        throw std::runtime_error(
+            "initial destructive ordered delivery did not reach replica");
+    }
+
+    mdbxc::sync::LogicalDeliveryEnvelope replacement;
+    {
+        std::vector<table_type::value_type> desired;
+        desired.push_back(table_type::value_type(3, "new"));
+        desired.push_back(table_type::value_type(3, "new"));
+        desired.push_back(table_type::value_type(4, "other"));
+        const mdbxc::sync::ReplaceWithBounds bounds = { { 8u, 256u }, 4u };
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            source_adapter.begin_capture_session();
+        session->replace_with(desired, bounds);
+        replacement = session->commit_to_outbox(source_engine, replica_db);
+    }
+    const mdbxc::sync::LogicalDeliveryAcknowledgement replacement_ack =
+        replica_engine.apply_ordered_logical_delivery_envelope(replacement);
+    if (!replacement_ack.ok || replacement_ack.acknowledged_through != 2u ||
+        !replica_table.find(1).empty() ||
+        replica_table.find(3).size() != 2u ||
+        replica_table.find(3)[0] != "new" ||
+        replica_table.find(3)[1] != "new" ||
+        replica_table.find(4).size() != 1u ||
+        replica_table.find(4)[0] != "other") {
+        throw std::runtime_error(
+            "bounded destructive replacement did not round trip to replica");
+    }
+
+    source_connection->disconnect();
+    replica_connection->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
 } // namespace
 
 int main() {
@@ -2196,5 +2288,6 @@ int main() {
     test_destructive_ordering_and_duplicate_append_contract();
     test_ordered_delivery_survives_environment_reopen();
     test_destructive_capture_replaces_bounded_live_set();
+    test_destructive_replacement_round_trips_to_replica();
     return 0;
 }
