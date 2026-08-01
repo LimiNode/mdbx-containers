@@ -11,6 +11,9 @@ All notable changes to this project will be documented in this file.
 - Sync: document the authoritative-baseline and multi-origin conflict
   boundary for ordered schema-v2. Baseline import and concurrent multi-writer
   resolution remain design-only and are not exposed as partial APIs.
+- Sync: specify the global delivery/recovery horizon required before ordered
+  tombstone compaction can be enabled. Local ACKs, time-based retention, and
+  local outbox state remain insufficient, so no compaction API is exposed yet.
 
 - Added an opt-in transaction-bound ordered key-index proof for trusted
   destructive selector resolution. The default full reverse validation remains
