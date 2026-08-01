@@ -289,6 +289,7 @@ namespace sync {
             return out;
         }
 
+    private:
         /// \brief Plans consecutive fresh ids without mutating persistent state.
         /// \details The caller must commit the returned range only after all
         /// replacement preparation has succeeded. When \p high_water_verified
@@ -315,8 +316,10 @@ namespace sync {
             const std::uint64_t introduced = highest_introduced(txn, origin);
             const std::uint64_t previous = allocated > introduced ?
                 allocated : introduced;
-            if (count > static_cast<std::size_t>(
-                    (std::numeric_limits<std::uint64_t>::max)() - previous)) {
+            const std::uint64_t maximum =
+                (std::numeric_limits<std::uint64_t>::max)();
+            if (count > static_cast<std::size_t>(maximum) ||
+                previous > maximum - static_cast<std::uint64_t>(count)) {
                 throw std::overflow_error("Ordered element counter overflow");
             }
             std::vector<OrderedElementId> ids;
@@ -347,6 +350,8 @@ namespace sync {
             write_sequence(txn, state, make_introduced_key(origin), last_sequence,
                            "Ordered element introduced high-water write failed");
         }
+
+    public:
 
         const std::string& state_dbi_name() const {
             return m_state_dbi_name;

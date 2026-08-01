@@ -188,6 +188,7 @@ namespace sync {
             return change;
         }
 
+    private:
         LogicalChange make_append_prepared(
                 const OrderedElementId& id,
                 const std::vector<std::uint8_t>& key_bytes,
@@ -198,6 +199,8 @@ namespace sync {
             encode_append_bytes(id, key_bytes, value_bytes, change.payload);
             return change;
         }
+
+    public:
 
         LogicalChange make_erase(const OrderedElementId& id) const {
             LogicalChange change;
