@@ -147,6 +147,32 @@ void test_full_snapshot_respects_bounds() {
     }));
 }
 
+void test_full_snapshot_respects_nested_batch_total_bound() {
+    const mdbxc::sync::FullSnapshotChunk source = make_chunk();
+    const std::vector<std::uint8_t> nested =
+        mdbxc::sync::ChangeBatchCodec::encode(source.batch);
+
+    mdbxc::sync::CodecBounds exact;
+    exact.max_batch_total_bytes =
+        static_cast<std::uint32_t>(nested.size());
+    exact.max_snapshot_chunk_bytes = 1024u * 1024u;
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::FullSnapshotCodec::encode(source, &exact);
+    MDBXC_TEST_ASSERT(
+        mdbxc::sync::FullSnapshotCodec::decode(encoded, &exact).
+            batch.ops.size() == 1u);
+
+    mdbxc::sync::CodecBounds too_small = exact;
+    --too_small.max_batch_total_bytes;
+    bool rejected = false;
+    try {
+        (void)mdbxc::sync::FullSnapshotCodec::encode(source, &too_small);
+    } catch (const std::length_error&) {
+        rejected = true;
+    }
+    MDBXC_TEST_ASSERT(rejected);
+}
+
 void test_full_snapshot_default_bounds_reject_hostile_counts() {
     const mdbxc::sync::FullSnapshotChunk source = make_chunk();
     const std::vector<std::uint8_t> encoded =
@@ -290,6 +316,7 @@ int main() {
     test_full_snapshot_rejects_reserved_and_unlisted_dbis();
     test_full_snapshot_rejects_wrong_sequence_and_trailing_bytes();
     test_full_snapshot_respects_bounds();
+    test_full_snapshot_respects_nested_batch_total_bound();
     test_full_snapshot_default_bounds_reject_hostile_counts();
     test_full_snapshot_rejects_non_replacement_operations();
     test_full_snapshot_manifest_boundary_and_malformed_input();
