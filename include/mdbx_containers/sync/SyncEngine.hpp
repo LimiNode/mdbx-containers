@@ -1439,10 +1439,17 @@ namespace sync {
             }
 
             const MDBX_dbi changelog_dbi = open_changelog_ro(txn.handle());
+            session->source_tail = read_applied_cursor(
+                txn.handle(), SyncCursor());
             if (changelog_dbi != 0) {
                 const std::vector<PullOrigin> origins =
                     collect_known_origins(txn.handle(), changelog_dbi);
-                copy_known_tail(origins, session->source_tail);
+                SyncCursor changelog_tail;
+                if (!copy_known_tail(origins, changelog_tail)) {
+                    throw std::runtime_error(
+                        "full snapshot source changelog tail is incomplete");
+                }
+                merge_sync_cursor_max(session->source_tail, changelog_tail);
             }
 
             std::uint64_t materialized_bytes = 0u;
@@ -1657,7 +1664,6 @@ namespace sync {
                     return out;
                 }
                 session = it->second;
-                session->last_access = std::chrono::steady_clock::now();
             }
 
             std::lock_guard<std::mutex> lock(session->mutex);
@@ -1678,6 +1684,21 @@ namespace sync {
                 }
                 start_operation = it->second.next_operation;
                 chunk_index = it->second.chunk_index;
+            }
+            {
+                std::lock_guard<std::mutex> sessions_lock(
+                    m_full_snapshot_mutex);
+                std::map<std::string,
+                         std::shared_ptr<FullSnapshotSession>>::const_iterator it =
+                    m_full_snapshot_sessions.find(session->snapshot_id);
+                if (it == m_full_snapshot_sessions.end() ||
+                    it->second != session) {
+                    out.ok = false;
+                    out.error = "full snapshot session is unknown or expired";
+                    out.error_code = SyncResponseErrorCode::SnapshotSessionInvalid;
+                    return out;
+                }
+                session->last_access = std::chrono::steady_clock::now();
             }
             try {
                 return make_full_snapshot_page(*session, request,
@@ -2160,6 +2181,18 @@ namespace sync {
                     origins[i].last_seq;
             }
             return true;
+        }
+
+        static void merge_sync_cursor_max(SyncCursor& target,
+                                          const SyncCursor& source) {
+            for (std::map<NodeId, std::uint64_t>::const_iterator it =
+                    source.last_seq_by_origin.begin();
+                 it != source.last_seq_by_origin.end(); ++it) {
+                const std::uint64_t current = target.last_seq_for(it->first);
+                if (it->second > current) {
+                    target.last_seq_by_origin[it->first] = it->second;
+                }
+            }
         }
 
         static std::vector<PullOrigin> collect_changelog_origins(MDBX_txn* txn,
