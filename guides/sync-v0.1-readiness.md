@@ -161,10 +161,9 @@ tables.
 - Extend `KeyMultiValueTable` logical capture only after every added bulk or
   reconcile operation has explicit multiset replay semantics and round-trip
   coverage. Raw capture remains disabled.
-- Integrate worker fallback, persisted importer resume, and explicit complete
-  replacement before treating `SnapshotRequired` as automatically recoverable
-  by sync itself. The current manual importer accepts only fresh-replica
-  `ManifestOnly` sessions.
+- Add persisted importer resume and explicit complete replacement before
+  treating `SnapshotRequired` as universally recoverable by sync itself. The
+  opt-in worker fallback accepts only fresh-replica `ManifestOnly` sessions.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
   multi-writer convergence for `KeyMultiValueTable`.
 - Design baseline import and multi-origin histories for schema v2 separately;

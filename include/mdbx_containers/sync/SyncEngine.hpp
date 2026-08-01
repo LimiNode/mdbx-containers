@@ -272,6 +272,15 @@ namespace sync {
             m_full_snapshot_import_session.reset();
         }
 
+        /// \brief Discards an incomplete in-memory full snapshot import.
+        /// \details No user-DBI mutation has occurred before a snapshot final
+        /// page, so this is safe after cancellation, transport failure, or a
+        /// worker restart. It never alters durable replication metadata.
+        void discard_full_snapshot_import() {
+            std::lock_guard<std::mutex> lock(m_full_snapshot_import_mutex);
+            m_full_snapshot_import_session.reset();
+        }
+
         /// \brief Stages or atomically applies one full snapshot chunk.
         /// \details Only \c ManifestOnly replacement is currently accepted.
         /// Every page is validated against immutable metadata from page zero.

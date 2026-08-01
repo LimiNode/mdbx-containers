@@ -1560,9 +1560,13 @@ failure, or non-fresh target fails before a user-DBI commit. Existing
 receiver-only DBIs outside the manifest remain untouched.
 
 Worker fallback from `SnapshotRequired`, persisted importer restart state, and
-`CompleteUserDatabase` replacement are still not implemented. Consequently a
-snapshot request is not yet an automatic recovery path; a caller must drive the
-source session and the manual importer explicitly.
+`CompleteUserDatabase` replacement are still not implemented. `SyncWorker`
+can opt in to the fresh-replica `ManifestOnly` fallback: on `SnapshotRequired`
+it starts a new empty-cursor snapshot session and drains every page through the
+final import commit. It does not repair an existing partial replica; a failed
+fresh-target preflight remains a reported sync error. Persisted importer resume
+is not implemented, so an interrupted worker discards in-memory staging and a
+later retry starts a new source session.
 If changelog pruning removed entries needed by the requester's cursor,
 `handle_pull()` returns `SnapshotRequired` with no batches. This is also a
 valid sync response, not a transport failure.

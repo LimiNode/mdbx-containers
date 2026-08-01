@@ -12,8 +12,12 @@ All notable changes to this project will be documented in this file.
   manifest into bounded, stable pages. `SyncEngine` now also stages explicit
   `ManifestOnly` pages in bounded memory and atomically imports them only into
   a fresh replica, bootstrapping `_mdbxc_applied` from the immutable source
-  tail. Worker fallback, persisted importer resume, and complete-database
-  replacement remain deferred.
+  tail. Persisted importer resume and complete-database replacement remain
+  deferred.
+- Sync: add opt-in `SyncWorker` fallback for `SnapshotRequired`. It starts a
+  new empty-cursor source session and drains the bounded fresh-replica importer
+  through its final atomic commit. Existing partial replicas and persisted
+  importer resume remain unsupported.
 - Sync: document the authoritative-baseline and multi-origin conflict
   boundary for ordered schema-v2. Baseline import and concurrent multi-writer
   resolution remain design-only and are not exposed as partial APIs.

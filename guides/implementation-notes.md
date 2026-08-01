@@ -217,9 +217,10 @@ Operational rules:
   Otherwise it returns
   `PullResponse{ok=false, error_code=SnapshotNotConfigured}`. The manual
   receiver path accepts only bounded `ManifestOnly` chunks into a fresh
-  replica; worker-driven fallback and persisted resume remain deferred. Code
-  that needs machine classification should inspect `SyncResponseErrorCode`
-  instead of parsing the human-readable `error` string.
+  replica. `SyncWorkerOptions::enable_full_snapshot_fallback` can explicitly
+  drive that recovery after `SnapshotRequired`; persisted resume remains
+  deferred. Code that needs machine classification should inspect
+  `SyncResponseErrorCode` instead of parsing the human-readable `error` string.
 - Pull from a cursor older than retained changelog history fails as
   `PullResponse{ok=false, error_code=SnapshotRequired}`. The response carries no
   batches because applying a later retained batch would produce a sequence gap

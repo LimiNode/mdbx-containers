@@ -2593,11 +2593,93 @@ void test_sync_node_session_rolls_back_hooks_when_worker_start_fails() {
     cleanup(replica_path);
 }
 
+void test_worker_recovers_fresh_replica_with_full_snapshot() {
+    using namespace mdbxc;
+    const std::string source_path = "test_worker_snapshot_source.mdbx";
+    const std::string replica_path = "test_worker_snapshot_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xA9);
+    const sync::NodeId replica_node = make_node(0xB9);
+    const sync::DbId db_id = make_node(0xD9);
+    sync::FullSnapshotExportOptions snapshot_options;
+    sync::FullSnapshotManifestEntry entry;
+    entry.dbi_name = "documents";
+    snapshot_options.manifest.push_back(entry);
+    snapshot_options.max_materialized_operations = 16u;
+    snapshot_options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source_engine(
+        source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    source_engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> source_documents(
+        source_conn, "documents");
+    source_documents.insert_or_assign("one", "1");
+    source_documents.insert_or_assign("two", "2");
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(source_conn->env_handle());
+        changelog.open(txn.handle());
+        const std::vector<std::uint8_t> encoded =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(source_node, 3u, "documents", 0x21u));
+        changelog.append(txn.handle(), source_node, 3u, encoded);
+        txn.commit();
+    }
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine replica_engine(replica_conn);
+    replica_engine.initialize_local_identity(replica_node, db_id);
+    sync::DirectSyncPeer peer(&source_engine);
+    {
+        sync::SyncWorker disabled_worker(replica_engine, peer);
+        const sync::SyncWorkerRoundResult disabled =
+            disabled_worker.run_once();
+        if (disabled.ok ||
+            disabled.sync_error_code != sync::SyncResponseErrorCode::SnapshotRequired) {
+            throw std::runtime_error(
+                "worker enabled full snapshot fallback without opt-in");
+        }
+    }
+    sync::SyncWorkerOptions options;
+    options.enable_full_snapshot_fallback = true;
+    options.max_bytes = 1u;
+    options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker worker(replica_engine, peer, options);
+
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (!result.ok || result.pages_pulled < 2u ||
+        result.batches_applied != 0u || result.has_more ||
+        result.sync_error_code != sync::SyncResponseErrorCode::None) {
+        throw std::runtime_error(
+            "worker did not complete fresh-replica full snapshot fallback");
+    }
+    KeyValueTable<std::string, std::string> replica_documents(
+        replica_conn, "documents");
+    if (kv_or_throw(replica_conn, replica_documents, std::string("one"),
+                    "snapshot one") != "1" ||
+        kv_or_throw(replica_conn, replica_documents, std::string("two"),
+                    "snapshot two") != "2" ||
+        replica_engine.applied_cursor().last_seq_for(source_node) != 3u) {
+        throw std::runtime_error(
+            "worker full snapshot fallback did not bootstrap replica state");
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
 } // namespace
 
 int main() {
     struct Case { const char* name; void (*fn)(); };
     const Case cases[] = {
+        { "test_worker_recovers_fresh_replica_with_full_snapshot",
+          &test_worker_recovers_fresh_replica_with_full_snapshot },
         { "test_worker_run_once_drains_paginated_pull",
           &test_worker_run_once_drains_paginated_pull },
         { "test_worker_start_stop_idle", &test_worker_start_stop_idle },
