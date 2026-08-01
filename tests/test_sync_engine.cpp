@@ -1740,9 +1740,7 @@ void test_engine_full_snapshot_tail_includes_applied_origins() {
     const sync::DbId db_id = make_node(0xD7);
     std::shared_ptr<Connection> conn = open_env(p);
     sync::FullSnapshotExportOptions options;
-    sync::FullSnapshotManifestEntry entry;
-    entry.dbi_name = "documents";
-    options.manifest.push_back(entry);
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
     sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
     engine.initialize_local_identity(source_node, db_id);
 
@@ -1773,18 +1771,59 @@ void test_engine_full_snapshot_tail_includes_applied_origins() {
     cleanup(p);
 }
 
+void test_engine_exports_complete_full_snapshot_inventory() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_full_snapshot_inventory.mdbx";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xA8);
+    const sync::DbId db_id = make_node(0xD8);
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    KeyValueTable<std::string, std::string> audit(conn, "audit");
+    documents.insert_or_assign("document", "value");
+    audit.insert_or_assign("audit", "value");
+
+    sync::PullRequest request;
+    request.requester = make_node(0xB8);
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::PullResponse response = engine.handle_pull(request);
+    if (!response.ok || !response.is_full_snapshot || response.has_more ||
+        response.snapshot_chunk.replacement_scope !=
+            sync::FullSnapshotScope::CompleteUserDatabase ||
+        response.snapshot_chunk.manifest.size() != 2u ||
+        response.snapshot_chunk.manifest[0].dbi_name != "audit" ||
+        response.snapshot_chunk.manifest[1].dbi_name != "documents") {
+        throw std::runtime_error(
+            "complete full snapshot did not inventory all user DBIs");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 mdbxc::sync::FullSnapshotChunk make_import_chunk(
         const mdbxc::sync::NodeId& source_node,
         const mdbxc::sync::DbId& db_id,
         const std::string& snapshot_id,
         std::uint64_t chunk_index,
-        bool has_more) {
+        bool has_more,
+        mdbxc::sync::FullSnapshotScope scope =
+            mdbxc::sync::FullSnapshotScope::ManifestOnly) {
     mdbxc::sync::FullSnapshotChunk chunk;
     chunk.source_node_id = source_node;
     chunk.source_db_uuid = db_id;
     chunk.snapshot_id = snapshot_id;
     chunk.chunk_index = chunk_index;
     chunk.has_more = has_more;
+    chunk.replacement_scope = scope;
     chunk.continuation = has_more ? "next" : std::string();
     mdbxc::sync::FullSnapshotManifestEntry entry;
     entry.dbi_name = "documents";
@@ -1828,9 +1867,7 @@ void test_engine_imports_full_snapshot_and_bootstraps_cursor() {
     const sync::NodeId replica_node = make_node(0xB3);
     const sync::DbId db_id = make_node(0xD3);
     sync::FullSnapshotExportOptions options;
-    sync::FullSnapshotManifestEntry entry;
-    entry.dbi_name = "documents";
-    options.manifest.push_back(entry);
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
     options.max_materialized_operations = 16u;
     options.max_materialized_bytes = 4096u;
 
@@ -1841,6 +1878,9 @@ void test_engine_imports_full_snapshot_and_bootstraps_cursor() {
         source_conn, "documents");
     source_documents.insert_or_assign("one", "1");
     source_documents.insert_or_assign("two", "2");
+    KeyValueTable<std::string, std::string> source_audit(
+        source_conn, "audit");
+    source_audit.insert_or_assign("event", "snapshot");
     {
         auto txn = source_conn->transaction(TransactionMode::WRITABLE);
         sync::ChangeLogStore changelog(source_conn->env_handle());
@@ -1897,10 +1937,14 @@ void test_engine_imports_full_snapshot_and_bootstraps_cursor() {
 
     KeyValueTable<std::string, std::string> replica_documents(
         replica_conn, "documents");
+    KeyValueTable<std::string, std::string> replica_audit(
+        replica_conn, "audit");
     if (kv_or_throw(replica_conn, replica_documents, std::string("one"),
                     "imported one") != "1" ||
         kv_or_throw(replica_conn, replica_documents, std::string("two"),
-                    "imported two") != "2") {
+                    "imported two") != "2" ||
+        kv_or_throw(replica_conn, replica_audit, std::string("event"),
+                    "imported audit") != "snapshot") {
         throw std::runtime_error("full snapshot replica content is wrong");
     }
     if (replica.applied_cursor().last_seq_for(source_node) != 1u) {
@@ -1912,6 +1956,81 @@ void test_engine_imports_full_snapshot_and_bootstraps_cursor() {
     replica_conn->disconnect();
     cleanup(source_path);
     cleanup(replica_path);
+}
+
+void test_engine_manifest_only_snapshot_does_not_bootstrap_cursor() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_manifest_only_no_cursor.mdbx";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xA9);
+    const sync::NodeId replica_node = make_node(0xB9);
+    const sync::DbId db_id = make_node(0xD9);
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(replica_node, db_id);
+
+    sync::FullSnapshotChunk chunk = make_import_chunk(
+        source_node, db_id, "manifest-only", 0u, false);
+    chunk.source_tail.last_seq_by_origin[source_node] = 2u;
+    append_import_clear(chunk);
+    append_import_put(chunk, "document", "value");
+    if (!engine.apply_full_snapshot_chunk(chunk).completed) {
+        throw std::runtime_error("ManifestOnly snapshot did not complete");
+    }
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    if (kv_or_throw(conn, documents, std::string("document"),
+                    "ManifestOnly document") != "value" ||
+        engine.applied_cursor().last_seq_for(source_node) != 0u) {
+        throw std::runtime_error(
+            "ManifestOnly snapshot bootstrapped global applied progress");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_complete_snapshot_rejects_destination_identity_in_tail() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_reused_node.mdbx";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xAA);
+    const sync::NodeId replica_node = make_node(0xBA);
+    const sync::DbId db_id = make_node(0xDA);
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(replica_node, db_id);
+
+    sync::FullSnapshotChunk chunk = make_import_chunk(
+        source_node, db_id, "reused-node", 0u, false,
+        sync::FullSnapshotScope::CompleteUserDatabase);
+    chunk.source_tail.last_seq_by_origin[replica_node] = 5u;
+    append_import_clear(chunk);
+    append_import_put(chunk, "document", "must-not-appear");
+    bool rejected = false;
+    try {
+        (void)engine.apply_full_snapshot_chunk(chunk);
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        throw std::runtime_error(
+            "complete snapshot accepted destination identity from source tail");
+    }
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi dbi = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), "documents", static_cast<MDBX_db_flags_t>(0), &dbi);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "reused-node snapshot mutated a destination DBI");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
 }
 
 void test_engine_full_snapshot_import_fails_closed_before_final_page() {
@@ -2755,8 +2874,14 @@ int main() {
           &test_engine_exports_stable_full_snapshot_pages },
         { "test_engine_full_snapshot_tail_includes_applied_origins",
           &test_engine_full_snapshot_tail_includes_applied_origins },
+        { "test_engine_exports_complete_full_snapshot_inventory",
+          &test_engine_exports_complete_full_snapshot_inventory },
         { "test_engine_imports_full_snapshot_and_bootstraps_cursor",
           &test_engine_imports_full_snapshot_and_bootstraps_cursor },
+        { "test_engine_manifest_only_snapshot_does_not_bootstrap_cursor",
+          &test_engine_manifest_only_snapshot_does_not_bootstrap_cursor },
+        { "test_engine_complete_snapshot_rejects_destination_identity_in_tail",
+          &test_engine_complete_snapshot_rejects_destination_identity_in_tail },
         { "test_engine_full_snapshot_import_fails_closed_before_final_page",
           &test_engine_full_snapshot_import_fails_closed_before_final_page },
         { "test_engine_full_snapshot_rejects_nonfresh_destination",

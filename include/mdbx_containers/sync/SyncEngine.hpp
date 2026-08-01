@@ -1953,10 +1953,23 @@ namespace sync {
             }
         }
 
-        static void require_fresh_full_snapshot_target(
+        static bool full_snapshot_manifest_flags(
+                const std::vector<FullSnapshotManifestEntry>& manifest,
+                const std::string& name,
+                std::uint32_t& flags) {
+            for (std::size_t i = 0u; i < manifest.size(); ++i) {
+                if (manifest[i].dbi_name == name) {
+                    flags = manifest[i].dbi_flags;
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        void require_fresh_full_snapshot_target(
                 MDBX_txn* txn,
                 MetaStore& meta,
-                const FullSnapshotImportSession& session) {
+                const FullSnapshotImportSession& session) const {
             if (compare_node_id(meta.get_db_uuid(txn),
                                 session.source_db_uuid) != 0) {
                 throw std::invalid_argument(
@@ -1971,6 +1984,12 @@ namespace sync {
                 throw std::logic_error(
                     "full snapshot source and destination node identities match");
             }
+            if (session.replacement_scope ==
+                    FullSnapshotScope::CompleteUserDatabase &&
+                session.source_tail.last_seq_for(local_node_id) != 0u) {
+                throw std::logic_error(
+                    "full snapshot destination node identity appears in source tail");
+            }
             if (meta.get_local_seq(txn) != 0u) {
                 throw std::logic_error(
                     "full snapshot destination has local changelog history");
@@ -1979,6 +1998,24 @@ namespace sync {
             if (!read_applied_cursor(txn, applied).last_seq_by_origin.empty()) {
                 throw std::logic_error(
                     "full snapshot destination has an applied cursor");
+            }
+
+            if (session.replacement_scope ==
+                    FullSnapshotScope::CompleteUserDatabase) {
+                const std::vector<FullSnapshotManifestEntry> destination =
+                    enumerate_user_snapshot_manifest(txn);
+                for (std::size_t i = 0u; i < destination.size(); ++i) {
+                    std::uint32_t manifest_flags = 0u;
+                    if (!full_snapshot_manifest_flags(
+                            session.manifest, destination[i].dbi_name,
+                            manifest_flags) ||
+                        manifest_flags != destination[i].dbi_flags) {
+                        throw std::logic_error(
+                            "complete full snapshot destination has a user DBI "
+                            "outside the source manifest: " +
+                            destination[i].dbi_name);
+                    }
+                }
             }
 
             for (std::size_t i = 0u; i < session.manifest.size(); ++i) {
@@ -2018,9 +2055,11 @@ namespace sync {
                 const FullSnapshotChunk& chunk,
                 Connection::SyncApplyNotification& notification,
                 bool& notification_ready) {
-            if (chunk.replacement_scope != FullSnapshotScope::ManifestOnly) {
+            if (chunk.replacement_scope != FullSnapshotScope::ManifestOnly &&
+                chunk.replacement_scope !=
+                    FullSnapshotScope::CompleteUserDatabase) {
                 throw std::invalid_argument(
-                    "full snapshot importer supports ManifestOnly replacement only");
+                    "full snapshot importer received an unsupported replacement scope");
             }
             if (!m_full_snapshot_import_session) {
                 if (chunk.chunk_index != 0u) {
@@ -2079,13 +2118,16 @@ namespace sync {
                     apply_one_op(txn.handle(), session.operations[i], dbi_cache);
                 }
 
-                AppliedStore applied(m_conn->env_handle());
-                applied.open(txn.handle());
-                for (std::map<NodeId, std::uint64_t>::const_iterator it =
-                        session.source_tail.last_seq_by_origin.begin();
-                     it != session.source_tail.last_seq_by_origin.end(); ++it) {
-                    applied.set_last_applied_seq(txn.handle(), it->first,
-                                                 it->second);
+                if (session.replacement_scope ==
+                        FullSnapshotScope::CompleteUserDatabase) {
+                    AppliedStore applied(m_conn->env_handle());
+                    applied.open(txn.handle());
+                    for (std::map<NodeId, std::uint64_t>::const_iterator it =
+                            session.source_tail.last_seq_by_origin.begin();
+                         it != session.source_tail.last_seq_by_origin.end(); ++it) {
+                        applied.set_last_applied_seq(txn.handle(), it->first,
+                                                     it->second);
+                    }
                 }
                 txn.commit();
                 result.completed = true;
