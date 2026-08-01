@@ -63,10 +63,11 @@ namespace sync {
         ChangeBatch batch;
     };
 
-    /// \brief Strict codec for the reserved full-snapshot wire boundary.
-    /// \details This codec is preparatory. v0.1 pull responders still reject
-    /// \c PullRequest::request_full_snapshot until a transport dispatcher and
-    /// validated replacement apply path are available.
+    /// \brief Strict codec for the explicit full-snapshot wire boundary.
+    /// \details Configured sources export bounded snapshot sessions through
+    /// \c PullRequest::request_full_snapshot. The initial receiver accepts
+    /// only \c ManifestOnly pages into a fresh replica and commits the staged
+    /// replacement plan atomically at the final page.
     class FullSnapshotCodec {
     public:
         static const std::uint8_t* magic() {
@@ -233,6 +234,10 @@ namespace sync {
             if (chunk.batch.batch_flags != expected_flags) {
                 throw std::invalid_argument(
                     "Full snapshot continuation does not match batch flags");
+            }
+            if (chunk.batch.ops.empty()) {
+                throw std::invalid_argument(
+                    "Full snapshot chunk must contain at least one operation");
             }
             for (std::size_t i = 0u; i < chunk.batch.ops.size(); ++i) {
                 const ChangeOp& op = chunk.batch.ops[i];

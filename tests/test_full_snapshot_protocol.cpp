@@ -355,6 +355,12 @@ void test_full_snapshot_session_contract() {
     MDBXC_TEST_ASSERT(throws([&bounds]() {
         mdbxc::sync::FullSnapshotCodec::encode(make_chunk(), &bounds);
     }));
+
+    mdbxc::sync::FullSnapshotChunk empty = make_chunk();
+    empty.batch.ops.clear();
+    MDBXC_TEST_ASSERT(throws([&empty]() {
+        mdbxc::sync::FullSnapshotCodec::encode(empty);
+    }));
 }
 
 } // namespace
