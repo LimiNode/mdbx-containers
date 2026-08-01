@@ -82,11 +82,11 @@ These table families intentionally emit no `ChangeOp` in v0.1:
   `reconcile()`. Schema v3 adds bounded typed range erasure under the same
   one-writer or causally serialized update contract; capture expands the
   selected keys into existing `EraseKey` logical changes before local mutation.
-- `KeyOrderedMultiValueTable` raw capture, replace, baseline import, and
-  multi-origin histories. Schema v1 remains append-only. Schema v2 supports
-  logical `AppendElement` and exact `EraseElement` by persistent element id,
-  plus bounded `erase_at`, key/value erase, and clear capture through one
-  authoritative ordered origin.
+- `KeyOrderedMultiValueTable` raw capture, baseline import, multi-origin
+  histories, and tombstone compaction. Schema v1 remains append-only. Schema
+  v2 supports logical `AppendElement` and exact `EraseElement` by persistent
+  element id, bounded `erase_at`, key/value erase, clear, and single-origin
+  `replace_with()` capture through one authoritative ordered origin.
 - `HashedKeyValueStore`, until the relationship between logical key bytes,
   physical storage keys, and hash-index entries is specified.
 
@@ -164,8 +164,9 @@ tables.
   `SnapshotRequired` as automatically recoverable by sync itself.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
   multi-writer convergence for `KeyMultiValueTable`.
-- Design `replace_with()`, baseline import, and multi-origin histories for
-  schema v2 separately; none is implied by the implemented bounded erasure.
+- Design baseline import and multi-origin histories for schema v2 separately;
+  the implemented single-origin `replace_with()` and bounded erasure do not
+  imply either capability.
 - Evaluate whether any `KeyMultiValueTable` framing ideas carry over to
   `AnyValueTable` and `HashedKeyValueStore`.
 
