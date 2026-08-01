@@ -271,29 +271,35 @@ void run(const Scenario& scenario) {
     const std::uint64_t state_records =
         scenario.origins * (scenario.elements_per_origin + 2u);
     const std::uint64_t by_key_records = live_element_records;
+    const std::uint64_t index_records_per_iteration =
+        expected_target_ids(scenario) * 2u;
+    const std::uint64_t reverse_records_per_iteration = state_records;
+    const std::uint64_t high_water_records_per_iteration =
+        scenario.origins * (scenario.elements_per_origin + 1u);
     std::cout
         << "scan,origins,elements_per_origin,key_count,iterations,element_records,"
         << "live_element_records,tombstone_records,state_records,by_key_records,"
-        << "estimated_scanned_records,matched_live_ids,elapsed_ms\n"
+        << "estimated_scanned_records_per_iteration,matched_live_ids,elapsed_ms\n"
         << "live_ids_for_key_index," << scenario.origins << ','
         << scenario.elements_per_origin << ',' << scenario.key_count << ','
         << scenario.iterations << ',' << element_records << ','
         << live_element_records << ',' << tombstone_records << ','
         << state_records << ',' << by_key_records << ','
-        << expected_target_ids(scenario) << ',' << matched_index_ids << ','
+        << index_records_per_iteration << ',' << matched_index_ids << ','
         << index_ms << '\n'
         << "live_state_ids_for_key," << scenario.origins << ','
         << scenario.elements_per_origin << ',' << scenario.key_count << ','
         << scenario.iterations << ',' << element_records << ','
         << live_element_records << ',' << tombstone_records << ','
-        << state_records << ',' << by_key_records << ',' << state_records << ','
+        << state_records << ',' << by_key_records << ','
+        << reverse_records_per_iteration << ','
         << matched_live_ids << ',' << reverse_ms << '\n'
         << "verify_introduced_high_water," << scenario.origins << ','
         << scenario.elements_per_origin << ',' << scenario.key_count << ','
         << scenario.iterations << ',' << element_records << ','
         << live_element_records << ',' << tombstone_records << ','
         << state_records << ',' << by_key_records << ','
-        << scenario.elements_per_origin << ','
+        << high_water_records_per_iteration << ','
         << 0u << ',' << origin_ms << '\n';
     connection->disconnect();
 }

@@ -166,20 +166,25 @@ records. `elapsed_ms` включает открытие read transaction, изм
 добавления index, cache или фиксированного лимита к любому из путей
 корректности.
 
-CSV также содержит отдельные строки `live_ids_for_key_index` и
-`live_state_ids_for_key`: первая измеряет DUPSORT lookup, вторая - полную
-обратную проверку state DBI. `estimated_scanned_records` показывает границу
-работы сценария, а не внутренний счётчик.
+CSV также содержит отдельные строки `live_ids_for_key_index`,
+`live_state_ids_for_key` и `verify_introduced_high_water`. Поле
+`estimated_scanned_records_per_iteration` показывает оценку числа прочитанных
+records за одну итерацию соответствующей строки, а не внутренний счётчик.
+Для index path учитываются одна DUPSORT-запись и одно чтение state на каждый
+matching id; reverse path учитывает полный scan state DBI; high-water path
+учитывает records элементов каждого origin и его introduced high-water marker.
+`matched_live_ids` накапливается за все `iterations`.
 
-Обратная проверка остаётся эталонным fail-closed путём. Будущий trusted
-no-rescan путь должен сохранять этот fallback и документировать доказательство,
-делающее bounded scan безопасным. `BroadEraseBounds::max_scanned_records`
-должен покрывать выбранную операцию; меньший лимит должен приводить к отказу
-до mutation.
+Обратная проверка остаётся эталонным fail-closed путём. Proof-based trusted
+selector path уже реализован как явный opt-in: он может повторно использовать
+полный transaction-bound proof, но обязан сохранять этот fallback и проверки
+physical/state records. `BroadEraseBounds::max_scanned_records` должен
+покрывать выбранную операцию в обычном validation path; меньший лимит должен
+приводить к отказу до mutation.
 
 Bounded destructive capture теперь использует предварительно проверенные exact
 id на стадии mutation и не повторяет это полное reverse-сканирование для
 каждого выбранного id. Соответствующий regression сохраняет state с большим
-числом tombstone и одним Live element при намеренно жёстком scan budget;
-используйте этот benchmark для сравнения более крупных распределений state и
-tombstone перед изменением trusted path.
+числом tombstone и одним Live element при намеренно жёстком scan budget.
+Используйте этот benchmark для сравнения более крупных распределений state и
+tombstone перед изменением scan- или proof-контракта.
