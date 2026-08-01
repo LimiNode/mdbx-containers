@@ -1341,7 +1341,7 @@ namespace sync {
         }
 
         std::vector<FullSnapshotManifestEntry>
-        enumerate_complete_snapshot_manifest(MDBX_txn* txn) const {
+        enumerate_user_snapshot_manifest(MDBX_txn* txn) const {
             MDBX_dbi main_dbi = 0;
             check_mdbx(
                 mdbx_dbi_open(
@@ -1393,10 +1393,6 @@ namespace sync {
                    const FullSnapshotManifestEntry& right) {
                     return left.dbi_name < right.dbi_name;
                 });
-            if (manifest.empty()) {
-                throw std::runtime_error(
-                    "complete full snapshot source has no user DBIs");
-            }
             return manifest;
         }
 
@@ -1513,8 +1509,14 @@ namespace sync {
 
             session->manifest = options.replacement_scope ==
                     FullSnapshotScope::CompleteUserDatabase
-                ? enumerate_complete_snapshot_manifest(txn.handle())
+                ? enumerate_user_snapshot_manifest(txn.handle())
                 : options.manifest;
+            if (session->replacement_scope ==
+                    FullSnapshotScope::CompleteUserDatabase &&
+                session->manifest.empty()) {
+                throw std::runtime_error(
+                    "complete full snapshot source has no user DBIs");
+            }
 
             if (options.replacement_scope ==
                     FullSnapshotScope::CompleteUserDatabase) {
