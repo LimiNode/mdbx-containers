@@ -1479,8 +1479,16 @@ B: applies each page as above
 
 The reserved `seq=0, BATCH_HAS_MORE` full export/import format remains planned
 for v0.1 and is not the current cold-replica implementation.
-`PullRequest::request_full_snapshot=true` is rejected explicitly until that
-format is implemented. In v0.1 this is a sync-level protocol rejection carried
+`FullSnapshotProtocol.hpp` now defines and validates a preparatory chunk
+codec: every chunk carries a source identity, stable `snapshot_id`, chunk
+index, immutable named-user-DBI manifest, and a nested raw batch with `seq=0`.
+The codec is deliberately not wired into `PullRequest::request_full_snapshot`
+yet. The transport path still needs continuation-token validation, cursor
+bootstrap semantics, and an atomic replacement apply path before the flag can
+be accepted.
+`PullRequest::request_full_snapshot=true` is rejected explicitly until the
+transport and replacement apply path are implemented. In v0.1 this is a
+sync-level protocol rejection carried
 as `PullResponse{ok=false, error=..., error_code=UnsupportedFullSnapshot}`; it
 does not produce a transport retry hint because the server returned a valid
 sync response rather than a transport failure.

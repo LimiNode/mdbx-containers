@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
+- Sync: add the validated preparatory `FullSnapshotCodec` boundary for
+  manifest-bearing `seq=0` snapshot chunks. Full-snapshot transport and apply
+  remain explicitly unsupported until continuation and replacement semantics
+  are implemented.
+
 - Added an opt-in transaction-bound ordered key-index proof for trusted
   destructive selector resolution. The default full reverse validation remains
   the fail-closed fallback; trusted selector calls still enforce their bounds

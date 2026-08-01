@@ -30,6 +30,10 @@ namespace sync {
             16u * 1024u; ///< Max logical delivery frame id bytes.
         std::uint32_t max_transport_message_bytes =
             128u * 1024u * 1024u; ///< Max encoded transport message bytes.
+        std::uint32_t max_snapshot_id_len = 256u; ///< Max snapshot identity bytes.
+        std::uint32_t max_snapshot_manifest_entries = 10000u; ///< Max DBIs in one snapshot manifest.
+        std::uint32_t max_snapshot_chunk_bytes =
+            128u * 1024u * 1024u; ///< Max encoded full-snapshot chunk bytes.
     };
 
 } // namespace sync
