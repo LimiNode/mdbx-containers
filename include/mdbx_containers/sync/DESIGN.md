@@ -95,7 +95,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `SequenceTable` | Supported | Captures set/append/delete/clear against stable `uint64_t` record ids. `append()` remains a local single-writer helper; external synchronization is still required for concurrent appenders. |
 | `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
-| `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. Schema v1 captures unordered insert, key erase, all-matching-value erase, and clear; schema v2 adds exact-one erase and typed `reconcile()` under one-writer or causally serialized updates. |
+| `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. Schema v1 captures unordered insert, version-neutral batch `append()`, key erase, all-matching-value erase, and clear; schema v2 adds exact-one erase and typed `reconcile()`; schema v3 adds bounded typed `erase_range()` expanded into exact `EraseKey` changes. All destructive modes require one-writer or causally serialized updates. |
 | `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
@@ -171,7 +171,8 @@ locally assigned sequence prefix uniquely identifies one cross-node record.
 The first sync design for `KeyMultiValueTable` targets unordered multiset
 preservation under single-writer or causally serialized updates. Schema v1
 contains `InsertOne`, `EraseKey`, `EraseAllValues`, and `Clear`; schema v2 adds
-`EraseOneValue` and typed `reconcile()`:
+`EraseOneValue` and typed `reconcile()`; schema v3 adds bounded typed
+range-erasure capture:
 
 ```text
 for every serialized key and serialized public value:
@@ -180,7 +181,7 @@ for every serialized key and serialized public value:
 
 General concurrent multi-writer convergence is not guaranteed by the operation
 set below. Destructive operations are not commutative with concurrent inserts:
-`EraseAllValues`, `EraseKey`, `EraseRange`, and `Clear` can produce different
+`EraseAllValues`, `EraseKey`, bounded range erasure, and `Clear` can produce different
 final counts when different replicas observe local writes and remote deletes in
 different orders. Supporting that case requires an explicit conflict model,
 such as a single authoritative writer per key/range, a deterministic global
@@ -203,7 +204,6 @@ The complete logical operation model is:
 | `EraseKey` | serialized key | Remove all values for the key. |
 | `EraseOneValue` | serialized key, serialized public value | Remove one matching repeated value for the key, if one exists. This is needed for `reconcile()` surplus deletes. |
 | `EraseAllValues` | serialized key, serialized public value | Remove all exact matching repeated values for the key, matching current public `erase(key, value)` semantics. |
-| `EraseRange` | serialized inclusive key range | Remove every physical pair whose key is in the range. |
 | `Clear` | no key/value payload | Remove all pairs in the table. |
 
 These operations use the existing `LogicalChange` envelope with
@@ -216,15 +216,27 @@ matching adapter fail closed before mutation through logical schema-marker and
 adapter validation.
 
 The first implementation scope is intentionally smaller than the complete
-model. Schema v1 typed capture supports `InsertOne`, `EraseKey`,
-`EraseAllValues`, and `Clear`. Schema v2 additionally supports
-`EraseOneValue` and `reconcile()`. Reconciliation matches canonical logical
-pairs by multiplicity, emits one `EraseOneValue` per surplus occurrence, then
-emits missing `InsertOne` changes in desired-vector order. It does not capture
-raw table calls, `append()`, or `erase_range()`. Those paths remain local until
-a later extension can preserve their exact multiset semantics. This is not
-partial raw capture: callers opt into the typed session and only its documented
-methods publish logical changes.
+model. Schema v1 typed capture supports `InsertOne`, batch `append()` expanded
+in input order into `InsertOne`, `EraseKey`, `EraseAllValues`, and `Clear`.
+Schema v2 additionally supports `EraseOneValue` and `reconcile()`.
+Reconciliation matches canonical logical pairs by multiplicity, emits one
+`EraseOneValue` per surplus occurrence, then emits missing `InsertOne` changes
+in desired-vector order. Schema v3 additionally supports bounded typed
+`erase_range()`, expanded into `EraseKey` changes before local mutation. These
+typed session methods are version-neutral where stated; direct table calls and
+raw capture remain local-only. This is not partial raw capture: callers opt
+into the typed session and only its documented methods publish logical changes.
+
+Schema v3 typed range erasure is an inclusive logical-key interval, never a raw
+MDBX cursor key. Capture scans the complete local range before mutation under a
+mandatory `max_pairs` bound. It builds canonical `EraseKey` changes for the
+distinct selected public keys, reserves pending-frame storage, and only then
+removes the keys locally. The wire frame therefore uses the already validated
+`EraseKey` opcode rather than a broad remote cursor-delete operation. A receiver
+replays those exact key erasures through its public table API. The operation is
+still limited to one writer or causally serialized destructive updates; it
+provides no multi-writer convergence. `append()` needs no schema-v3 opcode:
+typed capture expands it into `InsertOne` changes in input order.
 
 Implementation phases:
 
@@ -236,15 +248,16 @@ Implementation phases:
    values for `EraseOneValue` and `EraseAllValues`; use public key ordering for
    range erasure.
 3. Add the scoped typed capture session only for methods that map directly to
-   the first implementation operations. Raw capture stays disabled.
+   the implementation operations. Raw capture stays disabled.
 4. Add negative compatibility tests: receivers without the matching adapter or
    persistent marker must fail before table mutation.
 5. Add round-trip tests before documenting the wrapper as supported. Tests must
    compare logical multiset counts, not raw duplicate bytes or local iteration
    order.
 
-`append()` can be represented as a sequence of `InsertOne` operations in the
-same local batch. `erase(key, value)` emits `EraseAllValues`. Typed
+Typed `append()` is available for schema v1, v2, and v3 because it is
+represented as a sequence of `InsertOne` operations in the same local batch.
+`erase(key, value)` emits `EraseAllValues`. Typed
 `reconcile()` emits one `EraseOneValue` per surplus occurrence and one
 `InsertOne` per missing occurrence so that repeated identical pairs preserve
 their final multiplicity. If a future implementation captures lower-level
@@ -865,9 +878,9 @@ anchors, see the
 
 - `HashedKeyValueStore` — internal hash index layout complicates the wire
   format; deferred until an explicit identity-mapping scheme lands.
-- `KeyMultiValueTable` — raw capture, `append()`, and range-oriented operations
-  remain deferred beyond the schema-v1/v2 unordered multiset model described
-  above.
+- `KeyMultiValueTable` — raw capture, direct table bulk/range calls, and
+  general multi-writer destructive convergence remain deferred beyond the
+  typed schema-v1/v2/v3 model described above.
 - `KeyOrderedMultiValueTable` — raw capture, `replace_with()`, baseline import,
   multi-origin history and tombstone compaction remain deferred beyond the
   implemented single-origin v2 capture contract. That contract includes
