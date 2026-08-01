@@ -60,6 +60,7 @@ namespace sync {
         static std::vector<std::uint8_t> encode(
                 const FullSnapshotChunk& chunk,
                 const CodecBounds* bounds = nullptr) {
+            bounds = effective_bounds(bounds);
             validate(chunk, bounds);
             const std::vector<std::uint8_t> nested =
                 ChangeBatchCodec::encode(chunk.batch, bounds);
@@ -91,6 +92,7 @@ namespace sync {
         static FullSnapshotChunk decode(
                 const std::vector<std::uint8_t>& encoded,
                 const CodecBounds* bounds = nullptr) {
+            bounds = effective_bounds(bounds);
             validate_encoded_size(encoded, bounds);
             Cursor cursor = make_cursor(encoded);
             check_bytes(cursor, magic(), magic_size());
@@ -138,6 +140,7 @@ namespace sync {
 
         static void validate(const FullSnapshotChunk& chunk,
                              const CodecBounds* bounds = nullptr) {
+            bounds = effective_bounds(bounds);
             if (is_zero_id(chunk.source_node_id) ||
                 is_zero_id(chunk.source_db_uuid)) {
                 throw std::runtime_error(
@@ -146,13 +149,11 @@ namespace sync {
             if (chunk.snapshot_id.empty()) {
                 throw std::invalid_argument("Full snapshot id is empty");
             }
-            if (bounds != nullptr &&
-                chunk.snapshot_id.size() > bounds->max_snapshot_id_len) {
+            if (chunk.snapshot_id.size() > bounds->max_snapshot_id_len) {
                 throw std::length_error(
                     "full snapshot id exceeds max_snapshot_id_len");
             }
-            if (bounds != nullptr &&
-                chunk.manifest.size() > bounds->max_snapshot_manifest_entries) {
+            if (chunk.manifest.size() > bounds->max_snapshot_manifest_entries) {
                 throw std::length_error(
                     "full snapshot manifest exceeds max_snapshot_manifest_entries");
             }
@@ -170,9 +171,7 @@ namespace sync {
                     throw std::invalid_argument(
                         "Full snapshot manifest must be sorted and unique");
                 }
-                if (entry.dbi_name.size() >
-                    (bounds == nullptr ? static_cast<std::size_t>(256u) :
-                        bounds->max_dbi_name_len)) {
+                if (entry.dbi_name.size() > bounds->max_dbi_name_len) {
                     throw std::length_error(
                         "full snapshot manifest DBI name exceeds max_dbi_name_len");
                 }
@@ -191,18 +190,20 @@ namespace sync {
                     "Full snapshot continuation does not match batch flags");
             }
             for (std::size_t i = 0u; i < chunk.batch.ops.size(); ++i) {
-                if (is_reserved_dbi(chunk.batch.ops[i].dbi_name)) {
+                const ChangeOp& op = chunk.batch.ops[i];
+                validate_snapshot_operation(op);
+                if (is_reserved_dbi(op.dbi_name)) {
                     throw std::invalid_argument(
                         "Full snapshot contains a reserved DBI operation");
                 }
                 std::uint32_t manifest_flags = 0u;
                 if (!manifest_entry_flags(chunk.manifest,
-                                          chunk.batch.ops[i].dbi_name,
+                                          op.dbi_name,
                                           manifest_flags)) {
                     throw std::invalid_argument(
                         "Full snapshot operation is outside its manifest");
                 }
-                if (chunk.batch.ops[i].dbi_flags != manifest_flags) {
+                if (op.dbi_flags != manifest_flags) {
                     throw std::invalid_argument(
                         "Full snapshot operation DBI flags differ from manifest");
                 }
@@ -218,6 +219,30 @@ namespace sync {
 
         static bool is_reserved_dbi(const std::string& name) {
             return name.size() >= 7u && name.compare(0u, 7u, "_mdbxc_") == 0;
+        }
+
+        static const CodecBounds* effective_bounds(
+                const CodecBounds* bounds) {
+            static const CodecBounds defaults;
+            return bounds != nullptr ? bounds : &defaults;
+        }
+
+        static void validate_snapshot_operation(const ChangeOp& op) {
+            if (op.op_type != ChangeOpType::Put &&
+                op.op_type != ChangeOpType::ClearTable) {
+                throw std::invalid_argument(
+                    "Full snapshot operation must be Put or ClearTable");
+            }
+            if (op.op_flags != OP_NONE || !op.identity_key.empty() ||
+                !op.revision_key.empty()) {
+                throw std::invalid_argument(
+                    "Full snapshot operation contains non-physical metadata");
+            }
+            if (op.op_type == ChangeOpType::ClearTable &&
+                (!op.storage_key.empty() || !op.value.empty())) {
+                throw std::invalid_argument(
+                    "Full snapshot ClearTable operation contains key or value bytes");
+            }
         }
 
         static bool is_zero_id(const NodeId& id) {
@@ -352,8 +377,7 @@ namespace sync {
         static void validate_encoded_size(
                 const std::vector<std::uint8_t>& encoded,
                 const CodecBounds* bounds) {
-            if (bounds != nullptr &&
-                encoded.size() > bounds->max_snapshot_chunk_bytes) {
+            if (encoded.size() > bounds->max_snapshot_chunk_bytes) {
                 throw std::length_error(
                     "full snapshot chunk exceeds max_snapshot_chunk_bytes");
             }

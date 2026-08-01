@@ -52,6 +52,31 @@ bool throws(Fn fn) {
     return false;
 }
 
+void write_u32_le(std::vector<std::uint8_t>& bytes,
+                  std::size_t offset,
+                  std::uint32_t value) {
+    MDBXC_TEST_ASSERT(offset + 4u <= bytes.size());
+    for (std::size_t i = 0u; i < 4u; ++i) {
+        bytes[offset + i] = static_cast<std::uint8_t>(value >> (8u * i));
+    }
+}
+
+std::size_t manifest_count_offset(
+        const mdbxc::sync::FullSnapshotChunk& chunk) {
+    return mdbxc::sync::FullSnapshotCodec::magic_size() + 2u +
+        chunk.source_node_id.size() + chunk.source_db_uuid.size() + 4u +
+        chunk.snapshot_id.size() + 8u + 1u;
+}
+
+std::size_t nested_batch_offset(
+        const mdbxc::sync::FullSnapshotChunk& chunk) {
+    std::size_t offset = manifest_count_offset(chunk) + 4u;
+    for (std::size_t i = 0u; i < chunk.manifest.size(); ++i) {
+        offset += 4u + chunk.manifest[i].dbi_name.size() + 4u;
+    }
+    return offset + 4u;
+}
+
 void test_full_snapshot_round_trip() {
     const mdbxc::sync::FullSnapshotChunk source = make_chunk();
     const std::vector<std::uint8_t> encoded =
@@ -116,6 +141,68 @@ void test_full_snapshot_respects_bounds() {
     }));
 }
 
+void test_full_snapshot_default_bounds_reject_hostile_counts() {
+    const mdbxc::sync::FullSnapshotChunk source = make_chunk();
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::FullSnapshotCodec::encode(source);
+
+    std::vector<std::uint8_t> oversized_manifest = encoded;
+    write_u32_le(oversized_manifest, manifest_count_offset(source), 10001u);
+    MDBXC_TEST_ASSERT(throws([&oversized_manifest]() {
+        mdbxc::sync::FullSnapshotCodec::decode(oversized_manifest);
+    }));
+
+    const std::size_t nested_offset = nested_batch_offset(source);
+    std::vector<std::uint8_t> oversized_ops = encoded;
+    const std::size_t ops_count_offset = nested_offset +
+        mdbxc::sync::ChangeBatchCodec::magic_size() + 4u + 4u +
+        source.source_node_id.size() + 8u + 8u;
+    write_u32_le(oversized_ops, ops_count_offset, 10001u);
+    MDBXC_TEST_ASSERT(throws([&oversized_ops]() {
+        mdbxc::sync::FullSnapshotCodec::decode(oversized_ops);
+    }));
+
+    std::vector<std::uint8_t> oversized_nested = encoded;
+    write_u32_le(oversized_nested, nested_offset - 4u, 0xFFFFFFFFu);
+    MDBXC_TEST_ASSERT(throws([&oversized_nested]() {
+        mdbxc::sync::FullSnapshotCodec::decode(oversized_nested);
+    }));
+}
+
+void test_full_snapshot_rejects_non_replacement_operations() {
+    mdbxc::sync::FullSnapshotChunk deleted = make_chunk();
+    deleted.batch.ops[0].op_type = mdbxc::sync::ChangeOpType::Delete;
+    MDBXC_TEST_ASSERT(throws([&deleted]() {
+        mdbxc::sync::FullSnapshotCodec::encode(deleted);
+    }));
+
+    mdbxc::sync::FullSnapshotChunk tombstone_put = make_chunk();
+    tombstone_put.batch.ops[0].op_flags = mdbxc::sync::OP_TOMBSTONE;
+    tombstone_put.batch.ops[0].value.clear();
+    MDBXC_TEST_ASSERT(throws([&tombstone_put]() {
+        mdbxc::sync::FullSnapshotCodec::encode(tombstone_put);
+    }));
+
+    mdbxc::sync::FullSnapshotChunk malformed_clear = make_chunk();
+    malformed_clear.batch.ops[0].op_type =
+        mdbxc::sync::ChangeOpType::ClearTable;
+    malformed_clear.batch.ops[0].value.clear();
+    MDBXC_TEST_ASSERT(throws([&malformed_clear]() {
+        mdbxc::sync::FullSnapshotCodec::encode(malformed_clear);
+    }));
+
+    mdbxc::sync::FullSnapshotChunk clear = make_chunk();
+    clear.batch.ops[0].op_type = mdbxc::sync::ChangeOpType::ClearTable;
+    clear.batch.ops[0].storage_key.clear();
+    clear.batch.ops[0].value.clear();
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::FullSnapshotCodec::encode(clear);
+    const mdbxc::sync::FullSnapshotChunk decoded =
+        mdbxc::sync::FullSnapshotCodec::decode(encoded);
+    MDBXC_TEST_ASSERT(decoded.batch.ops[0].op_type ==
+        mdbxc::sync::ChangeOpType::ClearTable);
+}
+
 } // namespace
 
 int main() {
@@ -123,5 +210,7 @@ int main() {
     test_full_snapshot_rejects_reserved_and_unlisted_dbis();
     test_full_snapshot_rejects_wrong_sequence_and_trailing_bytes();
     test_full_snapshot_respects_bounds();
+    test_full_snapshot_default_bounds_reject_hostile_counts();
+    test_full_snapshot_rejects_non_replacement_operations();
     return 0;
 }
