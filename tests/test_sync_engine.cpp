@@ -1730,6 +1730,49 @@ void test_engine_exports_stable_full_snapshot_pages() {
     cleanup(p);
 }
 
+void test_engine_full_snapshot_tail_includes_applied_origins() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_full_snapshot_applied_tail.mdbx";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xA7);
+    const sync::NodeId remote_origin = make_node(0xB7);
+    const sync::DbId db_id = make_node(0xD7);
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::FullSnapshotExportOptions options;
+    sync::FullSnapshotManifestEntry entry;
+    entry.dbi_name = "documents";
+    options.manifest.push_back(entry);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+
+    sync::PushRequest pushed;
+    pushed.sender = remote_origin;
+    pushed.db_id = db_id;
+    pushed.batches.push_back(make_raw_batch(remote_origin, 1u,
+                                            "documents", 0x51u));
+    if (!engine.handle_push(pushed).ok) {
+        throw std::runtime_error(
+            "snapshot source did not apply remote origin batch");
+    }
+
+    sync::PullRequest request;
+    request.requester = make_node(0xC7);
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::PullResponse response = engine.handle_pull(request);
+    if (!response.ok || !response.is_full_snapshot || response.has_more ||
+        response.snapshot_chunk.source_tail.last_seq_for(remote_origin) != 1u) {
+        throw std::runtime_error(
+            "snapshot source tail omitted an applied remote origin");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 mdbxc::sync::FullSnapshotChunk make_import_chunk(
         const mdbxc::sync::NodeId& source_node,
         const mdbxc::sync::DbId& db_id,
@@ -2005,6 +2048,92 @@ void test_engine_full_snapshot_import_bounds_fail_closed() {
         if (rc != MDBX_NOTFOUND) {
             throw std::runtime_error(
                 "bounded full snapshot import created a destination DBI");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_full_snapshot_import_rejects_invalid_replacement_plan() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_full_snapshot_invalid_plan.mdbx";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xA8);
+    const sync::NodeId replica_node = make_node(0xB8);
+    const sync::DbId db_id = make_node(0xD8);
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(replica_node, db_id);
+
+    sync::FullSnapshotChunk put_before_clear = make_import_chunk(
+        source_node, db_id, "snapshot-put-before-clear", 0u, false);
+    append_import_put(put_before_clear, "key", "value");
+    bool rejected = false;
+    try {
+        (void)engine.apply_full_snapshot_chunk(put_before_clear);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        throw std::runtime_error("snapshot accepted Put before ClearTable");
+    }
+
+    sync::FullSnapshotChunk first_clear = make_import_chunk(
+        source_node, db_id, "snapshot-duplicate-clear", 0u, true);
+    append_import_clear(first_clear);
+    (void)engine.apply_full_snapshot_chunk(first_clear);
+    sync::FullSnapshotChunk duplicate_clear = make_import_chunk(
+        source_node, db_id, "snapshot-duplicate-clear", 1u, false);
+    append_import_clear(duplicate_clear);
+    rejected = false;
+    try {
+        (void)engine.apply_full_snapshot_chunk(duplicate_clear);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        throw std::runtime_error("snapshot accepted duplicate ClearTable");
+    }
+
+    sync::FullSnapshotChunk missing_clear = make_import_chunk(
+        source_node, db_id, "snapshot-missing-clear", 0u, false);
+    sync::FullSnapshotManifestEntry secondary;
+    secondary.dbi_name = "secondary";
+    missing_clear.manifest.push_back(secondary);
+    append_import_clear(missing_clear);
+    rejected = false;
+    try {
+        (void)engine.apply_full_snapshot_chunk(missing_clear);
+    } catch (const std::invalid_argument&) {
+        rejected = true;
+    }
+    if (!rejected) {
+        throw std::runtime_error("snapshot omitted a manifest ClearTable");
+    }
+
+    sync::FullSnapshotChunk self_origin = make_import_chunk(
+        replica_node, db_id, "snapshot-self-origin", 0u, false);
+    append_import_clear(self_origin);
+    bool rejected_self_origin = false;
+    try {
+        (void)engine.apply_full_snapshot_chunk(self_origin);
+    } catch (const std::logic_error&) {
+        rejected_self_origin = true;
+    }
+    if (!rejected_self_origin) {
+        throw std::runtime_error("snapshot accepted matching source and destination node");
+    }
+
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi dbi = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), "documents", static_cast<MDBX_db_flags_t>(0), &dbi);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "invalid snapshot replacement plan created destination DBI");
         }
     }
 
@@ -2624,6 +2753,8 @@ int main() {
           &test_engine_rejects_unconfigured_full_snapshot_request },
         { "test_engine_exports_stable_full_snapshot_pages",
           &test_engine_exports_stable_full_snapshot_pages },
+        { "test_engine_full_snapshot_tail_includes_applied_origins",
+          &test_engine_full_snapshot_tail_includes_applied_origins },
         { "test_engine_imports_full_snapshot_and_bootstraps_cursor",
           &test_engine_imports_full_snapshot_and_bootstraps_cursor },
         { "test_engine_full_snapshot_import_fails_closed_before_final_page",
@@ -2632,6 +2763,8 @@ int main() {
           &test_engine_full_snapshot_rejects_nonfresh_destination },
         { "test_engine_full_snapshot_import_bounds_fail_closed",
           &test_engine_full_snapshot_import_bounds_fail_closed },
+        { "test_engine_full_snapshot_import_rejects_invalid_replacement_plan",
+          &test_engine_full_snapshot_import_rejects_invalid_replacement_plan },
         { "test_engine_changelog_page_rejects_full_snapshot_request",
           &test_engine_changelog_page_rejects_full_snapshot_request },
         { "test_engine_pull_reports_snapshot_required_after_prune",

@@ -162,6 +162,12 @@ namespace sync {
         };
 
         struct FullSnapshotImportSession {
+            enum class ReplacementState {
+                NotSeen,
+                Cleared,
+                ReceivingPuts
+            };
+
             NodeId source_node_id{};
             DbId source_db_uuid{};
             std::string snapshot_id;
@@ -173,6 +179,7 @@ namespace sync {
             std::uint64_t next_chunk_index = 0u;
             std::uint64_t staged_bytes = 0u;
             std::vector<ChangeOp> operations;
+            std::map<std::string, ReplacementState> replacement_state;
         };
 
     public:
@@ -276,18 +283,20 @@ namespace sync {
             FullSnapshotCodec::validate(chunk);
             FullSnapshotImportResult result;
             Connection::SyncApplyNotification notification;
+            bool notification_ready = false;
             {
                 std::lock_guard<std::mutex> lock(
                     m_full_snapshot_import_mutex);
                 try {
                     result = apply_full_snapshot_chunk_locked(chunk,
-                                                              notification);
+                                                              notification,
+                                                              notification_ready);
                 } catch (...) {
                     m_full_snapshot_import_session.reset();
                     throw;
                 }
             }
-            if (result.completed) {
+            if (result.completed && notification_ready) {
                 m_conn->notify_sync_apply_observers(notification);
             }
             return result;
@@ -1865,6 +1874,38 @@ namespace sync {
         void append_full_snapshot_import_chunk(
                 FullSnapshotImportSession& session,
                 const FullSnapshotChunk& chunk) const {
+            std::map<std::string, FullSnapshotImportSession::ReplacementState>
+                replacement_state = session.replacement_state;
+            for (std::size_t i = 0u; i < chunk.batch.ops.size(); ++i) {
+                const ChangeOp& op = chunk.batch.ops[i];
+                std::map<std::string,
+                         FullSnapshotImportSession::ReplacementState>::iterator
+                    state = replacement_state.find(op.dbi_name);
+                if (state == replacement_state.end()) {
+                    throw std::invalid_argument(
+                        "full snapshot operation is outside the replacement plan");
+                }
+                if (op.op_type == ChangeOpType::ClearTable) {
+                    if (state->second !=
+                        FullSnapshotImportSession::ReplacementState::NotSeen) {
+                        throw std::invalid_argument(
+                            "full snapshot replacement DBI was cleared twice");
+                    }
+                    state->second =
+                        FullSnapshotImportSession::ReplacementState::Cleared;
+                } else if (op.op_type == ChangeOpType::Put) {
+                    if (state->second ==
+                        FullSnapshotImportSession::ReplacementState::NotSeen) {
+                        throw std::invalid_argument(
+                            "full snapshot Put precedes its replacement clear");
+                    }
+                    state->second =
+                        FullSnapshotImportSession::ReplacementState::ReceivingPuts;
+                } else {
+                    throw std::invalid_argument(
+                        "full snapshot replacement operation is unsupported");
+                }
+            }
             const std::uint64_t operation_count =
                 static_cast<std::uint64_t>(session.operations.size());
             const std::uint64_t incoming_count =
@@ -1894,6 +1935,22 @@ namespace sync {
                                       chunk.batch.ops.begin(),
                                       chunk.batch.ops.end());
             session.staged_bytes += additional_bytes;
+            session.replacement_state.swap(replacement_state);
+        }
+
+        static void require_complete_full_snapshot_replacement_plan(
+                const FullSnapshotImportSession& session) {
+            for (std::map<std::string,
+                          FullSnapshotImportSession::ReplacementState>::const_iterator
+                    it = session.replacement_state.begin();
+                 it != session.replacement_state.end(); ++it) {
+                if (it->second ==
+                    FullSnapshotImportSession::ReplacementState::NotSeen) {
+                    throw std::invalid_argument(
+                        "full snapshot replacement plan omits manifest DBI: " +
+                        it->first);
+                }
+            }
         }
 
         static void require_fresh_full_snapshot_target(
@@ -1904,6 +1961,15 @@ namespace sync {
                                 session.source_db_uuid) != 0) {
                 throw std::invalid_argument(
                     "full snapshot source db_uuid does not match destination");
+            }
+            const NodeId local_node_id = meta.get_node_id(txn);
+            if (is_zero_sync_id(local_node_id)) {
+                throw std::logic_error(
+                    "full snapshot destination node identity is not initialized");
+            }
+            if (compare_node_id(local_node_id, session.source_node_id) == 0) {
+                throw std::logic_error(
+                    "full snapshot source and destination node identities match");
             }
             if (meta.get_local_seq(txn) != 0u) {
                 throw std::logic_error(
@@ -1950,7 +2016,8 @@ namespace sync {
 
         FullSnapshotImportResult apply_full_snapshot_chunk_locked(
                 const FullSnapshotChunk& chunk,
-                Connection::SyncApplyNotification& notification) {
+                Connection::SyncApplyNotification& notification,
+                bool& notification_ready) {
             if (chunk.replacement_scope != FullSnapshotScope::ManifestOnly) {
                 throw std::invalid_argument(
                     "full snapshot importer supports ManifestOnly replacement only");
@@ -1969,6 +2036,10 @@ namespace sync {
                 session->replacement_scope = chunk.replacement_scope;
                 session->manifest_version = chunk.manifest_version;
                 session->manifest = chunk.manifest;
+                for (std::size_t i = 0u; i < session->manifest.size(); ++i) {
+                    session->replacement_state[session->manifest[i].dbi_name] =
+                        FullSnapshotImportSession::ReplacementState::NotSeen;
+                }
                 m_full_snapshot_import_session = std::move(session);
             }
 
@@ -1986,6 +2057,8 @@ namespace sync {
             result.next_chunk_index = session.next_chunk_index;
             if (chunk.has_more) return result;
 
+            require_complete_full_snapshot_replacement_plan(session);
+
             {
                 const Connection::SyncApplyWriteGuard sync_apply_guard =
                     m_conn->sync_apply_write_guard();
@@ -1993,6 +2066,13 @@ namespace sync {
                 MetaStore meta(m_conn->env_handle());
                 meta.open(txn.handle());
                 require_fresh_full_snapshot_target(txn.handle(), meta, session);
+
+                std::vector<std::string> affected_dbi_names;
+                for (std::size_t i = 0u; i < session.manifest.size(); ++i) {
+                    add_unique_dbi_name(affected_dbi_names,
+                                        session.manifest[i].dbi_name);
+                }
+                const std::size_t applied_operations = session.operations.size();
 
                 std::unordered_map<std::string, MDBX_dbi> dbi_cache;
                 for (std::size_t i = 0u; i < session.operations.size(); ++i) {
@@ -2008,17 +2088,16 @@ namespace sync {
                                                  it->second);
                 }
                 txn.commit();
-
-                std::vector<std::string> affected_dbi_names;
-                for (std::size_t i = 0u; i < session.manifest.size(); ++i) {
-                    add_unique_dbi_name(affected_dbi_names,
-                                        session.manifest[i].dbi_name);
+                result.completed = true;
+                m_full_snapshot_import_session.reset();
+                try {
+                    notification = m_conn->mark_sync_apply_committed(
+                        1u, applied_operations, affected_dbi_names);
+                    notification_ready = true;
+                } catch (...) {
+                    // Native commit is durable; observer bookkeeping is best effort.
                 }
-                notification = m_conn->mark_sync_apply_committed(
-                    1u, session.operations.size(), affected_dbi_names);
             }
-            m_full_snapshot_import_session.reset();
-            result.completed = true;
             return result;
         }
 
