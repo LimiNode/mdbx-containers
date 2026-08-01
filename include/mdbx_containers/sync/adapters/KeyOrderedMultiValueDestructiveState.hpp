@@ -208,6 +208,23 @@ namespace sync {
         }
     };
 
+    /// \brief A transaction-bound proof that state and key index agree.
+    /// \details The proof is issued by a destructive capture session after a
+    /// complete state/index validation. It is only valid for that session,
+    /// transaction, key, and mutation revision; callers must not persist it or
+    /// reuse it after another capture mutation.
+    struct OrderedElementKeyIndexProof {
+    private:
+        template<class, class, class, class, class>
+        friend class KeyOrderedMultiValueTableDestructiveLogicalAdapter;
+
+        MDBX_txn* transaction = nullptr;
+        const void* owner_session = nullptr;
+        std::size_t mutation_revision = 0u;
+        std::vector<std::uint8_t> key;
+        std::vector<OrderedElementId> ids;
+    };
+
     /// \brief Transactional store for destructive ordered element state.
     /// \details The state DBI stores origin allocation counters, introduced
     /// sequence high-water marks, and Live/Tombstone records.
@@ -625,6 +642,27 @@ namespace sync {
             }
             mdbx_cursor_close(cursor);
             return out;
+        }
+
+        /// \brief Validates and returns the complete live id set for a key.
+        /// \details This is the fail-closed reference path. It compares the
+        /// DUPSORT index with a full state reverse scan before returning ids
+        /// that a caller may bind into a short-lived proof.
+        std::vector<OrderedElementId> validate_live_ids_for_key(
+                MDBX_txn* txn,
+                const std::vector<std::uint8_t>& key,
+                OrderedElementCandidateSet* candidates = nullptr) const {
+            std::vector<OrderedElementId> index_ids =
+                live_ids_for_key(txn, key, candidates);
+            std::vector<OrderedElementId> state_ids =
+                live_state_ids_for_key(txn, key, candidates);
+            std::sort(index_ids.begin(), index_ids.end(), OrderedElementIdLess());
+            std::sort(state_ids.begin(), state_ids.end(), OrderedElementIdLess());
+            if (index_ids != state_ids) {
+                throw std::runtime_error(
+                    "Ordered destructive key index and state records differ");
+            }
+            return index_ids;
         }
 
         /// \brief Scans every element record and every origin it references.
