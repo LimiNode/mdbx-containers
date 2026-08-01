@@ -63,7 +63,10 @@ namespace sync {
         NodeId source_node_id{};
         DbId source_db_uuid{};
         std::string snapshot_id;
-        /// \brief Immutable source changelog tail captured with this snapshot.
+        /// \brief Immutable per-origin replication tail captured with this snapshot.
+        /// \details This is the componentwise maximum of source changelog and
+        /// already-applied remote-origin progress, so a fresh receiver can
+        /// continue incremental pull from every represented origin.
         SyncCursor source_tail;
         std::uint64_t chunk_index = 0u;
         bool has_more = false;

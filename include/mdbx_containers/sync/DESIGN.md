@@ -1535,7 +1535,7 @@ B: applies each page as above
 The reserved `seq=0, BATCH_HAS_MORE` full export/import format is not the
 current cold-replica implementation yet. `FullSnapshotProtocol.hpp` defines and
 validates its chunk codec: every chunk carries a source identity, immutable
-source changelog tail, stable `snapshot_id`, chunk index, replacement scope,
+per-origin replication tail, stable `snapshot_id`, chunk index, replacement scope,
 opaque next-page token, manifest version, immutable named-user-DBI manifest,
 and a nested raw batch with `seq=0`. Transport codec v5 carries the explicit
 session request and one snapshot chunk in `PullResponse`; it rejects mixed
@@ -1601,7 +1601,7 @@ Required protocol properties before enabling the flag:
   ambiguous resume attempts.
 - Metadata bootstrap is separate from user data import. After the snapshot data
   is committed, the receiver records applied cursors consistent with the
-  responder's advertised changelog tail so the next round can continue through
+  responder's advertised replication tail so the next round can continue through
   ordinary incremental pull.
 - Chunk pagination must use the existing pull limits: `max_bytes` as a soft page
   budget and `max_single_batch_bytes` as a hard limit for a single encoded
