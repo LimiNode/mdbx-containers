@@ -561,6 +561,77 @@ void test_ordered_element_state_accounts_bounded_high_water_point_read() {
     cleanup(path);
 }
 
+void test_ordered_element_state_accounts_bounded_reverse_scan() {
+    const std::string path = "test_ordered_element_state_bounded_reverse_scan.mdbx";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0xC1u);
+    const std::vector<std::uint8_t> matching_key(1u, 0xAAu);
+    const std::vector<std::uint8_t> other_key(1u, 0xBBu);
+    const std::vector<std::uint8_t> value(1u, 0xCCu);
+    mdbxc::sync::OrderedElementStateStore store(
+        connection->env_handle(), "bounded_reverse_scan_state",
+        "bounded_reverse_scan_by_key");
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::WRITABLE);
+        store.initialize_empty(transaction.handle());
+        const mdbxc::sync::OrderedElementId first =
+            store.allocate_id(transaction.handle(), origin);
+        store.put_live(transaction.handle(), first, matching_key, value);
+        const mdbxc::sync::OrderedElementId second =
+            store.allocate_id(transaction.handle(), origin);
+        store.put_live(transaction.handle(), second, matching_key, value);
+        const mdbxc::sync::OrderedElementId third =
+            store.allocate_id(transaction.handle(), origin);
+        store.put_live(transaction.handle(), third, other_key, value);
+        transaction.commit();
+    }
+
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+        const mdbxc::sync::BroadEraseBounds bounds = { 3u, 5u };
+        mdbxc::sync::OrderedElementCandidateSet candidates(bounds);
+        const std::vector<mdbxc::sync::OrderedElementId> ids =
+            store.live_state_ids_for_key(
+                transaction.handle(), matching_key, &candidates);
+        if (ids.size() != 2u || candidates.scanned_records() != 5u) {
+            throw std::runtime_error(
+                "bounded reverse scan did not account for the full state DBI");
+        }
+        transaction.rollback();
+    }
+
+    {
+        mdbxc::Transaction transaction =
+            connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+        const mdbxc::sync::BroadEraseBounds bounds = { 3u, 4u };
+        mdbxc::sync::OrderedElementCandidateSet candidates(bounds);
+        bool rejected = false;
+        try {
+            (void)store.live_state_ids_for_key(
+                transaction.handle(), matching_key, &candidates);
+        } catch (const std::length_error&) {
+            rejected = true;
+        }
+        transaction.rollback();
+        if (!rejected || candidates.scanned_records() != 4u) {
+            throw std::runtime_error(
+                "bounded reverse scan accepted an incomplete state budget");
+        }
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 void test_broad_erase_candidate_set_enforces_bounds_and_order() {
     const mdbxc::sync::NodeId first_origin = make_node(0x11u);
     const mdbxc::sync::NodeId second_origin = make_node(0x21u);
@@ -621,6 +692,7 @@ int main() {
     test_ordered_element_state_rejects_second_origin_high_water_corruption();
     test_ordered_element_state_rejects_malformed_records_in_origin_scan();
     test_ordered_element_state_accounts_bounded_high_water_point_read();
+    test_ordered_element_state_accounts_bounded_reverse_scan();
     test_broad_erase_candidate_set_enforces_bounds_and_order();
     return 0;
 }
