@@ -793,10 +793,12 @@ partial frame. Receiver apply remains unchanged because it sees only exact
 `EraseElement` operations.
 
 `replace_with()` is implemented for the single-authoritative-origin schema-v2
-capture session. It first validates the complete desired vector, then expands
-the replacement into exact `EraseElement` and `AppendElement` changes with
-fresh immutable ids in one transaction. Its existing-state and desired-size
-bounds are mandatory; no replacement-specific wire opcode is introduced.
+capture session. It first prepares canonical logical bytes, fresh immutable
+ids, and exact `AppendElement` payloads, then resolves the complete old live
+set under one cumulative existing-state bound. It applies the exact
+`EraseElement` and prepared `AppendElement` changes without rescanning the
+complete state. Its existing-state and desired-size bounds are mandatory; no
+replacement-specific wire opcode is introduced.
 Baseline import, multi-origin histories, physical-prefix optimization, and
 tombstone pruning likewise remain separate extensions.
 

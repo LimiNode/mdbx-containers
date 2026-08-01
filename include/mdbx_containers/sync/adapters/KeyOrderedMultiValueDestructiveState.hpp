@@ -68,6 +68,10 @@ namespace sync {
     };
 
     /// \brief Bounds for a destructive ordered replacement.
+    /// \details \c existing bounds every persisted state, primary, and index
+    /// inspection needed to validate and erase the old live set. The desired
+    /// limit bounds prepared replacement memory, fresh ids, and exact append
+    /// changes before the first mutation.
     struct ReplaceWithBounds {
         BroadEraseBounds existing;
         std::size_t max_replacement_elements;
@@ -285,6 +289,65 @@ namespace sync {
             return out;
         }
 
+        /// \brief Plans consecutive fresh ids without mutating persistent state.
+        /// \details The caller must commit the returned range only after all
+        /// replacement preparation has succeeded. When \p high_water_verified
+        /// is true, the caller has already checked this origin while validating
+        /// the complete replacement state in the same transaction.
+        std::vector<OrderedElementId> plan_id_range(
+                MDBX_txn* txn,
+                const NodeId& origin,
+                std::size_t count,
+                bool high_water_verified,
+                OrderedElementCandidateSet* candidates = nullptr) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::plan_id_range");
+            if (compare_node_id(origin, make_zero_node()) == 0) {
+                throw std::invalid_argument("Ordered element origin is zero");
+            }
+            if (count == 0u) return std::vector<OrderedElementId>();
+            if (!high_water_verified) {
+                verify_introduced_high_water(txn, origin, candidates);
+            }
+            const MDBX_dbi state = open_state(txn);
+            const std::uint64_t allocated = read_sequence(
+                txn, state, make_counter_key(origin), "Ordered element counter");
+            const std::uint64_t introduced = highest_introduced(txn, origin);
+            const std::uint64_t previous = allocated > introduced ?
+                allocated : introduced;
+            if (count > static_cast<std::size_t>(
+                    (std::numeric_limits<std::uint64_t>::max)() - previous)) {
+                throw std::overflow_error("Ordered element counter overflow");
+            }
+            std::vector<OrderedElementId> ids;
+            ids.reserve(count);
+            for (std::size_t i = 0u; i < count; ++i) {
+                OrderedElementId id;
+                id.origin = origin;
+                id.sequence = previous + static_cast<std::uint64_t>(i) + 1u;
+                ids.push_back(id);
+            }
+            return ids;
+        }
+
+        /// \brief Commits a prevalidated allocation range after its Live rows exist.
+        void commit_id_range(MDBX_txn* txn,
+                             const NodeId& origin,
+                             std::uint64_t last_sequence) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::commit_id_range");
+            if (compare_node_id(origin, make_zero_node()) == 0 ||
+                last_sequence == 0u) {
+                throw std::invalid_argument(
+                    "Ordered element allocation range is invalid");
+            }
+            const MDBX_dbi state = open_state(txn);
+            write_sequence(txn, state, make_counter_key(origin), last_sequence,
+                           "Ordered element counter write failed");
+            write_sequence(txn, state, make_introduced_key(origin), last_sequence,
+                           "Ordered element introduced high-water write failed");
+        }
+
         const std::string& state_dbi_name() const {
             return m_state_dbi_name;
         }
@@ -457,6 +520,36 @@ namespace sync {
         }
 
     private:
+        /// \brief Writes one already validated Live row without rescanning state.
+        /// \details Used only by the replacement path after it has reserved a
+        /// consecutive id range and validated the complete existing state.
+        void put_live_prevalidated(
+                MDBX_txn* txn,
+                const OrderedElementId& id,
+                const std::vector<std::uint8_t>& key,
+                const std::vector<std::uint8_t>& value) const {
+            txn = checked_txn(
+                txn, "OrderedElementStateStore::put_live_prevalidated");
+            require_id(id);
+            const MDBX_dbi state = open_state(txn);
+            const MDBX_dbi by_key = open_by_key(txn);
+            const std::vector<std::uint8_t> state_key = make_element_key(id);
+            const std::vector<std::uint8_t> state_value = make_live_value(key, value);
+            MDBX_val raw_state_key = make_val(state_key);
+            MDBX_val raw_state_value = make_val(state_value);
+            check_mdbx(mdbx_put(txn, state, &raw_state_key, &raw_state_value,
+                                MDBX_NOOVERWRITE),
+                       "Ordered prevalidated element state write failed");
+
+            const std::vector<std::uint8_t> index_value =
+                encode_ordered_element_id_index(id);
+            MDBX_val raw_key = make_val(key);
+            MDBX_val raw_index_value = make_val(index_value);
+            check_mdbx(mdbx_put(txn, by_key, &raw_key, &raw_index_value,
+                                MDBX_NODUPDATA),
+                       "Ordered prevalidated element key index write failed");
+        }
+
         /// \brief Converts a prevalidated Live record to a tombstone.
         /// \details The caller must have verified the record, its key-index
         /// entry, and its physical primary row in the same transaction.

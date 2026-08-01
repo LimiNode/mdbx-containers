@@ -2101,20 +2101,22 @@ void test_destructive_capture_replaces_bounded_live_set() {
         std::vector<table_type::value_type> desired;
         desired.push_back(table_type::value_type(3, "new"));
         desired.push_back(table_type::value_type(3, "new"));
+        desired.push_back(table_type::value_type(4, "other"));
         const mdbxc::sync::ReplaceWithBounds bounds =
             { { 8u, 256u }, 4u };
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
         session->replace_with(desired, bounds);
-        if (session->pending_size() != 3u || !table.find(1).empty() ||
-            table.find(3).size() != 2u) {
+        if (session->pending_size() != 4u || !table.find(1).empty() ||
+            table.find(3).size() != 2u || table.find(4).size() != 1u) {
             throw std::runtime_error(
                 "bounded destructive replacement produced wrong local state");
         }
         session->commit_to_outbox(engine, destination);
     }
     if (table.find(3).size() != 2u || table.find(3)[0] != "new" ||
-        table.find(3)[1] != "new") {
+        table.find(3)[1] != "new" || table.find(4).size() != 1u ||
+        table.find(4)[0] != "other") {
         throw std::runtime_error(
             "bounded destructive replacement did not preserve duplicates");
     }
@@ -2132,9 +2134,34 @@ void test_destructive_capture_replaces_bounded_live_set() {
         bound_rejected = true;
     }
     if (!bound_rejected || table.find(3).size() != 2u ||
-        !table.find(4).empty()) {
+        table.find(4).size() != 1u) {
         throw std::runtime_error(
             "bounded destructive replacement did not fail closed");
+    }
+
+    {
+        const std::vector<table_type::value_type> empty;
+        const mdbxc::sync::ReplaceWithBounds bounds =
+            { { 8u, 256u }, 0u };
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->replace_with(empty, bounds);
+        if (session->pending_size() != 3u || !table.empty()) {
+            throw std::runtime_error(
+                "empty destructive replacement did not capture exact erases");
+        }
+        session->commit_to_outbox(engine, destination);
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(5, "after-replace");
+        session->commit_to_outbox(engine, destination);
+    }
+    if (table.find(5).size() != 1u || table.find(5)[0] != "after-replace") {
+        throw std::runtime_error(
+            "destructive replacement did not preserve future id allocation");
     }
 
     connection->disconnect();
