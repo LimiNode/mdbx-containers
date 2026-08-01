@@ -855,11 +855,26 @@ id. After the first committed destructive envelope, replacing the marker with
 the append-only version cannot roll back durable element ids or outbox state; it
 requires recovery or re-baselining instead.
 
+The baseline procedure is an authoritative replacement, not a merge. The
+source must publish one manifest and digest for the complete sorted live set;
+every participating receiver verifies that identity, the exact three-DBI
+scope, and each per-origin introduced high-water before accepting replacement.
+A partial baseline, a local-only scan, or a digest mismatch fails closed before
+the first physical mutation. The current library documents this procedure but
+does not expose a baseline-import API yet.
+
+Schema-v2 has no implicit multi-origin conflict resolution. A concurrent
+append from an origin other than the persisted authoritative origin is a
+permanent schema conflict, while an `EraseElement` may target a historical id
+only after an explicit controlled cutover. Last-writer-wins, vector clocks,
+CRDT merge, and independent multi-writer outboxes remain future protocols; they
+must not be inferred from the existing ordered-delivery sequence or marker.
+
 Remaining hardening before this initial v2 adapter can grow into a broader
 destructive surface includes:
 
-- a separate bounded `replace_with()` design and any proof invalidation or
-  recovery policy needed for future broader selectors;
+- proof invalidation and recovery policy for future baseline replacement or
+  broader multi-writer selectors;
 - a duplicate `AppendElement` with identical bytes, the same id with different
   bytes, append of a tombstoned id, duplicate ids in one frame, an
   append-then-erase remote duplicate pair, and unknown destructive opcodes;

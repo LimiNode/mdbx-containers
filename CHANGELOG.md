@@ -8,6 +8,9 @@ All notable changes to this project will be documented in this file.
   manifest-bearing `seq=0` snapshot chunks. Full-snapshot transport and apply
   remain explicitly unsupported until continuation and replacement semantics
   are implemented.
+- Sync: document the authoritative-baseline and multi-origin conflict
+  boundary for ordered schema-v2. Baseline import and concurrent multi-writer
+  resolution remain design-only and are not exposed as partial APIs.
 
 - Added an opt-in transaction-bound ordered key-index proof for trusted
   destructive selector resolution. The default full reverse validation remains
