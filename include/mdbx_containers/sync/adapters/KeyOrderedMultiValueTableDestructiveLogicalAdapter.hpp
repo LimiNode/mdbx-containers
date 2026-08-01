@@ -209,7 +209,8 @@ namespace sync {
                 : m_adapter(adapter),
                   m_txn(adapter.m_table.connection()->transaction(
                       TransactionMode::WRITABLE)),
-                  m_active(true) {
+                  m_active(true),
+                  m_mutation_revision(0u) {
                 const LogicalApplyResult marker_result =
                     validate_logical_adapter_marker(
                         m_txn.handle(), adapter.m_table.connection()->env_handle(),
@@ -250,6 +251,7 @@ namespace sync {
                         *m_adapter.m_table.connection(), m_txn.handle());
                     m_adapter.append_live_element(m_txn.handle(), id, key, value);
                     m_pending.push_back(m_adapter.make_append(id, key, value));
+                    ++m_mutation_revision;
                     return id;
                 } catch (...) {
                     rollback_and_deactivate();
@@ -262,6 +264,34 @@ namespace sync {
                 ensure_active();
                 try {
                     erase_resolved(id, nullptr);
+                    ++m_mutation_revision;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Validates one key and returns a transaction-bound proof.
+            /// \details The proof enables the explicit trusted selector
+            /// overloads below to skip their second full state reverse scan.
+            /// It becomes invalid after any capture mutation, rollback, or
+            /// commit and must be used only with this session.
+            OrderedElementKeyIndexProof validate_key_index(
+                    const KeyT& key,
+                    const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    const std::vector<std::uint8_t> key_bytes =
+                        KeyCodec::encode(key);
+                    OrderedElementCandidateSet candidates(bounds);
+                    OrderedElementKeyIndexProof proof;
+                    proof.transaction = m_txn.handle();
+                    proof.owner_session = this;
+                    proof.mutation_revision = m_mutation_revision;
+                    proof.key = key_bytes;
+                    proof.ids = m_adapter.m_state.validate_live_ids_for_key(
+                        m_txn.handle(), key_bytes, &candidates);
+                    return proof;
                 } catch (...) {
                     rollback_and_deactivate();
                     throw;
@@ -323,6 +353,83 @@ namespace sync {
                     OrderedElementCandidateSet candidates(bounds);
                     resolve_live_elements(
                         key, candidates,
+                        [](std::size_t, const OrderedElementStateRecord&) {
+                            return true;
+                        });
+                    const std::vector<OrderedElementId> ids =
+                        candidates.sorted_ids();
+                    erase_selected(ids, &candidates);
+                    return ids.size();
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Erases one per-key position using a validated proof.
+            /// \details Unlike erase_at(), this opt-in path does not repeat
+            /// the full reverse scan. The proof must come from
+            /// validate_key_index() on this unchanged session.
+            bool erase_at_trusted(
+                    const KeyT& key,
+                    std::size_t index,
+                    const OrderedElementKeyIndexProof& proof,
+                    const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    OrderedElementCandidateSet candidates(bounds);
+                    const bool found = resolve_live_elements_trusted(
+                        key, proof, candidates,
+                        [index](std::size_t current,
+                                const OrderedElementStateRecord&) {
+                            return current == index;
+                        });
+                    if (!found) return false;
+                    erase_selected(candidates.sorted_ids(), &candidates);
+                    return true;
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Erases matching values using a validated proof.
+            std::size_t erase_value_trusted(
+                    const KeyT& key,
+                    const ValueT& value,
+                    const OrderedElementKeyIndexProof& proof,
+                    const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    const std::vector<std::uint8_t> value_bytes =
+                        ValueCodec::encode(value);
+                    OrderedElementCandidateSet candidates(bounds);
+                    resolve_live_elements_trusted(
+                        key, proof, candidates,
+                        [&value_bytes](std::size_t,
+                                       const OrderedElementStateRecord& record) {
+                            return record.value == value_bytes;
+                        });
+                    const std::vector<OrderedElementId> ids =
+                        candidates.sorted_ids();
+                    erase_selected(ids, &candidates);
+                    return ids.size();
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Erases all values under a key using a validated proof.
+            std::size_t erase_key_trusted(
+                    const KeyT& key,
+                    const OrderedElementKeyIndexProof& proof,
+                    const BroadEraseBounds& bounds) {
+                ensure_active();
+                try {
+                    OrderedElementCandidateSet candidates(bounds);
+                    resolve_live_elements_trusted(
+                        key, proof, candidates,
                         [](std::size_t, const OrderedElementStateRecord&) {
                             return true;
                         });
@@ -491,18 +598,38 @@ namespace sync {
                     OrderedElementCandidateSet& candidates,
                     Selector select) const {
                 const std::vector<std::uint8_t> key_bytes = KeyCodec::encode(key);
-                std::vector<OrderedElementId> index_ids =
-                    m_adapter.m_state.live_ids_for_key(
+                const std::vector<OrderedElementId> index_ids =
+                    m_adapter.m_state.validate_live_ids_for_key(
                         m_txn.handle(), key_bytes, &candidates);
-                std::vector<OrderedElementId> state_ids =
-                    m_adapter.m_state.live_state_ids_for_key(
-                        m_txn.handle(), key_bytes, &candidates);
-                std::sort(index_ids.begin(), index_ids.end(), OrderedElementIdLess());
-                std::sort(state_ids.begin(), state_ids.end(), OrderedElementIdLess());
-                if (index_ids != state_ids) {
-                    throw std::runtime_error(
-                        "Ordered destructive key index and state records differ");
+                return resolve_live_elements_from_ids(
+                    key, key_bytes, index_ids, candidates, select);
+            }
+
+            template<typename Selector>
+            bool resolve_live_elements_trusted(
+                    const KeyT& key,
+                    const OrderedElementKeyIndexProof& proof,
+                    OrderedElementCandidateSet& candidates,
+                    Selector select) const {
+                const std::vector<std::uint8_t> key_bytes = KeyCodec::encode(key);
+                if (proof.owner_session != this ||
+                    proof.transaction != m_txn.handle() ||
+                    proof.mutation_revision != m_mutation_revision ||
+                    proof.key != key_bytes) {
+                    throw std::logic_error(
+                        "Ordered key index proof is stale or belongs to another session");
                 }
+                return resolve_live_elements_from_ids(
+                    key, key_bytes, proof.ids, candidates, select);
+            }
+
+            template<typename Selector>
+            bool resolve_live_elements_from_ids(
+                    const KeyT& key,
+                    const std::vector<std::uint8_t>& key_bytes,
+                    const std::vector<OrderedElementId>& index_ids,
+                    OrderedElementCandidateSet& candidates,
+                    Selector select) const {
 
                 std::vector<ValueT> physical_values;
                 m_adapter.m_table.db_collect_values(
@@ -683,6 +810,7 @@ namespace sync {
                         m_pending.push_back(m_adapter.make_erase(resolved[i].id));
                     }
                 }
+                ++m_mutation_revision;
             }
 
             std::size_t find_pending_append(const OrderedElementId& id) const {
@@ -720,6 +848,7 @@ namespace sync {
             NodeId m_origin;
             std::vector<LogicalChange> m_pending;
             bool m_active;
+            std::size_t m_mutation_revision;
         };
 
         std::unique_ptr<LogicalCaptureSession> begin_capture_session() const & {

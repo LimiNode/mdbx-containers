@@ -1101,6 +1101,98 @@ void test_destructive_capture_trusted_clear_avoids_repeated_state_scans() {
     cleanup(path);
 }
 
+void test_destructive_capture_uses_transaction_bound_key_index_proof() {
+    const std::string path =
+        "test_key_ordered_multi_value_destructive_key_index_proof.mdbx";
+    const std::string primary = "ordered_proof_values";
+    const std::string state = "ordered_proof_state";
+    const std::string by_key = "ordered_proof_by_key";
+    const std::string schema = "app.ordered_proof.v2";
+    cleanup(path);
+
+    mdbxc::Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    const std::shared_ptr<mdbxc::Connection> connection =
+        mdbxc::Connection::create(config);
+    const mdbxc::sync::NodeId origin = make_node(0x69u);
+    const mdbxc::sync::DbId local_db = make_node(0xA9u);
+    const mdbxc::sync::DbId destination = make_node(0xB9u);
+    mdbxc::sync::SyncEngine engine(connection);
+    engine.initialize_local_identity(origin, local_db);
+    table_type table(connection, primary);
+    adapter_type adapter(table, schema, state, by_key);
+    engine.initialize_logical_adapter_schema(
+        adapter, make_v2_record(primary, state, by_key, origin));
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        session->append(1, "first");
+        session->append(1, "second");
+        session->append(1, "third");
+        session->commit_to_outbox(engine, destination);
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        bool default_rejected = false;
+        try {
+            (void)session->erase_value(1, "second", { 3u, 24u });
+        } catch (const std::length_error&) {
+            default_rejected = true;
+        }
+        if (!default_rejected || table.find(1).size() != 3u) {
+            throw std::runtime_error(
+                "default ordered selector did not enforce reverse-scan budget");
+        }
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::OrderedElementKeyIndexProof proof =
+            session->validate_key_index(1, { 3u, 32u });
+        if (session->erase_value_trusted(1, "second", proof, { 3u, 24u }) != 1u) {
+            throw std::runtime_error(
+                "trusted ordered selector removed the wrong number of values");
+        }
+        session->commit_to_outbox(engine, destination);
+    }
+    const std::vector<std::string> remaining = table.find(1);
+    if (remaining.size() != 2u || remaining[0] != "first" ||
+        remaining[1] != "third") {
+        throw std::runtime_error(
+            "trusted ordered selector changed the wrong physical values");
+    }
+
+    {
+        std::unique_ptr<adapter_type::LogicalCaptureSession> session =
+            adapter.begin_capture_session();
+        const mdbxc::sync::OrderedElementKeyIndexProof proof =
+            session->validate_key_index(1, { 3u, 32u });
+        session->append(1, "new");
+        bool stale_rejected = false;
+        try {
+            (void)session->erase_key_trusted(1, proof, { 3u, 32u });
+        } catch (const std::logic_error&) {
+            stale_rejected = true;
+        }
+        if (!stale_rejected) {
+            throw std::runtime_error(
+                "ordered key index proof survived a capture mutation");
+        }
+    }
+    if (table.find(1).size() != 2u) {
+        throw std::runtime_error(
+            "stale ordered key index proof changed the table");
+    }
+
+    connection->disconnect();
+    cleanup(path);
+}
+
 void test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates() {
     const std::string path = "test_key_ordered_multi_value_destructive_replay.mdbx";
     const std::string primary = "ordered_replay_values";
@@ -1777,6 +1869,7 @@ int main() {
     test_destructive_capture_clear_rejects_complete_schema_corruption();
     test_destructive_capture_clear_checks_tombstone_only_origin_high_water();
     test_destructive_capture_trusted_clear_avoids_repeated_state_scans();
+    test_destructive_capture_uses_transaction_bound_key_index_proof();
     test_ordered_delivery_rolls_back_malformed_v2_change_and_deduplicates();
     test_destructive_preflight_rejects_untracked_physical_value();
     test_destructive_preflight_rejects_state_index_corruption();
