@@ -131,6 +131,12 @@ void test_full_snapshot_rejects_wrong_sequence_and_trailing_bytes() {
     MDBXC_TEST_ASSERT(throws([&trailing]() {
         mdbxc::sync::FullSnapshotCodec::decode(trailing);
     }));
+
+    mdbxc::sync::FullSnapshotChunk mismatched_continuation = make_chunk();
+    mismatched_continuation.has_more = false;
+    MDBXC_TEST_ASSERT(throws([&mismatched_continuation]() {
+        mdbxc::sync::FullSnapshotCodec::encode(mismatched_continuation);
+    }));
 }
 
 void test_full_snapshot_respects_bounds() {
@@ -166,6 +172,12 @@ void test_full_snapshot_default_bounds_reject_hostile_counts() {
     write_u32_le(oversized_nested, nested_offset - 4u, 0xFFFFFFFFu);
     MDBXC_TEST_ASSERT(throws([&oversized_nested]() {
         mdbxc::sync::FullSnapshotCodec::decode(oversized_nested);
+    }));
+
+    std::vector<std::uint8_t> invalid_continuation = encoded;
+    invalid_continuation[manifest_count_offset(source) - 1u] = 2u;
+    MDBXC_TEST_ASSERT(throws([&invalid_continuation]() {
+        mdbxc::sync::FullSnapshotCodec::decode(invalid_continuation);
     }));
 }
 
@@ -203,6 +215,74 @@ void test_full_snapshot_rejects_non_replacement_operations() {
         mdbxc::sync::ChangeOpType::ClearTable);
 }
 
+void test_full_snapshot_manifest_boundary_and_malformed_input() {
+    mdbxc::sync::CodecBounds exact_bounds;
+    exact_bounds.max_snapshot_manifest_entries = 1u;
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::FullSnapshotCodec::encode(make_chunk(), &exact_bounds);
+    const mdbxc::sync::FullSnapshotChunk decoded =
+        mdbxc::sync::FullSnapshotCodec::decode(encoded, &exact_bounds);
+    MDBXC_TEST_ASSERT(decoded.manifest.size() == 1u);
+
+    mdbxc::sync::CodecBounds zero_bounds;
+    zero_bounds.max_snapshot_manifest_entries = 0u;
+    MDBXC_TEST_ASSERT(throws([&zero_bounds]() {
+        mdbxc::sync::FullSnapshotCodec::encode(make_chunk(), &zero_bounds);
+    }));
+
+    std::vector<std::uint8_t> truncated = encoded;
+    truncated.resize(truncated.size() - 1u);
+    MDBXC_TEST_ASSERT(throws([&truncated]() {
+        mdbxc::sync::FullSnapshotCodec::decode(truncated);
+    }));
+
+    std::vector<std::uint8_t> unknown_version = encoded;
+    unknown_version[8u] = 2u;
+    unknown_version[9u] = 0u;
+    MDBXC_TEST_ASSERT(throws([&unknown_version]() {
+        mdbxc::sync::FullSnapshotCodec::decode(unknown_version);
+    }));
+
+    mdbxc::sync::CodecBounds exact_size;
+    exact_size.max_snapshot_chunk_bytes =
+        static_cast<std::uint32_t>(encoded.size());
+    MDBXC_TEST_ASSERT(
+        mdbxc::sync::FullSnapshotCodec::decode(encoded, &exact_size).
+            batch.ops.size() == 1u);
+    std::vector<std::uint8_t> oversized_chunk = encoded;
+    oversized_chunk.push_back(0u);
+    MDBXC_TEST_ASSERT(throws([&oversized_chunk, &exact_size]() {
+        mdbxc::sync::FullSnapshotCodec::decode(oversized_chunk, &exact_size);
+    }));
+}
+
+void test_full_snapshot_rejects_incomplete_identity_and_manifest() {
+    mdbxc::sync::FullSnapshotChunk zero_source = make_chunk();
+    zero_source.source_node_id = mdbxc::sync::make_zero_node();
+    zero_source.batch.origin_node_id = zero_source.source_node_id;
+    MDBXC_TEST_ASSERT(throws([&zero_source]() {
+        mdbxc::sync::FullSnapshotCodec::encode(zero_source);
+    }));
+
+    mdbxc::sync::FullSnapshotChunk empty_snapshot_id = make_chunk();
+    empty_snapshot_id.snapshot_id.clear();
+    MDBXC_TEST_ASSERT(throws([&empty_snapshot_id]() {
+        mdbxc::sync::FullSnapshotCodec::encode(empty_snapshot_id);
+    }));
+
+    mdbxc::sync::FullSnapshotChunk duplicate_manifest = make_chunk();
+    duplicate_manifest.manifest.push_back(duplicate_manifest.manifest[0]);
+    MDBXC_TEST_ASSERT(throws([&duplicate_manifest]() {
+        mdbxc::sync::FullSnapshotCodec::encode(duplicate_manifest);
+    }));
+
+    mdbxc::sync::FullSnapshotChunk oversized_key = make_chunk();
+    oversized_key.batch.ops[0].storage_key.resize(16u * 1024u + 1u, 0u);
+    MDBXC_TEST_ASSERT(throws([&oversized_key]() {
+        mdbxc::sync::FullSnapshotCodec::encode(oversized_key);
+    }));
+}
+
 } // namespace
 
 int main() {
@@ -212,5 +292,7 @@ int main() {
     test_full_snapshot_respects_bounds();
     test_full_snapshot_default_bounds_reject_hostile_counts();
     test_full_snapshot_rejects_non_replacement_operations();
+    test_full_snapshot_manifest_boundary_and_malformed_input();
+    test_full_snapshot_rejects_incomplete_identity_and_manifest();
     return 0;
 }
