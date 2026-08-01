@@ -124,10 +124,11 @@ delivery. The logical core uses the following contracts:
   erase, and clear capture resolve canonical logical-codec selectors to exact
   ids with separate candidate and inspected-record bounds. The default resolver
   performs full reverse validation; an opt-in transaction-bound proof from
-  `validate_key_index()` allows trusted selector calls to reuse a validated id
-  set without repeating that reverse scan, while stale or foreign proofs fail
-  closed. Replace and other broad state construction remain separately
-  deferred. Transferring the
+  `validate_key_index()` uses a non-reusable session lifetime token and applies
+  `max_selected_elements` to the complete materialized ID set. Trusted selector
+  calls can reuse that validated set without repeating the reverse scan, using
+  a separate budget; stale or foreign proofs fail closed. Replace and other
+  broad state construction remain separately deferred. Transferring the
   authoritative origin is an
   application-coordinated schema-marker cutover; it is not automatic failover
   and requires old-outbox drain plus replay-marker retention through the chosen

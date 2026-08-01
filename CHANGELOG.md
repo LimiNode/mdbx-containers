@@ -8,6 +8,8 @@ All notable changes to this project will be documented in this file.
   destructive selector resolution. The default full reverse validation remains
   the fail-closed fallback; trusted selector calls still enforce their bounds
   and physical/state point checks, and stale or foreign proofs are rejected.
+  Proofs now carry a non-reusable session lifetime token, and their complete
+  materialized ID set is bounded by `max_selected_elements`.
 - Added `KeyMultiValueTable::erase_one()` and schema-v2 logical
   `EraseOneValue`. Schema v2 typed multivalue capture supports
   multiplicity-preserving `reconcile()` by publishing exact surplus deletes and

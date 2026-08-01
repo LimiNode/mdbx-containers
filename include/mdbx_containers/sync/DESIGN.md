@@ -656,14 +656,20 @@ shortcut may hide durable state corruption.
 
 An explicit opt-in fast path is available after a complete validation through
 `LogicalCaptureSession::validate_key_index()`. It returns a transaction-bound
-`OrderedElementKeyIndexProof` for one canonical key. The proof is valid only
-for that capture session, transaction, key, and mutation revision. The trusted
-selector methods `erase_at_trusted()`, `erase_value_trusted()`, and
+`OrderedElementKeyIndexProof` for one canonical key. The proof carries a
+non-reusable session lifetime token in addition to the transaction, key, and
+mutation revision. It is valid only for that capture session and rejects after
+the session is destroyed, even if object or MDBX transaction addresses are
+reused. `max_selected_elements` also bounds the complete materialized proof ID
+set; validation fails before adding another ID when that bound is exceeded.
+The trusted selector methods `erase_at_trusted()`, `erase_value_trusted()`, and
 `erase_key_trusted()` reject a stale or foreign proof and reuse its validated
 id set instead of repeating the full reverse state scan. They still apply the
 candidate and inspected-record bounds and retain physical primary, key-index,
-and state point checks before mutation. Callers must not modify the underlying
-table outside the session between proof creation and trusted use. Proofs are
+and state point checks before mutation. Proof validation and each later trusted
+selector call have separate `BroadEraseBounds` budgets; the scan count is not
+carried from one call to the next. Callers must not modify the underlying table
+outside the session between proof creation and trusted use. Proofs are
 ephemeral and must never be persisted or treated as a corruption-recovery
 mechanism; when no proof is available, the ordinary full-validation selectors
 remain the required path.
@@ -720,7 +726,8 @@ metadata and deletes positions in descending per-key order. It does not repeat
 the full reverse state scan after each id. Physical cursor reads and all state
 or index point reads remain part of the same `max_scanned_records` budget. An
 opt-in transaction-bound proof can also reuse the complete validated id set
-across selector calls; the proof path is never implicit and the ordinary
+across selector calls; proof creation itself is bounded by the full ID-set
+materialization limit, the proof path is never implicit, and the ordinary
 fail-closed resolver remains the fallback.
 Committing a session with no pending changes retains the existing empty-envelope
 semantics and consumes one ordered delivery sequence.
