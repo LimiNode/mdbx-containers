@@ -816,7 +816,15 @@ Tombstones are retained indefinitely in the first destructive implementation.
 They must not be pruned by time or by a local outbox acknowledgement. Safe
 compaction needs a separately specified global delivery/recovery horizon that
 covers every participating replica and any snapshot/bootstrap path; it is not
-part of this extension.
+part of this extension. A future compaction API must receive, persist, and
+validate that horizon per origin. It may remove a tombstone only when every
+replica's durable applied frontier and every retained snapshot/bootstrap
+watermark are beyond the tombstone's introduction sequence, and when no sender
+can still retry an older outbox envelope. Local time, one peer's ACK, local
+outbox emptiness, or the current table contents are insufficient evidence.
+Horizon validation and tombstone deletion must commit atomically, with a
+restart-safe record of the accepted horizon; otherwise compaction remains
+disabled.
 
 The destructive format requires a new logical schema version and an explicit
 persistent-marker migration. Existing append-only data has no stable element
