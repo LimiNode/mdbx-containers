@@ -188,6 +188,20 @@ namespace sync {
             return change;
         }
 
+    private:
+        LogicalChange make_append_prepared(
+                const OrderedElementId& id,
+                const std::vector<std::uint8_t>& key_bytes,
+                const std::vector<std::uint8_t>& value_bytes) const {
+            LogicalChange change;
+            change.schema = schema_ref();
+            change.opcode = KeyOrderedMultiValueDestructiveLogicalAppend;
+            encode_append_bytes(id, key_bytes, value_bytes, change.payload);
+            return change;
+        }
+
+    public:
+
         LogicalChange make_erase(const OrderedElementId& id) const {
             LogicalChange change;
             change.schema = schema_ref();
@@ -203,6 +217,22 @@ namespace sync {
         /// of the same new id coalesces to no frame operation while its
         /// allocated counter remains monotonic.
         class LogicalCaptureSession {
+        private:
+            struct ClearPlan {
+                std::vector<OrderedElementId> ids;
+                std::vector<NodeId> element_origins;
+            };
+
+            struct PreparedReplacementAppend {
+                const typename table_type::value_type* source;
+                OrderedElementId id;
+                std::vector<std::uint8_t> key_bytes;
+                std::vector<std::uint8_t> value_bytes;
+                LogicalChange change;
+
+                PreparedReplacementAppend() : source(nullptr) {}
+            };
+
         public:
             explicit LogicalCaptureSession(
                     const KeyOrderedMultiValueTableDestructiveLogicalAdapter& adapter)
@@ -451,61 +481,84 @@ namespace sync {
                 ensure_active();
                 try {
                     OrderedElementCandidateSet candidates(bounds);
-                    const OrderedElementStateScan state_scan =
-                        m_adapter.m_state.scan_all_element_records(
-                            m_txn.handle(), &candidates, true);
-                    std::vector<typename table_type::value_type> physical_entries;
-                    m_adapter.m_table.db_collect_entries(
-                        physical_entries, m_txn.handle(),
-                        [&candidates]() {
-                            candidates.inspect_record();
-                        });
-                    if (physical_entries.size() != state_scan.live_records.size()) {
-                        throw std::runtime_error(
-                            "Ordered destructive table and state counts differ");
-                    }
-                    const std::vector<OrderedElementKeyIndexEntry> index_entries =
-                        m_adapter.m_state.key_index_entries(
-                            m_txn.handle(), &candidates);
-                    std::vector<OrderedElementKeyIndexEntry> expected_index_entries;
-                    std::vector<std::vector<std::uint8_t> > keys;
-                    std::vector<std::vector<OrderedElementId> > state_ids;
-                    for (std::size_t i = 0u;
-                         i < state_scan.live_records.size(); ++i) {
-                        const std::size_t key_index = find_key_group(
-                            keys, state_scan.live_records[i].record.key);
-                        if (key_index == keys.size()) {
-                            keys.push_back(state_scan.live_records[i].record.key);
-                            state_ids.push_back(std::vector<OrderedElementId>());
-                        }
-                        state_ids[key_index].push_back(state_scan.live_records[i].id);
-                        OrderedElementKeyIndexEntry expected;
-                        expected.key = state_scan.live_records[i].record.key;
-                        expected.id = state_scan.live_records[i].id;
-                        expected_index_entries.push_back(expected);
+                    const ClearPlan plan = prepare_clear(candidates);
+                    erase_selected(plan.ids, &candidates);
+                    return plan.ids.size();
+                } catch (...) {
+                    rollback_and_deactivate();
+                    throw;
+                }
+            }
+
+            /// \brief Replaces the complete live set with desired occurrences.
+            /// \details The operation prepares canonical logical bytes, fresh
+            /// immutable ids, and exact append changes before its first
+            /// physical mutation. Existing live occurrences are then erased
+            /// exactly and the prepared occurrences are appended without
+            /// rescanning the complete state. The operation is single-origin
+            /// schema-v2 capture; it introduces no new wire opcode and remains
+            /// bounded by both the existing-state and replacement limits.
+            void replace_with(
+                    const std::vector<typename table_type::value_type>& desired,
+                    const ReplaceWithBounds& bounds) {
+                ensure_active();
+                try {
+                    if (desired.size() > bounds.max_replacement_elements) {
+                        throw std::length_error(
+                            "Ordered destructive replacement limit exceeded");
                     }
 
-                    validate_complete_key_index(
-                        index_entries, expected_index_entries);
-                    for (std::size_t i = 0u;
-                         i < state_scan.element_origins.size(); ++i) {
-                        m_adapter.m_state.verify_introduced_high_water(
-                            m_txn.handle(), state_scan.element_origins[i], &candidates);
-                    }
-                    for (std::size_t i = 0u; i < keys.size(); ++i) {
-                        const KeyT key = KeyCodec::decode(keys[i]);
-                        if (KeyCodec::encode(key) != keys[i]) {
+                    std::vector<PreparedReplacementAppend> prepared;
+                    prepared.reserve(desired.size());
+                    for (std::size_t i = 0u; i < desired.size(); ++i) {
+                        PreparedReplacementAppend entry;
+                        entry.source = &desired[i];
+                        entry.key_bytes =
+                            KeyCodec::encode(desired[i].first);
+                        entry.value_bytes =
+                            ValueCodec::encode(desired[i].second);
+                        if (KeyCodec::encode(KeyCodec::decode(entry.key_bytes)) !=
+                                entry.key_bytes ||
+                            ValueCodec::encode(ValueCodec::decode(entry.value_bytes)) !=
+                                entry.value_bytes) {
                             throw std::runtime_error(
-                                "Ordered destructive state key is non-canonical");
+                                "Ordered destructive replacement value is non-canonical");
                         }
-                        validate_live_key_group(
-                            key, keys[i], state_ids[i], candidates);
+                        prepared.push_back(std::move(entry));
                     }
 
+                    OrderedElementCandidateSet candidates(bounds.existing);
+                    const ClearPlan clear_plan = prepare_clear(candidates);
                     const std::vector<OrderedElementId> ids =
-                        candidates.sorted_ids();
-                    erase_selected(ids, &candidates);
-                    return ids.size();
+                        m_adapter.m_state.plan_id_range(
+                            m_txn.handle(), m_origin, prepared.size(),
+                            contains_origin(clear_plan.element_origins, m_origin),
+                            &candidates);
+                    for (std::size_t i = 0u; i < prepared.size(); ++i) {
+                        prepared[i].id = ids[i];
+                        prepared[i].change = m_adapter.make_append_prepared(
+                            prepared[i].id, prepared[i].key_bytes,
+                            prepared[i].value_bytes);
+                    }
+
+                    reserve_replacement_pending(
+                        clear_plan.ids.size(), prepared.size());
+                    erase_selected(clear_plan.ids, &candidates);
+
+                    Connection::SyncCaptureSuppressionScope suppress_capture(
+                        *m_adapter.m_table.connection(), m_txn.handle());
+                    for (std::size_t i = 0u; i < prepared.size(); ++i) {
+                        m_adapter.append_live_element_prevalidated(
+                            m_txn.handle(), prepared[i].id,
+                            prepared[i].source->first, prepared[i].source->second,
+                            prepared[i].key_bytes, prepared[i].value_bytes);
+                        m_pending.push_back(std::move(prepared[i].change));
+                    }
+                    if (!ids.empty()) {
+                        m_adapter.m_state.commit_id_range(
+                            m_txn.handle(), m_origin, ids.back().sequence);
+                        ++m_mutation_revision;
+                    }
                 } catch (...) {
                     rollback_and_deactivate();
                     throw;
@@ -547,6 +600,77 @@ namespace sync {
             }
 
         private:
+            ClearPlan prepare_clear(OrderedElementCandidateSet& candidates) const {
+                const OrderedElementStateScan state_scan =
+                    m_adapter.m_state.scan_all_element_records(
+                        m_txn.handle(), &candidates, true);
+                std::vector<typename table_type::value_type> physical_entries;
+                m_adapter.m_table.db_collect_entries(
+                    physical_entries, m_txn.handle(),
+                    [&candidates]() {
+                        candidates.inspect_record();
+                    });
+                if (physical_entries.size() != state_scan.live_records.size()) {
+                    throw std::runtime_error(
+                        "Ordered destructive table and state counts differ");
+                }
+                const std::vector<OrderedElementKeyIndexEntry> index_entries =
+                    m_adapter.m_state.key_index_entries(
+                        m_txn.handle(), &candidates);
+                std::vector<OrderedElementKeyIndexEntry> expected_index_entries;
+                std::vector<std::vector<std::uint8_t> > keys;
+                std::vector<std::vector<OrderedElementId> > state_ids;
+                for (std::size_t i = 0u;
+                     i < state_scan.live_records.size(); ++i) {
+                    const std::size_t key_index = find_key_group(
+                        keys, state_scan.live_records[i].record.key);
+                    if (key_index == keys.size()) {
+                        keys.push_back(state_scan.live_records[i].record.key);
+                        state_ids.push_back(std::vector<OrderedElementId>());
+                    }
+                    state_ids[key_index].push_back(state_scan.live_records[i].id);
+                    OrderedElementKeyIndexEntry expected;
+                    expected.key = state_scan.live_records[i].record.key;
+                    expected.id = state_scan.live_records[i].id;
+                    expected_index_entries.push_back(expected);
+                }
+
+                validate_complete_key_index(index_entries, expected_index_entries);
+                for (std::size_t i = 0u;
+                     i < state_scan.element_origins.size(); ++i) {
+                    m_adapter.m_state.verify_introduced_high_water(
+                        m_txn.handle(), state_scan.element_origins[i], &candidates);
+                }
+                for (std::size_t i = 0u; i < keys.size(); ++i) {
+                    const KeyT key = KeyCodec::decode(keys[i]);
+                    if (KeyCodec::encode(key) != keys[i]) {
+                        throw std::runtime_error(
+                            "Ordered destructive state key is non-canonical");
+                    }
+                    validate_live_key_group(
+                        key, keys[i], state_ids[i], candidates);
+                }
+
+                ClearPlan plan;
+                plan.ids = candidates.sorted_ids();
+                plan.element_origins = state_scan.element_origins;
+                return plan;
+            }
+
+            void reserve_replacement_pending(
+                    std::size_t erased_count,
+                    std::size_t appended_count) {
+                const std::size_t maximum =
+                    (std::numeric_limits<std::size_t>::max)();
+                if (erased_count > maximum - appended_count ||
+                    erased_count + appended_count > maximum - m_pending.size()) {
+                    throw std::length_error(
+                        "Ordered destructive replacement pending frame is too large");
+                }
+                m_pending.reserve(
+                    m_pending.size() + erased_count + appended_count);
+            }
+
             static std::size_t find_key_group(
                     const std::vector<std::vector<std::uint8_t> >& keys,
                     const std::vector<std::uint8_t>& key) {
@@ -1057,9 +1181,18 @@ namespace sync {
                                   const KeyT& key,
                                   const ValueT& value,
                                   std::vector<std::uint8_t>& out) {
+            encode_append_bytes(id, KeyCodec::encode(key), ValueCodec::encode(value),
+                                out);
+        }
+
+        static void encode_append_bytes(
+                const OrderedElementId& id,
+                const std::vector<std::uint8_t>& key_bytes,
+                const std::vector<std::uint8_t>& value_bytes,
+                std::vector<std::uint8_t>& out) {
             out = encode_ordered_element_id_logical(id);
-            append_blob(out, KeyCodec::encode(key));
-            append_blob(out, ValueCodec::encode(value));
+            append_blob(out, key_bytes);
+            append_blob(out, value_bytes);
         }
 
         static DecodedChange decode_change(const LogicalChange& change) {
@@ -1147,6 +1280,17 @@ namespace sync {
             m_table.append(key, value, txn);
             m_state.put_live(txn, id, key_bytes, value_bytes);
             ensure_key_parity(txn, key, key_bytes);
+        }
+
+        void append_live_element_prevalidated(
+                MDBX_txn* txn,
+                const OrderedElementId& id,
+                const KeyT& key,
+                const ValueT& value,
+                const std::vector<std::uint8_t>& key_bytes,
+                const std::vector<std::uint8_t>& value_bytes) const {
+            m_table.append(key, value, txn);
+            m_state.put_live_prevalidated(txn, id, key_bytes, value_bytes);
         }
 
         void erase_live_element(MDBX_txn* txn,
