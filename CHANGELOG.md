@@ -13,10 +13,10 @@ All notable changes to this project will be documented in this file.
   manifest DBIs and never advances global raw-sync progress; automatic
   `CompleteUserDatabase` inventory replaces all named non-reserved user DBIs
   and atomically bootstraps `_mdbxc_applied` from the immutable source tail.
-  Complete snapshots fail closed when a source has registered logical schemas;
-  schema markers, ordered-delivery frontiers, replay markers, and outbox state
-  require a separate logical snapshot protocol. Persisted importer resume
-  remains deferred.
+  Complete snapshots fail closed when a source has persistent logical-sync
+  state: schema markers, ordered-delivery frontiers, replay markers or pruning
+  watermarks, and durable outbox state require a separate logical snapshot
+  protocol. Persisted importer resume remains deferred.
 - Sync: add opt-in `SyncWorker` fallback for `SnapshotRequired`. It starts a
   new empty-cursor `CompleteUserDatabase` source session and drains the bounded
   fresh-replica importer through its final atomic commit. `ManifestOnly` remains

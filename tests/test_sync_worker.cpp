@@ -2864,12 +2864,29 @@ void test_worker_rejects_logical_complete_snapshot_fallback() {
     sync::SyncEngine source(
         source_conn, sync::ConflictPolicy::Reject, snapshot_options);
     source.initialize_local_identity(source_node, db_id);
-    sync::LogicalSchemaRecord record;
-    record.dbi_name = "documents";
-    record.kind = sync::LogicalTableKind::KeyValue;
-    record.schema_version = 1u;
-    record.dbi_names.push_back("documents");
-    source.register_logical_schema("app.worker_snapshot.logical.v1", record);
+    KeyValueTable<std::string, std::string> documents(
+        source_conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_id;
+    envelope.origin_node_id = make_node(0xCD);
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "worker-empty-ordered-frame";
+    const sync::LogicalDeliveryAcknowledgement acknowledgement =
+        source.apply_ordered_logical_delivery_envelope(envelope);
+    if (!acknowledgement.ok ||
+        acknowledgement.acknowledged_through != 1u) {
+        throw std::runtime_error(
+            "failed to prepare worker empty ordered logical state");
+    }
+    {
+        auto txn = source_conn->transaction(TransactionMode::READ_ONLY);
+        sync::SchemaRegistryStore schemas(source_conn->env_handle());
+        if (schemas.has_entries(txn.handle())) {
+            throw std::runtime_error(
+                "worker empty ordered frame unexpectedly registered a schema");
+        }
+    }
     {
         auto txn = source_conn->transaction(TransactionMode::WRITABLE);
         sync::ChangeLogStore changelog(source_conn->env_handle());

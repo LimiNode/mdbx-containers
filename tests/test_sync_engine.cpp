@@ -1880,6 +1880,126 @@ void test_engine_rejects_complete_snapshot_with_logical_state() {
     cleanup(p);
 }
 
+void test_engine_rejects_complete_snapshot_with_empty_ordered_frame() {
+    using namespace mdbxc;
+    const std::string p =
+        "test_engine_complete_snapshot_empty_ordered_frame.mdbx";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xAA);
+    const sync::NodeId logical_origin = make_node(0xBA);
+    const sync::DbId db_id = make_node(0xDA);
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 16u;
+    options.max_materialized_bytes = 4096u;
+    options.max_active_sessions = 1u;
+
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+
+    sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_id;
+    envelope.origin_node_id = logical_origin;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "snapshot-empty-ordered-frame";
+    const sync::LogicalDeliveryAcknowledgement acknowledgement =
+        engine.apply_ordered_logical_delivery_envelope(envelope);
+    if (!acknowledgement.ok ||
+        acknowledgement.acknowledged_through != 1u) {
+        throw std::runtime_error(
+            "failed to prepare empty ordered logical snapshot state");
+    }
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        sync::SchemaRegistryStore schemas(conn->env_handle());
+        if (schemas.has_entries(txn.handle())) {
+            throw std::runtime_error(
+                "empty ordered logical frame unexpectedly registered a schema");
+        }
+    }
+
+    sync::PullRequest request;
+    request.requester = make_node(0xCA);
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::PullResponse first = engine.handle_pull(request);
+    const sync::PullResponse second = engine.handle_pull(request);
+    if (first.ok || second.ok || first.is_full_snapshot ||
+        !first.snapshot_chunk.snapshot_id.empty() ||
+        !second.snapshot_chunk.snapshot_id.empty() ||
+        first.error_code !=
+            sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported ||
+        second.error_code !=
+            sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported ||
+        first.error_retryable || second.error_retryable ||
+        kv_or_throw(conn, documents, std::string("document"),
+                    "empty ordered snapshot source value") != "raw-value") {
+        throw std::runtime_error(
+            "complete snapshot accepted empty ordered logical state");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_rejects_complete_snapshot_with_logical_outbox_state() {
+    using namespace mdbxc;
+    const std::string p =
+        "test_engine_complete_snapshot_logical_outbox_state.mdbx";
+    cleanup(p);
+
+    const sync::NodeId source_node = make_node(0xAB);
+    const sync::DbId db_id = make_node(0xDB);
+    const sync::DbId destination = make_node(0xEB);
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 16u;
+    options.max_materialized_bytes = 4096u;
+    options.max_active_sessions = 1u;
+
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    engine.enqueue_logical_delivery(destination, sync::LogicalChangeFrame());
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        sync::SchemaRegistryStore schemas(conn->env_handle());
+        if (schemas.has_entries(txn.handle())) {
+            throw std::runtime_error(
+                "logical outbox unexpectedly registered a schema");
+        }
+    }
+
+    sync::PullRequest request;
+    request.requester = make_node(0xCB);
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::PullResponse response = engine.handle_pull(request);
+    if (response.ok || response.is_full_snapshot ||
+        !response.snapshot_chunk.snapshot_id.empty() ||
+        response.error_code !=
+            sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported ||
+        response.error_retryable ||
+        kv_or_throw(conn, documents, std::string("document"),
+                    "logical outbox snapshot source value") != "raw-value") {
+        throw std::runtime_error(
+            "complete snapshot accepted logical outbox state");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 mdbxc::sync::FullSnapshotChunk make_import_chunk(
         const mdbxc::sync::NodeId& source_node,
         const mdbxc::sync::DbId& db_id,
@@ -2949,6 +3069,10 @@ int main() {
           &test_engine_exports_complete_full_snapshot_inventory },
         { "test_engine_rejects_complete_snapshot_with_logical_state",
           &test_engine_rejects_complete_snapshot_with_logical_state },
+        { "test_engine_rejects_complete_snapshot_with_empty_ordered_frame",
+          &test_engine_rejects_complete_snapshot_with_empty_ordered_frame },
+        { "test_engine_rejects_complete_snapshot_with_logical_outbox_state",
+          &test_engine_rejects_complete_snapshot_with_logical_outbox_state },
         { "test_engine_imports_full_snapshot_and_bootstraps_cursor",
           &test_engine_imports_full_snapshot_and_bootstraps_cursor },
         { "test_engine_manifest_only_snapshot_does_not_bootstrap_cursor",

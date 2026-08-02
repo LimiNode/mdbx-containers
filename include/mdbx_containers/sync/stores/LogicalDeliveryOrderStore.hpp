@@ -6,6 +6,7 @@
 /// \brief Persistent contiguous receiver frontier for ordered delivery.
 
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -78,6 +79,39 @@ namespace sync {
                        "LogicalDeliveryOrderStore write failed");
         }
 
+        /// \brief Returns whether any valid ordered-delivery frontier exists.
+        /// \details The whole DBI is decoded so malformed state is not treated
+        /// as an empty receiver frontier.
+        bool has_entries(MDBX_txn* txn) const {
+            txn = checked_txn(txn,
+                              "LogicalDeliveryOrderStore::has_entries");
+            open_existing(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalDeliveryOrderStore cursor open failed");
+            bool found = false;
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    (void)decode_origin(key);
+                    (void)decode_value(value);
+                    found = true;
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalDeliveryOrderStore cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return found;
+        }
+
     private:
         MDBX_txn* checked_txn(MDBX_txn* txn, const char* context) const {
             return checked_txn_env(txn, m_env, context);
@@ -112,6 +146,17 @@ namespace sync {
                 origin.size()
             };
             return out;
+        }
+
+        static NodeId decode_origin(const MDBX_val& key) {
+            if (key.iov_len != NodeId().size() || key.iov_base == nullptr) {
+                throw std::runtime_error(
+                    "LogicalDeliveryOrderStore key has invalid size");
+            }
+            NodeId origin;
+            std::memcpy(origin.data(), key.iov_base, origin.size());
+            validate_origin(origin);
+            return origin;
         }
 
         static MDBX_val make_val(const std::vector<std::uint8_t>& bytes) {

@@ -109,6 +109,64 @@ namespace sync {
             return out;
         }
 
+        /// \brief Returns whether replay markers or pruning watermarks exist.
+        /// \details All present records are decoded before returning. The
+        /// optional watermark DBI is inspected without creating it.
+        bool has_persistent_state(MDBX_txn* txn) const {
+            txn = checked_txn(txn,
+                              "LogicalDeliveryStore::has_persistent_state");
+            open_const(txn);
+            bool found = false;
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalDeliveryStore marker cursor open failed");
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    (void)decode_and_validate_marker(key, value);
+                    found = true;
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalDeliveryStore marker cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+
+            if (!open_watermark_if_exists(txn)) {
+                return found;
+            }
+            cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_watermark_dbi, &cursor),
+                       "LogicalDeliveryStore watermark cursor open failed");
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    (void)decode_watermark_origin(key);
+                    (void)decode_watermark(value);
+                    found = true;
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalDeliveryStore watermark cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return found;
+        }
+
         /// \brief Lists persisted logical delivery marker identities.
         /// \param limit Maximum number of markers to return, or zero for all.
         std::vector<LogicalDeliveryMarkerInfo> list_markers(
@@ -533,6 +591,20 @@ namespace sync {
                     "LogicalDeliveryStore watermark is zero");
             }
             return sequence;
+        }
+
+        static NodeId decode_watermark_origin(const MDBX_val& key) {
+            if (key.iov_len != NodeId().size() || key.iov_base == nullptr) {
+                throw std::runtime_error(
+                    "LogicalDeliveryStore watermark key has invalid size");
+            }
+            NodeId origin;
+            std::memcpy(origin.data(), key.iov_base, origin.size());
+            if (is_zero_sync_id(origin)) {
+                throw std::runtime_error(
+                    "LogicalDeliveryStore watermark origin is zero");
+            }
+            return origin;
         }
 
         struct ValueCursor {

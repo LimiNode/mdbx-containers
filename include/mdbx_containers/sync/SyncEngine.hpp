@@ -165,7 +165,7 @@ namespace sync {
         public:
             explicit FullSnapshotLogicalStateUnsupported(
                     const std::string& message =
-                        "complete full snapshot does not support registered logical-sync state")
+                        "complete full snapshot does not support persistent logical-sync state")
                 : std::runtime_error(message) {}
         };
 
@@ -1565,6 +1565,28 @@ namespace sync {
             }
         }
 
+        void require_raw_only_complete_snapshot_source(MDBX_txn* txn) const {
+            try {
+                SchemaRegistryStore schemas(m_conn->env_handle());
+                LogicalDeliveryStore delivery(m_conn->env_handle());
+                LogicalDeliveryOrderStore order(m_conn->env_handle());
+                LogicalOutboxStore outbox(m_conn->env_handle());
+                if (schemas.has_entries(txn) ||
+                    delivery.has_persistent_state(txn) ||
+                    order.has_entries(txn) ||
+                    outbox.has_persistent_state(txn)) {
+                    throw FullSnapshotLogicalStateUnsupported();
+                }
+            } catch (const FullSnapshotLogicalStateUnsupported&) {
+                throw;
+            } catch (const std::exception& e) {
+                throw FullSnapshotLogicalStateUnsupported(
+                    std::string(
+                        "complete full snapshot cannot validate persistent logical-sync state: ") +
+                    e.what());
+            }
+        }
+
         std::shared_ptr<FullSnapshotSession> materialize_full_snapshot(
                 const FullSnapshotExportOptions& options,
                 const NodeId& requester) const {
@@ -1587,19 +1609,7 @@ namespace sync {
 
             if (options.replacement_scope ==
                 FullSnapshotScope::CompleteUserDatabase) {
-                SchemaRegistryStore schemas(m_conn->env_handle());
-                try {
-                    if (!schemas.schema_ids(txn.handle()).empty()) {
-                        throw FullSnapshotLogicalStateUnsupported();
-                    }
-                } catch (const FullSnapshotLogicalStateUnsupported&) {
-                    throw;
-                } catch (const std::exception& e) {
-                    throw FullSnapshotLogicalStateUnsupported(
-                        std::string(
-                            "complete full snapshot cannot validate logical-sync state: ") +
-                        e.what());
-                }
+                require_raw_only_complete_snapshot_source(txn.handle());
             }
 
             session->manifest = options.replacement_scope ==

@@ -1558,10 +1558,11 @@ return `SnapshotSessionInvalid`; bounded session capacity returns retryable
 `SnapshotSessionBusy`.
 
 `CompleteUserDatabase` is currently a raw-sync-only recovery scope. Before a
-session is materialized, the source rejects a non-empty persistent schema
-registry with `SnapshotLogicalStateUnsupported`. A physical copy of logical
-adapter DBIs without `_mdbxc_sync_schema`, ordered-delivery frontiers, replay
-markers, and outbox/recovery state cannot safely continue logical delivery.
+session is materialized, the source rejects any persistent logical-sync state
+with `SnapshotLogicalStateUnsupported`: schema markers, replay markers or
+pruning watermarks, ordered-delivery frontiers, and durable outbox metadata or
+entries. A physical copy of logical adapter DBIs without this state cannot
+safely continue logical delivery.
 `ManifestOnly` is likewise only a manual physical replacement tool: it does
 not claim to repair or bootstrap logical replication. A future logical snapshot
 protocol must atomically define the logical schema, delivery, replay, and

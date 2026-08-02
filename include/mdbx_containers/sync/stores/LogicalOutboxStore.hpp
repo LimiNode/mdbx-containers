@@ -260,6 +260,59 @@ namespace sync {
             return removed;
         }
 
+        /// \brief Returns whether any valid durable outbox state exists.
+        /// \details Metadata is state even when all entries were acknowledged:
+        /// it records an allocated logical-delivery stream. Every record is
+        /// decoded and cross-checked before this method returns.
+        bool has_persistent_state(MDBX_txn* txn,
+                                  const CodecBounds* bounds = nullptr) const {
+            txn = checked_txn(txn,
+                              "LogicalOutboxStore::has_persistent_state");
+            open_existing(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalOutboxStore state cursor open failed");
+            bool found = false;
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    const DbId destination = decode_destination(key);
+                    if (is_metadata_key(key)) {
+                        (void)decode_metadata(value);
+                    } else {
+                        const std::uint64_t sequence = decode_entry_sequence(key);
+                        const Metadata metadata = read_metadata(txn, destination);
+                        const LogicalDeliveryEnvelope envelope =
+                            decode_value(value, bounds);
+                        if (is_zero_sync_id(metadata.origin_node_id) ||
+                            sequence <= metadata.acknowledged_through ||
+                            sequence >= metadata.next_sequence ||
+                            compare_node_id(envelope.destination_db_uuid,
+                                            destination) != 0 ||
+                            compare_node_id(envelope.origin_node_id,
+                                            metadata.origin_node_id) != 0 ||
+                            envelope.origin_sequence != sequence) {
+                            throw std::runtime_error(
+                                "LogicalOutboxStore entry key/value mismatch");
+                        }
+                    }
+                    found = true;
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalOutboxStore state cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return found;
+        }
+
     private:
         struct Metadata {
             Metadata()
@@ -350,6 +403,43 @@ namespace sync {
             return key.iov_len == prefix.size() + 8u &&
                    key.iov_base != nullptr &&
                    std::memcmp(key.iov_base, &prefix[0], prefix.size()) == 0;
+        }
+
+        static bool is_metadata_key(const MDBX_val& key) {
+            if (key.iov_len != entry_prefix_size() || key.iov_base == nullptr) {
+                return false;
+            }
+            const std::uint8_t* bytes =
+                static_cast<const std::uint8_t*>(key.iov_base);
+            return bytes[0] == key_version() &&
+                   bytes[1] == metadata_key_kind();
+        }
+
+        static DbId decode_destination(const MDBX_val& key) {
+            if (key.iov_len != entry_prefix_size() &&
+                key.iov_len != entry_key_size()) {
+                throw std::runtime_error(
+                    "LogicalOutboxStore key has invalid size");
+            }
+            if (key.iov_base == nullptr) {
+                throw std::runtime_error(
+                    "LogicalOutboxStore key is null");
+            }
+            const std::uint8_t* bytes =
+                static_cast<const std::uint8_t*>(key.iov_base);
+            if (bytes[0] != key_version() ||
+                (bytes[1] != metadata_key_kind() &&
+                 bytes[1] != entry_key_kind())) {
+                throw std::runtime_error(
+                    "LogicalOutboxStore key has invalid prefix");
+            }
+            DbId destination;
+            std::memcpy(destination.data(), bytes + 2u, destination.size());
+            if (is_zero_sync_id(destination)) {
+                throw std::runtime_error(
+                    "LogicalOutboxStore destination is zero");
+            }
+            return destination;
         }
 
         static std::uint64_t decode_entry_sequence(const MDBX_val& key) {

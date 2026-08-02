@@ -34,8 +34,8 @@ namespace sync {
     /// bootstraps global raw-sync progress. \c CompleteUserDatabase replaces
     /// every named user DBI and is the only scope that may bootstrap the
     /// per-origin applied cursor for subsequent incremental replication. The
-    /// current complete scope is raw-only and rejects sources with registered
-    /// logical schemas until a separate logical snapshot protocol exists.
+    /// current complete scope is raw-only and rejects sources with persistent
+    /// logical-sync state until a separate logical snapshot protocol exists.
     enum class FullSnapshotScope : std::uint8_t {
         ManifestOnly = 0u,
         CompleteUserDatabase = 1u
