@@ -2171,6 +2171,170 @@ void test_engine_rejects_complete_snapshot_with_malformed_outbox_metadata() {
     cleanup(p);
 }
 
+void test_engine_rejects_complete_snapshot_with_malformed_watermark() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_bad_watermark.mdbx";
+    cleanup(p);
+    const sync::NodeId source_node = make_node(0xB2);
+    const sync::NodeId watermark_origin = make_node(0xC2);
+    const sync::DbId db_id = make_node(0xE3);
+    const sync::FullSnapshotExportOptions options =
+        complete_snapshot_test_options();
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    if (engine.prune_logical_delivery_markers(watermark_origin, 1u) != 0u) {
+        throw std::runtime_error("malformed watermark setup removed a marker");
+    }
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        MDBX_dbi dbi = 0;
+        check_mdbx(mdbx_dbi_open(
+                       txn.handle(), "_mdbxc_logical_delivery_watermarks",
+                       static_cast<MDBX_db_flags_t>(0), &dbi),
+                   "failed to reopen watermark fixture DBI");
+        std::vector<std::uint8_t> bad_value(1u, 0xFFu);
+        MDBX_val key = {
+            const_cast<std::uint8_t*>(watermark_origin.data()),
+            watermark_origin.size()
+        };
+        MDBX_val value = {
+            bad_value.empty() ? nullptr : &bad_value[0], bad_value.size()
+        };
+        check_mdbx(mdbx_put(txn.handle(), dbi, &key, &value, MDBX_UPSERT),
+                   "failed to create malformed watermark fixture");
+        txn.commit();
+    }
+    const sync::PullResponse response = request_complete_snapshot(
+        engine, db_id, make_node(0xD2));
+    require_logical_snapshot_rejected(response, "malformed watermark");
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_rejects_complete_snapshot_with_malformed_replay_marker() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_bad_replay_marker.mdbx";
+    cleanup(p);
+    const sync::NodeId source_node = make_node(0xB3);
+    const sync::DbId db_id = make_node(0xE4);
+    const sync::FullSnapshotExportOptions options =
+        complete_snapshot_test_options();
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        sync::LogicalDeliveryStore delivery(conn->env_handle());
+        delivery.open(txn.handle());
+        const MDBX_dbi dbi = delivery.handle(txn.handle());
+        std::vector<std::uint8_t> bad_key(1u, 0x01u);
+        std::vector<std::uint8_t> bad_value(1u, 0xFFu);
+        MDBX_val key = {
+            bad_key.empty() ? nullptr : &bad_key[0], bad_key.size()
+        };
+        MDBX_val value = {
+            bad_value.empty() ? nullptr : &bad_value[0], bad_value.size()
+        };
+        check_mdbx(mdbx_put(txn.handle(), dbi, &key, &value, MDBX_UPSERT),
+                   "failed to create malformed replay marker fixture");
+        txn.commit();
+    }
+    const sync::PullResponse response = request_complete_snapshot(
+        engine, db_id, make_node(0xD3));
+    require_logical_snapshot_rejected(response, "malformed replay marker");
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_rejects_complete_snapshot_with_malformed_schema_record() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_bad_schema_record.mdbx";
+    cleanup(p);
+    const sync::NodeId source_node = make_node(0xB4);
+    const sync::DbId db_id = make_node(0xE5);
+    const sync::FullSnapshotExportOptions options =
+        complete_snapshot_test_options();
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        sync::SchemaRegistryStore schemas(conn->env_handle());
+        schemas.open(txn.handle());
+        const MDBX_dbi dbi = schemas.handle(txn.handle());
+        const std::string schema_id = "malformed.schema";
+        std::vector<std::uint8_t> bad_value(1u, 0xFFu);
+        MDBX_val key = {
+            const_cast<char*>(schema_id.data()), schema_id.size()
+        };
+        MDBX_val value = {
+            bad_value.empty() ? nullptr : &bad_value[0], bad_value.size()
+        };
+        check_mdbx(mdbx_put(txn.handle(), dbi, &key, &value, MDBX_UPSERT),
+                   "failed to create malformed schema fixture");
+        txn.commit();
+    }
+    const sync::PullResponse response = request_complete_snapshot(
+        engine, db_id, make_node(0xD4));
+    require_logical_snapshot_rejected(response, "malformed schema record");
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_rejects_complete_snapshot_with_malformed_outbox_envelope() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_bad_outbox_envelope.mdbx";
+    cleanup(p);
+    const sync::NodeId source_node = make_node(0xB5);
+    const sync::DbId destination = make_node(0xE6);
+    const sync::DbId db_id = make_node(0xE7);
+    const sync::FullSnapshotExportOptions options =
+        complete_snapshot_test_options();
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    engine.enqueue_logical_delivery(destination, sync::LogicalChangeFrame());
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        sync::LogicalOutboxStore outbox(conn->env_handle());
+        outbox.open(txn.handle());
+        const MDBX_dbi dbi = outbox.handle(txn.handle());
+        std::vector<std::uint8_t> key;
+        key.push_back(1u);
+        key.push_back(1u);
+        key.insert(key.end(), destination.begin(), destination.end());
+        for (int shift = 7; shift >= 0; --shift) {
+            key.push_back(static_cast<std::uint8_t>(
+                (static_cast<std::uint64_t>(1u) >> (shift * 8)) & 0xffu));
+        }
+        std::vector<std::uint8_t> bad_value(1u, 0xFFu);
+        MDBX_val raw_key = {
+            key.empty() ? nullptr : &key[0], key.size()
+        };
+        MDBX_val raw_value = {
+            bad_value.empty() ? nullptr : &bad_value[0], bad_value.size()
+        };
+        check_mdbx(mdbx_put(txn.handle(), dbi, &raw_key, &raw_value,
+                            MDBX_UPSERT),
+                   "failed to create malformed outbox envelope fixture");
+        txn.commit();
+    }
+    const sync::PullResponse response = request_complete_snapshot(
+        engine, db_id, make_node(0xD5));
+    require_logical_snapshot_rejected(response, "malformed outbox envelope");
+    conn->disconnect();
+    cleanup(p);
+}
+
 mdbxc::sync::FullSnapshotChunk make_import_chunk(
         const mdbxc::sync::NodeId& source_node,
         const mdbxc::sync::DbId& db_id,
@@ -3252,6 +3416,14 @@ int main() {
           &test_engine_rejects_complete_snapshot_with_malformed_frontier },
         { "test_engine_rejects_complete_snapshot_with_malformed_outbox_metadata",
           &test_engine_rejects_complete_snapshot_with_malformed_outbox_metadata },
+        { "test_engine_rejects_complete_snapshot_with_malformed_watermark",
+          &test_engine_rejects_complete_snapshot_with_malformed_watermark },
+        { "test_engine_rejects_complete_snapshot_with_malformed_replay_marker",
+          &test_engine_rejects_complete_snapshot_with_malformed_replay_marker },
+        { "test_engine_rejects_complete_snapshot_with_malformed_schema_record",
+          &test_engine_rejects_complete_snapshot_with_malformed_schema_record },
+        { "test_engine_rejects_complete_snapshot_with_malformed_outbox_envelope",
+          &test_engine_rejects_complete_snapshot_with_malformed_outbox_envelope },
         { "test_engine_imports_full_snapshot_and_bootstraps_cursor",
           &test_engine_imports_full_snapshot_and_bootstraps_cursor },
         { "test_engine_manifest_only_snapshot_does_not_bootstrap_cursor",
