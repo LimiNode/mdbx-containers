@@ -30,6 +30,9 @@ namespace sync {
         ApplyConflict           = 3, ///< Push apply failed on a sync conflict.
         SnapshotRequired        = 4, ///< Requested changelog history was pruned.
         BatchTooLarge           = 5, ///< A single retained batch exceeds the requested limit.
+        SnapshotNotConfigured   = 6, ///< Responder has no explicit snapshot export manifest.
+        SnapshotSessionInvalid  = 7, ///< Snapshot session is unknown, expired, or mismatched.
+        SnapshotSessionBusy     = 8, ///< Responder reached its bounded snapshot-session capacity.
     };
 
     /// \brief Returns a stable diagnostic name for a sync response error code.
@@ -48,6 +51,12 @@ namespace sync {
                 return "snapshot_required";
             case SyncResponseErrorCode::BatchTooLarge:
                 return "batch_too_large";
+            case SyncResponseErrorCode::SnapshotNotConfigured:
+                return "snapshot_not_configured";
+            case SyncResponseErrorCode::SnapshotSessionInvalid:
+                return "snapshot_session_invalid";
+            case SyncResponseErrorCode::SnapshotSessionBusy:
+                return "snapshot_session_busy";
         }
         return "unknown";
     }

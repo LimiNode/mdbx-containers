@@ -342,6 +342,9 @@ namespace sync {
                 case SyncResponseErrorCode::ApplyConflict:
                 case SyncResponseErrorCode::SnapshotRequired:
                 case SyncResponseErrorCode::BatchTooLarge:
+                case SyncResponseErrorCode::SnapshotNotConfigured:
+                case SyncResponseErrorCode::SnapshotSessionInvalid:
+                case SyncResponseErrorCode::SnapshotSessionBusy:
                     detail::append_u16_le(out,
                         static_cast<std::uint16_t>(code));
                     return;
@@ -514,6 +517,15 @@ namespace sync {
                 case static_cast<std::uint16_t>(
                         SyncResponseErrorCode::BatchTooLarge):
                     return SyncResponseErrorCode::BatchTooLarge;
+                case static_cast<std::uint16_t>(
+                        SyncResponseErrorCode::SnapshotNotConfigured):
+                    return SyncResponseErrorCode::SnapshotNotConfigured;
+                case static_cast<std::uint16_t>(
+                        SyncResponseErrorCode::SnapshotSessionInvalid):
+                    return SyncResponseErrorCode::SnapshotSessionInvalid;
+                case static_cast<std::uint16_t>(
+                        SyncResponseErrorCode::SnapshotSessionBusy):
+                    return SyncResponseErrorCode::SnapshotSessionBusy;
             }
             throw std::runtime_error("Invalid SyncResponseErrorCode");
         }

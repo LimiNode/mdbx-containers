@@ -8,8 +8,9 @@ All notable changes to this project will be documented in this file.
   source-tail, replacement-scope, manifest-version, and continuation fields.
   `PullRequest`/`PullResponse` now carry explicit snapshot session state and
   chunk pages; this changes the unreleased `TransportMessageCodec` wire version
-  from 4 to 5. Source export and replacement apply remain explicitly disabled
-  until their lifecycle implementations land.
+  from 4 to 5. `SyncEngine` can materialize an explicitly configured source
+  manifest into bounded, stable pages. Replacement apply and cursor bootstrap
+  remain disabled until their lifecycle implementations land.
 - Sync: document the authoritative-baseline and multi-origin conflict
   boundary for ordered schema-v2. Baseline import and concurrent multi-writer
   resolution remain design-only and are not exposed as partial APIs.
