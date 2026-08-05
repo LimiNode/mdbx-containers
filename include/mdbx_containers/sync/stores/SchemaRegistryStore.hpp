@@ -186,6 +186,43 @@ namespace sync {
             return out;
         }
 
+        /// \brief Returns whether the registry contains any valid schema record.
+        /// \details All entries are decoded before returning so callers do not
+        /// treat malformed persistent schema metadata as an empty registry.
+        bool has_entries(MDBX_txn* txn) const {
+            txn = checked_txn(txn, "SchemaRegistryStore::has_entries");
+            open_const(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "SchemaRegistryStore cursor open failed");
+            bool found = false;
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    if (key.iov_base == nullptr) {
+                        throw std::runtime_error(
+                            "SchemaRegistryStore schema id is null");
+                    }
+                    const char* data = static_cast<const char*>(key.iov_base);
+                    const std::string schema_id(data, data + key.iov_len);
+                    LogicalSchemaRecord decoded;
+                    decode_record(value, schema_id, decoded);
+                    found = true;
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc, "SchemaRegistryStore cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return found;
+        }
+
     private:
         MDBX_txn* checked_txn(MDBX_txn* txn, const char* context) const {
             return checked_txn_env(txn, m_env, context);

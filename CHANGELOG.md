@@ -4,16 +4,24 @@ All notable changes to this project will be documented in this file.
 
 ## Unreleased
 
-- Sync: extend the preparatory `FullSnapshotCodec` boundary with immutable
+- Sync: add a raw-only `FullSnapshotCodec` export/import boundary with immutable
   source-tail, replacement-scope, manifest-version, and continuation fields.
   `PullRequest`/`PullResponse` now carry explicit snapshot session state and
   chunk pages; this changes the unreleased `TransportMessageCodec` wire version
-  from 4 to 5. `SyncEngine` can materialize an explicitly configured source
-  manifest into bounded, stable pages. `SyncEngine` now also stages explicit
-  `ManifestOnly` pages in bounded memory and atomically imports them only into
-  a fresh replica, bootstrapping `_mdbxc_applied` from the immutable source
-  tail. Worker fallback, persisted importer resume, and complete-database
-  replacement remain deferred.
+  from 4 to 5. `SyncEngine` materializes bounded, stable source pages in two
+  explicit scopes: configured `ManifestOnly` replacement copies only its
+  manifest DBIs and never advances global raw-sync progress; automatic
+  `CompleteUserDatabase` inventory replaces all named non-reserved user DBIs
+  and atomically bootstraps `_mdbxc_applied` from the immutable source tail.
+  Complete snapshots fail closed when a source has persistent logical-sync
+  state: schema markers, ordered-delivery frontiers, replay markers or pruning
+  watermarks, and durable outbox state require a separate logical snapshot
+  protocol. Persisted importer resume remains deferred.
+- Sync: add opt-in `SyncWorker` fallback for `SnapshotRequired`. It starts a
+  new empty-cursor `CompleteUserDatabase` source session and drains the bounded
+  fresh-replica importer through its final atomic commit. `ManifestOnly` remains
+  a manual physical replacement mode; existing partial replicas and persisted
+  importer resume remain unsupported.
 - Sync: document the authoritative-baseline and multi-origin conflict
   boundary for ordered schema-v2. Baseline import and concurrent multi-writer
   resolution remain design-only and are not exposed as partial APIs.

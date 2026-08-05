@@ -161,6 +161,14 @@ namespace sync {
             std::mutex mutex;
         };
 
+        class FullSnapshotLogicalStateUnsupported : public std::runtime_error {
+        public:
+            explicit FullSnapshotLogicalStateUnsupported(
+                    const std::string& message =
+                        "complete full snapshot does not support persistent logical-sync state")
+                : std::runtime_error(message) {}
+        };
+
         struct FullSnapshotImportSession {
             enum class ReplacementState {
                 NotSeen,
@@ -272,12 +280,23 @@ namespace sync {
             m_full_snapshot_import_session.reset();
         }
 
+        /// \brief Discards an incomplete in-memory full snapshot import.
+        /// \details No user-DBI mutation has occurred before a snapshot final
+        /// page, so this is safe after cancellation, transport failure, or a
+        /// worker restart. It never alters durable replication metadata.
+        void discard_full_snapshot_import() {
+            std::lock_guard<std::mutex> lock(m_full_snapshot_import_mutex);
+            m_full_snapshot_import_session.reset();
+        }
+
         /// \brief Stages or atomically applies one full snapshot chunk.
-        /// \details Only \c ManifestOnly replacement is currently accepted.
-        /// Every page is validated against immutable metadata from page zero.
-        /// No destination user DBI changes before the final page; that page
-        /// verifies a fresh manifest target, applies the complete staged plan,
-        /// and bootstraps the applied cursor in one write transaction.
+        /// \details Every page is validated against immutable metadata from
+        /// page zero. No destination user DBI changes before the final page;
+        /// that page verifies a fresh manifest target and applies the complete
+        /// staged plan in one write transaction. \c ManifestOnly replaces only
+        /// its manifest DBIs and leaves global raw-sync progress unchanged.
+        /// \c CompleteUserDatabase replaces the complete named-user-DBI
+        /// inventory and bootstraps the applied cursor from its source tail.
         FullSnapshotImportResult apply_full_snapshot_chunk(
                 const FullSnapshotChunk& chunk) {
             FullSnapshotCodec::validate(chunk);
@@ -1523,8 +1542,7 @@ namespace sync {
             materialized_bytes += add;
         }
 
-        std::string next_full_snapshot_id() {
-            std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+        std::string next_full_snapshot_id_locked() {
             ++m_next_full_snapshot_session_id;
             return std::string("snapshot-") +
                 std::to_string(m_next_full_snapshot_session_id);
@@ -1547,13 +1565,33 @@ namespace sync {
             }
         }
 
+        void require_raw_only_complete_snapshot_source(MDBX_txn* txn) const {
+            try {
+                SchemaRegistryStore schemas(m_conn->env_handle());
+                LogicalDeliveryStore delivery(m_conn->env_handle());
+                LogicalDeliveryOrderStore order(m_conn->env_handle());
+                LogicalOutboxStore outbox(m_conn->env_handle());
+                if (schemas.has_entries(txn) ||
+                    delivery.has_persistent_state(txn) ||
+                    order.has_entries(txn) ||
+                    outbox.has_persistent_state(txn)) {
+                    throw FullSnapshotLogicalStateUnsupported();
+                }
+            } catch (const FullSnapshotLogicalStateUnsupported&) {
+                throw;
+            } catch (const std::exception& e) {
+                throw FullSnapshotLogicalStateUnsupported(
+                    std::string(
+                        "complete full snapshot cannot validate persistent logical-sync state: ") +
+                    e.what());
+            }
+        }
+
         std::shared_ptr<FullSnapshotSession> materialize_full_snapshot(
                 const FullSnapshotExportOptions& options,
-                const std::string& snapshot_id,
                 const NodeId& requester) const {
             std::shared_ptr<FullSnapshotSession> session(
                 new FullSnapshotSession());
-            session->snapshot_id = snapshot_id;
             session->requester = requester;
             session->replacement_scope = options.replacement_scope;
             session->last_access = std::chrono::steady_clock::now();
@@ -1567,6 +1605,11 @@ namespace sync {
                 compare_node_id(session->source_db_uuid, NodeId()) == 0) {
                 throw std::logic_error(
                     "full snapshot source identity is not initialized");
+            }
+
+            if (options.replacement_scope ==
+                FullSnapshotScope::CompleteUserDatabase) {
+                require_raw_only_complete_snapshot_source(txn.handle());
             }
 
             session->manifest = options.replacement_scope ==
@@ -1783,8 +1826,15 @@ namespace sync {
                     ++m_full_snapshot_creating;
                 }
                 try {
-                    session = materialize_full_snapshot(
-                        options, next_full_snapshot_id(), request.requester);
+                    session = materialize_full_snapshot(options, request.requester);
+                } catch (const FullSnapshotLogicalStateUnsupported& e) {
+                    std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+                    --m_full_snapshot_creating;
+                    out.ok = false;
+                    out.error = e.what();
+                    out.error_code =
+                        SyncResponseErrorCode::SnapshotLogicalStateUnsupported;
+                    return out;
                 } catch (...) {
                     std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
                     --m_full_snapshot_creating;
@@ -1794,6 +1844,7 @@ namespace sync {
                     std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
                     --m_full_snapshot_creating;
                     prune_expired_full_snapshot_sessions_locked();
+                    session->snapshot_id = next_full_snapshot_id_locked();
                     m_full_snapshot_sessions[session->snapshot_id] = session;
                 }
             } else {

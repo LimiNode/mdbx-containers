@@ -2593,11 +2593,349 @@ void test_sync_node_session_rolls_back_hooks_when_worker_start_fails() {
     cleanup(replica_path);
 }
 
+void test_worker_recovers_fresh_replica_with_full_snapshot() {
+    using namespace mdbxc;
+    const std::string source_path = "test_worker_snapshot_source.mdbx";
+    const std::string replica_path = "test_worker_snapshot_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xA9);
+    const sync::NodeId replica_node = make_node(0xB9);
+    const sync::DbId db_id = make_node(0xD9);
+    sync::FullSnapshotExportOptions snapshot_options;
+    snapshot_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
+    snapshot_options.max_materialized_operations = 16u;
+    snapshot_options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source_engine(
+        source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    source_engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> source_documents(
+        source_conn, "documents");
+    source_documents.insert_or_assign("one", "1");
+    source_documents.insert_or_assign("two", "2");
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(source_conn->env_handle());
+        changelog.open(txn.handle());
+        const std::vector<std::uint8_t> encoded =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(source_node, 3u, "documents", 0x21u));
+        changelog.append(txn.handle(), source_node, 3u, encoded);
+        txn.commit();
+    }
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine replica_engine(replica_conn);
+    replica_engine.initialize_local_identity(replica_node, db_id);
+    sync::DirectSyncPeer peer(&source_engine);
+    {
+        sync::SyncWorker disabled_worker(replica_engine, peer);
+        const sync::SyncWorkerRoundResult disabled =
+            disabled_worker.run_once();
+        if (disabled.ok ||
+            disabled.sync_error_code != sync::SyncResponseErrorCode::SnapshotRequired) {
+            throw std::runtime_error(
+                "worker enabled full snapshot fallback without opt-in");
+        }
+    }
+    sync::SyncWorkerOptions options;
+    options.enable_full_snapshot_fallback = true;
+    options.max_bytes = 1u;
+    options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker worker(replica_engine, peer, options);
+
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (!result.ok || result.pages_pulled < 2u ||
+        result.batches_applied != 0u || result.has_more ||
+        result.sync_error_code != sync::SyncResponseErrorCode::None) {
+        throw std::runtime_error(
+            "worker did not complete fresh-replica full snapshot fallback");
+    }
+    KeyValueTable<std::string, std::string> replica_documents(
+        replica_conn, "documents");
+    if (kv_or_throw(replica_conn, replica_documents, std::string("one"),
+                    "snapshot one") != "1" ||
+        kv_or_throw(replica_conn, replica_documents, std::string("two"),
+                    "snapshot two") != "2" ||
+        replica_engine.applied_cursor().last_seq_for(source_node) != 3u) {
+        throw std::runtime_error(
+            "worker full snapshot fallback did not bootstrap replica state");
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
+void test_worker_snapshot_recovery_preserves_remote_origin_cursor() {
+    using namespace mdbxc;
+    const std::string snapshot_source_path =
+        "test_worker_snapshot_remote_source.mdbx";
+    const std::string remote_origin_path =
+        "test_worker_snapshot_remote_origin.mdbx";
+    const std::string replica_path =
+        "test_worker_snapshot_remote_replica.mdbx";
+    cleanup(snapshot_source_path);
+    cleanup(remote_origin_path);
+    cleanup(replica_path);
+
+    const sync::NodeId snapshot_source_node = make_node(0xAA);
+    const sync::NodeId remote_origin_node = make_node(0xBA);
+    const sync::NodeId replica_node = make_node(0xCA);
+    const sync::DbId db_id = make_node(0xDA);
+    sync::FullSnapshotExportOptions snapshot_options;
+    snapshot_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
+    snapshot_options.max_materialized_operations = 16u;
+    snapshot_options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> snapshot_source_conn =
+        open_env(snapshot_source_path);
+    sync::SyncEngine snapshot_source(
+        snapshot_source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    snapshot_source.initialize_local_identity(snapshot_source_node, db_id);
+    sync::PushRequest applied_remote;
+    applied_remote.sender = remote_origin_node;
+    applied_remote.db_id = db_id;
+    applied_remote.batches.push_back(
+        make_raw_batch(remote_origin_node, 1u, "documents", 0x41u));
+    if (!snapshot_source.handle_push(applied_remote).ok) {
+        throw std::runtime_error(
+            "snapshot source did not apply remote origin sequence one");
+    }
+    {
+        auto txn = snapshot_source_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(snapshot_source_conn->env_handle());
+        changelog.open(txn.handle());
+        const std::vector<std::uint8_t> encoded =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(snapshot_source_node, 3u, "documents", 0x31u));
+        changelog.append(txn.handle(), snapshot_source_node, 3u, encoded);
+        txn.commit();
+    }
+
+    std::shared_ptr<Connection> remote_origin_conn = open_env(remote_origin_path);
+    sync::SyncEngine remote_origin(remote_origin_conn);
+    remote_origin.initialize_local_identity(remote_origin_node, db_id);
+    {
+        auto txn = remote_origin_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(remote_origin_conn->env_handle());
+        changelog.open(txn.handle());
+        const std::vector<std::uint8_t> first =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(remote_origin_node, 1u, "documents", 0x41u));
+        const std::vector<std::uint8_t> second =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(remote_origin_node, 2u, "documents", 0x42u));
+        changelog.append(txn.handle(), remote_origin_node, 1u, first);
+        changelog.append(txn.handle(), remote_origin_node, 2u, second);
+        txn.commit();
+    }
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine replica(replica_conn);
+    replica.initialize_local_identity(replica_node, db_id);
+    sync::DirectSyncPeer snapshot_peer(&snapshot_source);
+    sync::SyncWorkerOptions snapshot_worker_options;
+    snapshot_worker_options.enable_full_snapshot_fallback = true;
+    snapshot_worker_options.max_bytes = 1u;
+    snapshot_worker_options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker snapshot_worker(
+        replica, snapshot_peer, snapshot_worker_options);
+    const sync::SyncWorkerRoundResult snapshot_result =
+        snapshot_worker.run_once();
+    if (!snapshot_result.ok ||
+        replica.applied_cursor().last_seq_for(remote_origin_node) != 1u) {
+        throw std::runtime_error(
+            "snapshot recovery did not preserve remote origin progress");
+    }
+
+    sync::DirectSyncPeer remote_origin_peer(&remote_origin);
+    sync::SyncWorkerOptions incremental_options;
+    incremental_options.max_bytes = 8192u;
+    incremental_options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker incremental_worker(
+        replica, remote_origin_peer, incremental_options);
+    const sync::SyncWorkerRoundResult incremental_result =
+        incremental_worker.run_once();
+    if (!incremental_result.ok || incremental_result.batches_applied != 1u ||
+        replica.applied_cursor().last_seq_for(remote_origin_node) != 2u) {
+        throw std::runtime_error(
+            "incremental remote origin delivery failed after snapshot recovery");
+    }
+
+    snapshot_source_conn->disconnect();
+    remote_origin_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(snapshot_source_path);
+    cleanup(remote_origin_path);
+    cleanup(replica_path);
+}
+
+void test_worker_rejects_manifest_only_snapshot_fallback() {
+    using namespace mdbxc;
+    const std::string source_path = "test_worker_manifest_only_source.mdbx";
+    const std::string replica_path = "test_worker_manifest_only_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xAB);
+    const sync::NodeId replica_node = make_node(0xBB);
+    const sync::DbId db_id = make_node(0xDB);
+    sync::FullSnapshotExportOptions snapshot_options;
+    sync::FullSnapshotManifestEntry entry;
+    entry.dbi_name = "documents";
+    snapshot_options.manifest.push_back(entry);
+    snapshot_options.max_materialized_operations = 16u;
+    snapshot_options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(
+        source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(source_conn, "documents");
+    documents.insert_or_assign("document", "value");
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(source_conn->env_handle());
+        changelog.open(txn.handle());
+        const std::vector<std::uint8_t> encoded =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(source_node, 3u, "documents", 0x51u));
+        changelog.append(txn.handle(), source_node, 3u, encoded);
+        txn.commit();
+    }
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine replica(replica_conn);
+    replica.initialize_local_identity(replica_node, db_id);
+    sync::DirectSyncPeer peer(&source);
+    sync::SyncWorkerOptions options;
+    options.enable_full_snapshot_fallback = true;
+    options.max_bytes = 8192u;
+    options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker worker(replica, peer, options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (result.ok ||
+        result.sync_error_code != sync::SyncResponseErrorCode::SnapshotSessionInvalid ||
+        replica.applied_cursor().last_seq_for(source_node) != 0u) {
+        throw std::runtime_error(
+            "worker accepted ManifestOnly snapshot fallback");
+    }
+    {
+        auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi dbi = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), "documents", static_cast<MDBX_db_flags_t>(0), &dbi);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "ManifestOnly worker fallback changed destination DBI");
+        }
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
+void test_worker_rejects_logical_complete_snapshot_fallback() {
+    using namespace mdbxc;
+    const std::string source_path = "test_worker_logical_snapshot_source.mdbx";
+    const std::string replica_path = "test_worker_logical_snapshot_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xAC);
+    const sync::NodeId replica_node = make_node(0xBC);
+    const sync::DbId db_id = make_node(0xDC);
+    sync::FullSnapshotExportOptions snapshot_options;
+    snapshot_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
+    snapshot_options.max_materialized_operations = 16u;
+    snapshot_options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(
+        source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(
+        source_conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = db_id;
+    envelope.origin_node_id = make_node(0xCD);
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "worker-empty-ordered-frame";
+    const sync::LogicalDeliveryAcknowledgement acknowledgement =
+        source.apply_ordered_logical_delivery_envelope(envelope);
+    if (!acknowledgement.ok ||
+        acknowledgement.acknowledged_through != 1u) {
+        throw std::runtime_error(
+            "failed to prepare worker empty ordered logical state");
+    }
+    {
+        auto txn = source_conn->transaction(TransactionMode::READ_ONLY);
+        sync::SchemaRegistryStore schemas(source_conn->env_handle());
+        if (schemas.has_entries(txn.handle())) {
+            throw std::runtime_error(
+                "worker empty ordered frame unexpectedly registered a schema");
+        }
+    }
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(source_conn->env_handle());
+        changelog.open(txn.handle());
+        const std::vector<std::uint8_t> encoded =
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(source_node, 3u, "documents", 0x51u));
+        changelog.append(txn.handle(), source_node, 3u, encoded);
+        txn.commit();
+    }
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine replica(replica_conn);
+    replica.initialize_local_identity(replica_node, db_id);
+    sync::DirectSyncPeer peer(&source);
+    sync::SyncWorkerOptions options;
+    options.enable_full_snapshot_fallback = true;
+    options.max_bytes = 8192u;
+    options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker worker(replica, peer, options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (result.ok ||
+        result.sync_error_code !=
+            sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported ||
+        result.sync_error_retryable ||
+        replica.applied_cursor().last_seq_for(source_node) != 0u) {
+        throw std::runtime_error(
+            "worker accepted a logical complete snapshot fallback");
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
 } // namespace
 
 int main() {
     struct Case { const char* name; void (*fn)(); };
     const Case cases[] = {
+        { "test_worker_recovers_fresh_replica_with_full_snapshot",
+          &test_worker_recovers_fresh_replica_with_full_snapshot },
+        { "test_worker_snapshot_recovery_preserves_remote_origin_cursor",
+          &test_worker_snapshot_recovery_preserves_remote_origin_cursor },
+        { "test_worker_rejects_manifest_only_snapshot_fallback",
+          &test_worker_rejects_manifest_only_snapshot_fallback },
+        { "test_worker_rejects_logical_complete_snapshot_fallback",
+          &test_worker_rejects_logical_complete_snapshot_fallback },
         { "test_worker_run_once_drains_paginated_pull",
           &test_worker_run_once_drains_paginated_pull },
         { "test_worker_start_stop_idle", &test_worker_start_stop_idle },

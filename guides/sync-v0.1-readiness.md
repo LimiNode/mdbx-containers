@@ -161,10 +161,16 @@ tables.
 - Extend `KeyMultiValueTable` logical capture only after every added bulk or
   reconcile operation has explicit multiset replay semantics and round-trip
   coverage. Raw capture remains disabled.
-- Integrate worker fallback, persisted importer resume, and explicit complete
-  replacement before treating `SnapshotRequired` as automatically recoverable
-  by sync itself. The current manual importer accepts only fresh-replica
-  `ManifestOnly` sessions.
+- Add persisted importer resume before treating `SnapshotRequired` as
+  universally recoverable by sync itself. The opt-in worker fallback accepts
+  only fresh-replica `CompleteUserDatabase` sessions; manual `ManifestOnly`
+  imports never bootstrap global raw-sync progress.
+- Design scope-aware partial snapshot continuation separately from complete
+  database recovery. A partial manifest cannot bootstrap the global per-origin
+  applied cursor: this requires a stable scope identity, per-scope or per-DBI
+  applied progress, scope-filtered changelog pull and retention, and explicit
+  handling for DBI membership changes. Do not add these piecemeal to the raw
+  sync path; implement them only when a consumer needs selective replication.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
   multi-writer convergence for `KeyMultiValueTable`.
 - Design baseline import and multi-origin histories for schema v2 separately;
