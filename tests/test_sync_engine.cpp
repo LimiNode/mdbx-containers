@@ -55,6 +55,42 @@ std::shared_ptr<mdbxc::Connection> open_env(const std::string& path) {
     return Connection::create(cfg);
 }
 
+mdbxc::sync::FullSnapshotExportOptions complete_snapshot_test_options() {
+    mdbxc::sync::FullSnapshotExportOptions options;
+    options.replacement_scope =
+        mdbxc::sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 16u;
+    options.max_materialized_bytes = 4096u;
+    options.max_active_sessions = 1u;
+    return options;
+}
+
+void require_logical_snapshot_rejected(
+        const mdbxc::sync::PullResponse& response,
+        const char* context) {
+    if (response.ok || response.is_full_snapshot ||
+        !response.snapshot_chunk.snapshot_id.empty() ||
+        response.error_code !=
+            mdbxc::sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported ||
+        response.error_retryable) {
+        throw std::runtime_error(
+            std::string("complete snapshot accepted ") + context);
+    }
+}
+
+mdbxc::sync::PullResponse request_complete_snapshot(
+        mdbxc::sync::SyncEngine& engine,
+        const mdbxc::sync::DbId& db_id,
+        const mdbxc::sync::NodeId& requester) {
+    mdbxc::sync::PullRequest request;
+    request.requester = requester;
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    return engine.handle_pull(request);
+}
+
 class CountingApplyObserver : public mdbxc::sync::ISyncApplyObserver {
 public:
     CountingApplyObserver()
@@ -2000,6 +2036,141 @@ void test_engine_rejects_complete_snapshot_with_logical_outbox_state() {
     cleanup(p);
 }
 
+void test_engine_rejects_complete_snapshot_with_frontier_only() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_frontier_only.mdbx";
+    cleanup(p);
+    const sync::NodeId source_node = make_node(0xAE);
+    const sync::NodeId frontier_origin = make_node(0xBE);
+    const sync::DbId db_id = make_node(0xDE);
+    const sync::FullSnapshotExportOptions options =
+        complete_snapshot_test_options();
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        sync::LogicalDeliveryOrderStore order(conn->env_handle());
+        order.advance(txn.handle(), frontier_origin, 1u);
+        txn.commit();
+    }
+    const sync::PullResponse response = request_complete_snapshot(
+        engine, db_id, make_node(0xCE));
+    require_logical_snapshot_rejected(response, "frontier-only state");
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_rejects_complete_snapshot_with_watermark_only() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_watermark_only.mdbx";
+    cleanup(p);
+    const sync::NodeId source_node = make_node(0xAF);
+    const sync::NodeId watermark_origin = make_node(0xBF);
+    const sync::DbId db_id = make_node(0xDF);
+    const sync::FullSnapshotExportOptions options =
+        complete_snapshot_test_options();
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    if (engine.prune_logical_delivery_markers(watermark_origin, 1u) != 0u) {
+        throw std::runtime_error("watermark-only setup removed a marker");
+    }
+    const sync::PullResponse response = request_complete_snapshot(
+        engine, db_id, make_node(0xCF));
+    require_logical_snapshot_rejected(response, "watermark-only state");
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_rejects_complete_snapshot_with_malformed_frontier() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_bad_frontier.mdbx";
+    cleanup(p);
+    const sync::NodeId source_node = make_node(0xB0);
+    const sync::NodeId frontier_origin = make_node(0xC0);
+    const sync::DbId db_id = make_node(0xE0);
+    const sync::FullSnapshotExportOptions options =
+        complete_snapshot_test_options();
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        sync::LogicalDeliveryOrderStore order(conn->env_handle());
+        order.open(txn.handle());
+        MDBX_dbi dbi = 0;
+        check_mdbx(mdbx_dbi_open(
+                       txn.handle(), "_mdbxc_logical_delivery_order",
+                       static_cast<MDBX_db_flags_t>(0), &dbi),
+                   "failed to reopen frontier fixture DBI");
+        std::vector<std::uint8_t> bad_value(1u, 0xFFu);
+        MDBX_val key = {
+            const_cast<std::uint8_t*>(frontier_origin.data()),
+            frontier_origin.size()
+        };
+        MDBX_val value = {
+            bad_value.empty() ? nullptr : &bad_value[0], bad_value.size()
+        };
+        check_mdbx(mdbx_put(txn.handle(), dbi, &key, &value, MDBX_UPSERT),
+                   "failed to create malformed frontier fixture");
+        txn.commit();
+    }
+    const sync::PullResponse response = request_complete_snapshot(
+        engine, db_id, make_node(0xD0));
+    require_logical_snapshot_rejected(response, "malformed frontier");
+    conn->disconnect();
+    cleanup(p);
+}
+
+void test_engine_rejects_complete_snapshot_with_malformed_outbox_metadata() {
+    using namespace mdbxc;
+    const std::string p = "test_engine_complete_snapshot_bad_outbox.mdbx";
+    cleanup(p);
+    const sync::NodeId source_node = make_node(0xB1);
+    const sync::DbId destination = make_node(0xE1);
+    const sync::DbId db_id = make_node(0xE2);
+    const sync::FullSnapshotExportOptions options =
+        complete_snapshot_test_options();
+    std::shared_ptr<Connection> conn = open_env(p);
+    sync::SyncEngine engine(conn, sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(conn, "documents");
+    documents.insert_or_assign("document", "raw-value");
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        sync::LogicalOutboxStore outbox(conn->env_handle());
+        outbox.open(txn.handle());
+        const MDBX_dbi dbi = outbox.handle(txn.handle());
+        std::vector<std::uint8_t> key;
+        key.push_back(1u);
+        key.push_back(0u);
+        key.insert(key.end(), destination.begin(), destination.end());
+        std::vector<std::uint8_t> bad_value(1u, 0xFFu);
+        MDBX_val raw_key = {
+            key.empty() ? nullptr : &key[0], key.size()
+        };
+        MDBX_val raw_value = {
+            bad_value.empty() ? nullptr : &bad_value[0], bad_value.size()
+        };
+        check_mdbx(mdbx_put(txn.handle(), dbi, &raw_key, &raw_value,
+                            MDBX_UPSERT),
+                   "failed to create malformed outbox fixture");
+        txn.commit();
+    }
+    const sync::PullResponse response = request_complete_snapshot(
+        engine, db_id, make_node(0xD1));
+    require_logical_snapshot_rejected(response, "malformed outbox metadata");
+    conn->disconnect();
+    cleanup(p);
+}
+
 mdbxc::sync::FullSnapshotChunk make_import_chunk(
         const mdbxc::sync::NodeId& source_node,
         const mdbxc::sync::DbId& db_id,
@@ -3073,6 +3244,14 @@ int main() {
           &test_engine_rejects_complete_snapshot_with_empty_ordered_frame },
         { "test_engine_rejects_complete_snapshot_with_logical_outbox_state",
           &test_engine_rejects_complete_snapshot_with_logical_outbox_state },
+        { "test_engine_rejects_complete_snapshot_with_frontier_only",
+          &test_engine_rejects_complete_snapshot_with_frontier_only },
+        { "test_engine_rejects_complete_snapshot_with_watermark_only",
+          &test_engine_rejects_complete_snapshot_with_watermark_only },
+        { "test_engine_rejects_complete_snapshot_with_malformed_frontier",
+          &test_engine_rejects_complete_snapshot_with_malformed_frontier },
+        { "test_engine_rejects_complete_snapshot_with_malformed_outbox_metadata",
+          &test_engine_rejects_complete_snapshot_with_malformed_outbox_metadata },
         { "test_engine_imports_full_snapshot_and_bootstraps_cursor",
           &test_engine_imports_full_snapshot_and_bootstraps_cursor },
         { "test_engine_manifest_only_snapshot_does_not_bootstrap_cursor",
