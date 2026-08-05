@@ -85,6 +85,17 @@ namespace sync {
         /// \brief Whether one round drains all \c has_more pages immediately.
         bool drain_pages = true;
 
+        /// \brief Requests an explicit fresh-replica snapshot after
+        /// \c SnapshotRequired.
+        /// \details Disabled by default. When enabled, the worker starts a
+        /// new \c CompleteUserDatabase snapshot session with an empty cursor
+        /// and drains it through the final page in the current round.
+        /// \c ManifestOnly is a manual physical replacement mode and never a
+        /// raw-sync recovery fallback. The receiver importer still rejects
+        /// non-fresh targets; this is not an in-place repair path for a
+        /// partially replicated database.
+        bool enable_full_snapshot_fallback = false;
+
         /// \brief How the background worker handles permanent transport hints.
         /// \details The default keeps v0.1 retry hints advisory. Set to
         /// \c StopWorker when a classified permanent transport failure should
@@ -236,7 +247,7 @@ namespace sync {
         }
     };
 
-    /// \brief Drives incremental pull/apply sync in a caller-owned lifecycle.
+    /// \brief Drives pull/apply sync in a caller-owned lifecycle.
     /// \details The worker owns only its std::thread. It does not own the
     /// supplied \c SyncEngine or \c ISyncPeer; both must outlive the worker.
     /// The \c SyncWorker object itself must outlive its worker thread and must
@@ -251,7 +262,10 @@ namespace sync {
     /// The implementation never keeps a local MDBX transaction open while
     /// waiting in \c ISyncPeer::pull(), idle sleep, or backoff sleep. Pulled
     /// batches are applied through \c SyncEngine::handle_push(), which opens
-    /// and commits a short local write transaction for each pulled page.
+    /// and commits a short local write transaction for each pulled page. With
+    /// opt-in full snapshot fallback, the worker accepts only a
+    /// \c CompleteUserDatabase session, stages all pages, and the engine
+    /// commits its fresh-replica replacement only after the final page.
     /// Stop requests cancel the active request token and call
     /// \c ISyncPeer::request_cancel() at most once for each observed in-flight
     /// peer call. Cancellation is best-effort: \c stop(), \c join(), and the
@@ -478,6 +492,33 @@ namespace sync {
             bool        m_active;
         };
 
+        class FullSnapshotImportResetGuard {
+        public:
+            explicit FullSnapshotImportResetGuard(SyncEngine& engine)
+                : m_engine(engine), m_active(true) {
+            }
+
+            ~FullSnapshotImportResetGuard() {
+                if (!m_active) return;
+                try {
+                    m_engine.discard_full_snapshot_import();
+                } catch (...) {
+                }
+            }
+
+            void dismiss() {
+                m_active = false;
+            }
+
+            FullSnapshotImportResetGuard(const FullSnapshotImportResetGuard&) = delete;
+            FullSnapshotImportResetGuard& operator=(
+                const FullSnapshotImportResetGuard&) = delete;
+
+        private:
+            SyncEngine& m_engine;
+            bool        m_active;
+        };
+
         static void validate_options(const SyncWorkerOptions& options) {
             if (options.max_batches == 0) {
                 throw std::invalid_argument(
@@ -573,6 +614,11 @@ namespace sync {
                         notify_stage_changed(event);
                     }
                     if (!response.ok) {
+                        if (response.error_code ==
+                                SyncResponseErrorCode::SnapshotRequired &&
+                            m_options.enable_full_snapshot_fallback) {
+                            return run_full_snapshot_fallback(request, result);
+                        }
                         result.ok = false;
                         result.error = response.error.empty()
                             ? "pull failed"
@@ -690,6 +736,134 @@ namespace sync {
                 result.retry_hint = m_peer.last_retry_hint();
             }
             return result;
+        }
+
+        SyncWorkerRoundResult run_full_snapshot_fallback(
+                const PullRequest& incremental_request,
+                SyncWorkerRoundResult result) {
+            m_engine.discard_full_snapshot_import();
+            FullSnapshotImportResetGuard reset_guard(m_engine);
+            PullRequest request = incremental_request;
+            request.request_full_snapshot = true;
+            request.have = SyncCursor();
+            request.full_snapshot_id.clear();
+            request.full_snapshot_continuation.clear();
+            request.cancel_token = CancellationToken();
+
+            for (;;) {
+                if (stop_requested()) {
+                    result.has_more = true;
+                    return result;
+                }
+
+                PullResponse response;
+                {
+                    CancellationToken cancel_token;
+                    PeerCallGuard peer_call(*this, cancel_token);
+                    if (!peer_call.active()) {
+                        result.has_more = true;
+                        return result;
+                    }
+                    notify_stage_changed(make_stage_event(
+                        SyncWorkerStage::PullStarted, result));
+                    request.cancel_token = cancel_token;
+                    response = m_peer.pull(request);
+                }
+                {
+                    SyncWorkerStageEvent event = make_stage_event(
+                        SyncWorkerStage::PullFinished, result);
+                    event.has_more = response.has_more;
+                    event.ok = response.ok;
+                    event.error = response.error;
+                    event.sync_error_code = response.error_code;
+                    event.sync_error_retryable = response.error_retryable;
+                    notify_stage_changed(event);
+                }
+                if (!response.ok) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error = response.error.empty()
+                        ? "full snapshot pull failed"
+                        : response.error;
+                    result.retry_hint = m_peer.last_retry_hint();
+                    result.sync_error_code = response.error_code;
+                    result.sync_error_retryable = response.error_retryable;
+                    return result;
+                }
+                if (!response.is_full_snapshot || !response.batches.empty() ||
+                    response.has_more != response.snapshot_chunk.has_more) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error =
+                        "full snapshot pull returned an invalid response shape";
+                    return result;
+                }
+                if (response.snapshot_chunk.replacement_scope !=
+                    FullSnapshotScope::CompleteUserDatabase) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error =
+                        "full snapshot fallback requires CompleteUserDatabase scope";
+                    result.sync_error_code =
+                        SyncResponseErrorCode::SnapshotSessionInvalid;
+                    result.sync_error_retryable = false;
+                    return result;
+                }
+                ++result.pages_pulled;
+                if (stop_requested() || !begin_apply_stage() ||
+                    !enter_apply_gate()) {
+                    m_engine.discard_full_snapshot_import();
+                    result.has_more = response.has_more;
+                    return result;
+                }
+                {
+                    SyncWorkerStageEvent event = make_stage_event(
+                        SyncWorkerStage::ApplyStarted, result);
+                    event.has_more = response.has_more;
+                    notify_stage_changed(event);
+                }
+
+                const FullSnapshotImportResult imported =
+                    m_engine.apply_full_snapshot_chunk(response.snapshot_chunk);
+                {
+                    SyncWorkerStageEvent event = make_stage_event(
+                        SyncWorkerStage::ApplyFinished, result);
+                    event.has_more = response.has_more;
+                    event.ok = true;
+                    notify_stage_changed(event);
+                }
+                if (response.has_more && imported.completed) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error =
+                        "full snapshot importer completed before final page";
+                    return result;
+                }
+                if (!response.has_more && !imported.completed) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error =
+                        "full snapshot importer did not complete final page";
+                    return result;
+                }
+
+                result.has_more = response.has_more;
+                if (!response.has_more) {
+                    result.progress = response.remote_tail_known
+                        ? make_progress_estimate(response.remote_tail,
+                                                 m_engine.applied_cursor(),
+                                                 result.batches_applied)
+                        : SyncWorkerProgressEstimate();
+                    result.sync_error_code = SyncResponseErrorCode::None;
+                    result.sync_error_retryable = false;
+                    reset_guard.dismiss();
+                    return result;
+                }
+                request.full_snapshot_id =
+                    response.snapshot_chunk.snapshot_id;
+                request.full_snapshot_continuation =
+                    response.snapshot_chunk.continuation;
+            }
         }
 
         SyncWorkerStageEvent make_stage_event(
