@@ -57,6 +57,22 @@ namespace sync {
             std::chrono::seconds(300);
     };
 
+    /// \brief Receiver-side bounds for one staged full snapshot import.
+    /// \details The initial importer keeps pages only in process memory until
+    /// the final page. These bounds prevent a peer from accumulating an
+    /// unbounded replacement plan before the one atomic destination commit.
+    struct FullSnapshotImportOptions {
+        std::uint64_t max_staged_operations = 1000000u;
+        std::uint64_t max_staged_bytes =
+            256ULL * 1024ULL * 1024ULL;
+    };
+
+    /// \brief Progress returned after accepting one full snapshot chunk.
+    struct FullSnapshotImportResult {
+        bool completed = false;
+        std::uint64_t next_chunk_index = 0u;
+    };
+
     /// \brief One chunk of a full database export.
     /// \details Snapshot chunks are not changelog batches. They carry a
     /// stable source identity, an immutable manifest, and a nested raw batch

@@ -212,24 +212,25 @@ Operational rules:
   for future logical-key conflict resolution, but `SyncEngine` rejects it until
   timestamp/version-based apply semantics exist. `time_unix_ns` is metadata,
   not a reliable conflict authority. `Custom` is deferred to v0.2.
-- `PullRequest::request_full_snapshot=true` is reserved for the future
-  full export/import protocol. v0.1 responders reject it as
-  `PullResponse{ok=false, error=..., error_code=UnsupportedFullSnapshot}`.
-  This is a sync-level protocol rejection, not a transport retry hint. Code
+- `PullRequest::request_full_snapshot=true` starts an explicit source session
+  only when `SyncEngine` has a non-empty `FullSnapshotExportOptions::manifest`.
+  Otherwise it returns
+  `PullResponse{ok=false, error_code=SnapshotNotConfigured}`. The manual
+  receiver path accepts only bounded `ManifestOnly` chunks into a fresh
+  replica; worker-driven fallback and persisted resume remain deferred. Code
   that needs machine classification should inspect `SyncResponseErrorCode`
   instead of parsing the human-readable `error` string.
 - Pull from a cursor older than retained changelog history fails as
   `PullResponse{ok=false, error_code=SnapshotRequired}`. The response carries no
   batches because applying a later retained batch would produce a sequence gap
-  on the receiver. Until a snapshot protocol is implemented, the caller must
-  provision a fresh replica or use an out-of-band snapshot.
-- The deferred full snapshot protocol is specified in
-  `include/mdbx_containers/sync/DESIGN.md`. It must stay separate from
-  changelog replay: snapshot chunks need explicit framing, user-DBI-only apply
-  rules, a stable `snapshot_id`, an immutable manifest/tail from one source read
-  view, continuation-token validation, cursor bootstrap semantics, and
-  interruption behavior before `PullRequest::request_full_snapshot=true` can be
-  accepted.
+  on the receiver. A caller can explicitly drive the bounded fresh-replica
+  snapshot session, but sync workers do not yet turn this response into an
+  automatic fallback.
+- Full snapshot implementation notes are in
+  `include/mdbx_containers/sync/DESIGN.md`. The manual importer remains separate
+  from changelog replay: it accepts user-DBI-only chunks with an immutable
+  `snapshot_id`, manifest/tail, and continuation sequence, then commits the
+  replacement and cursor bootstrap atomically only at the final page.
 - `PushResponse::error_retryable` describes sync-level recovery. Sequence gaps
   are retryable after the receiver catches up from its persistent applied
   cursor; DBI name/flag conflicts, reserved DBI writes, and unsupported

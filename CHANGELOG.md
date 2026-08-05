@@ -9,8 +9,11 @@ All notable changes to this project will be documented in this file.
   `PullRequest`/`PullResponse` now carry explicit snapshot session state and
   chunk pages; this changes the unreleased `TransportMessageCodec` wire version
   from 4 to 5. `SyncEngine` can materialize an explicitly configured source
-  manifest into bounded, stable pages. Replacement apply and cursor bootstrap
-  remain disabled until their lifecycle implementations land.
+  manifest into bounded, stable pages. `SyncEngine` now also stages explicit
+  `ManifestOnly` pages in bounded memory and atomically imports them only into
+  a fresh replica, bootstrapping `_mdbxc_applied` from the immutable source
+  tail. Worker fallback, persisted importer resume, and complete-database
+  replacement remain deferred.
 - Sync: document the authoritative-baseline and multi-origin conflict
   boundary for ordered schema-v2. Baseline import and concurrent multi-writer
   resolution remain design-only and are not exposed as partial APIs.
