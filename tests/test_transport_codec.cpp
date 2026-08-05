@@ -31,6 +31,26 @@ mdbxc::sync::ChangeBatch make_batch(std::uint8_t seed, std::uint64_t seq) {
     return batch;
 }
 
+mdbxc::sync::FullSnapshotChunk make_snapshot_chunk() {
+    using namespace mdbxc::sync;
+    FullSnapshotChunk chunk;
+    chunk.source_node_id = make_node(0x50);
+    chunk.source_db_uuid = make_node(0x70);
+    chunk.snapshot_id = "snapshot-session";
+    chunk.source_tail.last_seq_by_origin[chunk.source_node_id] = 11u;
+    chunk.chunk_index = 0u;
+    chunk.has_more = true;
+    chunk.continuation = "next-page";
+    FullSnapshotManifestEntry entry;
+    entry.dbi_name = "documents";
+    chunk.manifest.push_back(entry);
+    chunk.batch = make_batch(0x50, 0u);
+    chunk.batch.origin_node_id = chunk.source_node_id;
+    chunk.batch.batch_flags = BATCH_HAS_MORE;
+    chunk.batch.ops[0].dbi_name = "documents";
+    return chunk;
+}
+
 template<class Fn>
 void expect_throw(const std::string& label, Fn&& fn) {
     bool caught = false;
@@ -60,6 +80,8 @@ void test_pull_request_roundtrip() {
     request.max_batches = 17;
     request.max_bytes = 4096;
     request.request_full_snapshot = true;
+    request.full_snapshot_id = "snapshot-session";
+    request.full_snapshot_continuation = "next-page";
     request.max_single_batch_bytes = 8192;
     CancellationSource source;
     request.cancel_token = source.token();
@@ -83,10 +105,50 @@ void test_pull_request_roundtrip() {
                  "PullRequest max_bytes mismatch");
     require_true(decoded.request_full_snapshot,
                  "PullRequest full snapshot mismatch");
+    require_true(decoded.full_snapshot_id == request.full_snapshot_id,
+                 "PullRequest full snapshot id mismatch");
+    require_true(decoded.full_snapshot_continuation ==
+                     request.full_snapshot_continuation,
+                 "PullRequest full snapshot continuation mismatch");
     require_true(decoded.max_single_batch_bytes == 8192,
                  "PullRequest max_single_batch_bytes mismatch");
     require_true(!decoded.cancel_token.can_be_cancelled(),
                  "PullRequest cancel token must not be serialized");
+}
+
+void test_full_snapshot_pull_response_roundtrip() {
+    using namespace mdbxc::sync;
+    PullResponse response;
+    response.is_full_snapshot = true;
+    response.snapshot_chunk = make_snapshot_chunk();
+    response.has_more = true;
+    response.remote_tail_known = true;
+    response.remote_tail = response.snapshot_chunk.source_tail;
+
+    const std::vector<std::uint8_t> bytes =
+        TransportMessageCodec::encode_pull_response(response);
+    const PullResponse decoded =
+        TransportMessageCodec::decode_pull_response(bytes);
+
+    require_true(decoded.is_full_snapshot,
+                 "PullResponse full snapshot flag mismatch");
+    require_true(decoded.batches.empty(),
+                 "PullResponse full snapshot has incremental batches");
+    require_true(decoded.has_more && decoded.snapshot_chunk.has_more,
+                 "PullResponse full snapshot continuation mismatch");
+    require_true(decoded.snapshot_chunk.snapshot_id == "snapshot-session",
+                 "PullResponse full snapshot id mismatch");
+    require_true(decoded.snapshot_chunk.continuation == "next-page",
+                 "PullResponse full snapshot token mismatch");
+    require_true(decoded.snapshot_chunk.source_tail.last_seq_for(
+                     make_node(0x50)) == 11u,
+                 "PullResponse full snapshot tail mismatch");
+
+    expect_throw("mixed pull response", [response] {
+        PullResponse invalid = response;
+        invalid.batches.push_back(make_batch(0x50, 1u));
+        (void)TransportMessageCodec::encode_pull_response(invalid);
+    });
 }
 
 void test_pull_response_roundtrip() {
@@ -320,6 +382,19 @@ void test_bounds_rejections() {
         PullRequest request;
         (void)TransportMessageCodec::encode_pull_request(request, &bounds);
     });
+
+    expect_throw("incremental pull snapshot state", [] {
+        PullRequest request;
+        request.full_snapshot_id = "unexpected";
+        (void)TransportMessageCodec::encode_pull_request(request);
+    });
+
+    expect_throw("partial snapshot session state", [] {
+        PullRequest request;
+        request.request_full_snapshot = true;
+        request.full_snapshot_id = "session";
+        (void)TransportMessageCodec::encode_pull_request(request);
+    });
 }
 
 void test_response_error_code_rejections() {
@@ -352,7 +427,7 @@ void test_golden_header_shape() {
         require_true(bytes[i] == expected_magic[i],
                      "TransportMessageCodec magic mismatch");
     }
-    require_true(bytes[8] == 4u && bytes[9] == 0u,
+    require_true(bytes[8] == 5u && bytes[9] == 0u,
                  "TransportMessageCodec version mismatch");
     require_true(bytes[10] == 1u,
                  "TransportMessageCodec pull request type mismatch");
@@ -366,6 +441,7 @@ void test_golden_header_shape() {
 int main() {
     test_pull_request_roundtrip();
     test_pull_response_roundtrip();
+    test_full_snapshot_pull_response_roundtrip();
     test_push_request_roundtrip();
     test_push_response_roundtrip();
     test_peek_message_type();

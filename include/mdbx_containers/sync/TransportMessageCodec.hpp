@@ -8,7 +8,7 @@
 /// Envelope layout for all messages:
 /// \code
 ///   magic             "MDBXCPRT"   8 bytes
-///   codec_version     u16 le       = 4
+///   codec_version     u16 le       = 5
 ///   message_type      u8           1=pull request, 2=pull response,
 ///                                  3=push request, 4=push response
 ///   message_flags     u32 le       = 0 in v0.1
@@ -61,7 +61,7 @@ namespace sync {
         static std::size_t magic_size() { return 8; }
 
         /// \brief Supported transport codec version.
-        static std::uint16_t codec_version() { return 4; }
+        static std::uint16_t codec_version() { return 5; }
 
         /// \brief Reads the message type from a transport envelope.
         /// \details Validates magic, codec version, and mandatory flags but
@@ -87,6 +87,9 @@ namespace sync {
             detail::append_u64_le(out, request.max_batches);
             detail::append_u64_le(out, request.max_bytes);
             append_bool(out, request.request_full_snapshot);
+            validate_pull_request_snapshot(request, bounds);
+            append_snapshot_token(out, request.full_snapshot_id, bounds);
+            append_snapshot_token(out, request.full_snapshot_continuation, bounds);
             detail::append_u64_le(out, request.max_single_batch_bytes);
             validate_message_size(out, bounds);
             return out;
@@ -104,6 +107,11 @@ namespace sync {
             append_bool(out, response.remote_tail_known);
             append_batches(out, response.batches, bounds);
             append_bool(out, response.has_more);
+            validate_pull_response_snapshot(response, bounds);
+            append_bool(out, response.is_full_snapshot);
+            if (response.is_full_snapshot) {
+                append_snapshot_chunk(out, response.snapshot_chunk, bounds);
+            }
             append_bool(out, response.ok);
             append_string(out, response.error, bounds);
             append_response_error_code(out, response.error_code);
@@ -156,7 +164,10 @@ namespace sync {
             request.max_batches = read_u64_le(cur);
             request.max_bytes = read_u64_le(cur);
             request.request_full_snapshot = read_bool(cur);
+            request.full_snapshot_id = read_snapshot_token(cur, bounds);
+            request.full_snapshot_continuation = read_snapshot_token(cur, bounds);
             request.max_single_batch_bytes = read_u64_le(cur);
+            validate_pull_request_snapshot(request, bounds);
             check_consumed(cur);
             return request;
         }
@@ -174,11 +185,16 @@ namespace sync {
             response.remote_tail_known = read_bool(cur);
             response.batches = read_batches(cur, bounds);
             response.has_more = read_bool(cur);
+            response.is_full_snapshot = read_bool(cur);
+            if (response.is_full_snapshot) {
+                response.snapshot_chunk = read_snapshot_chunk(cur, bounds);
+            }
             response.ok = read_bool(cur);
             response.error = read_string(cur, bounds);
             response.error_code = read_response_error_code(cur);
             response.error_retryable = read_bool(cur);
             check_consumed(cur);
+            validate_pull_response_snapshot(response, bounds);
             return response;
         }
 
@@ -394,6 +410,34 @@ namespace sync {
             }
         }
 
+        static void append_snapshot_token(std::vector<std::uint8_t>& out,
+                                          const std::string& value,
+                                          const CodecBounds* bounds) {
+            if (value.size() > bounds->max_snapshot_id_len) {
+                throw std::length_error(
+                    "snapshot token exceeds max_snapshot_id_len");
+            }
+            append_u32_size(out, value.size(),
+                            "snapshot token length exceeds u32");
+            if (!value.empty()) {
+                append_bytes(out,
+                             reinterpret_cast<const std::uint8_t*>(value.data()),
+                             value.size());
+            }
+        }
+
+        static void append_snapshot_chunk(
+                std::vector<std::uint8_t>& out,
+                const FullSnapshotChunk& chunk,
+                const CodecBounds* bounds) {
+            const std::vector<std::uint8_t> encoded =
+                FullSnapshotCodec::encode(chunk, bounds);
+            append_u32_size(out, encoded.size(),
+                            "full snapshot chunk length exceeds u32");
+            append_bytes(out, encoded.empty() ? nullptr : &encoded[0],
+                         encoded.size());
+        }
+
         static void append_batches(std::vector<std::uint8_t>& out,
                                    const std::vector<ChangeBatch>& batches,
                                    const CodecBounds* bounds) {
@@ -536,6 +580,80 @@ namespace sync {
             }
             const std::uint8_t* bytes = read_bytes(cur, len);
             return std::string(reinterpret_cast<const char*>(bytes), len);
+        }
+
+        static std::string read_snapshot_token(Cursor& cur,
+                                               const CodecBounds* bounds) {
+            const std::uint32_t len = read_u32_le(cur);
+            if (len > bounds->max_snapshot_id_len) {
+                throw std::length_error(
+                    "snapshot token exceeds max_snapshot_id_len");
+            }
+            if (len == 0u) {
+                return std::string();
+            }
+            const std::uint8_t* bytes = read_bytes(cur, len);
+            return std::string(reinterpret_cast<const char*>(bytes), len);
+        }
+
+        static FullSnapshotChunk read_snapshot_chunk(
+                Cursor& cur,
+                const CodecBounds* bounds) {
+            const std::uint32_t len = read_u32_le(cur);
+            if (len > bounds->max_snapshot_chunk_bytes) {
+                throw std::length_error(
+                    "full snapshot chunk exceeds max_snapshot_chunk_bytes");
+            }
+            const std::uint8_t* bytes = read_bytes(cur, len);
+            std::vector<std::uint8_t> encoded(len);
+            if (len != 0u) {
+                std::memcpy(&encoded[0], bytes, len);
+            }
+            return FullSnapshotCodec::decode(encoded, bounds);
+        }
+
+        static void validate_pull_request_snapshot(
+                const PullRequest& request,
+                const CodecBounds* bounds) {
+            if (request.full_snapshot_id.size() > bounds->max_snapshot_id_len ||
+                request.full_snapshot_continuation.size() >
+                    bounds->max_snapshot_id_len) {
+                throw std::length_error(
+                    "snapshot token exceeds max_snapshot_id_len");
+            }
+            if (!request.request_full_snapshot &&
+                (!request.full_snapshot_id.empty() ||
+                 !request.full_snapshot_continuation.empty())) {
+                throw std::invalid_argument(
+                    "incremental pull contains full snapshot session state");
+            }
+            if (request.request_full_snapshot &&
+                (request.full_snapshot_id.empty() !=
+                 request.full_snapshot_continuation.empty())) {
+                throw std::invalid_argument(
+                    "full snapshot session id and continuation must both be empty or set");
+            }
+        }
+
+        static void validate_pull_response_snapshot(
+                const PullResponse& response,
+                const CodecBounds* bounds) {
+            if (!response.is_full_snapshot) {
+                return;
+            }
+            if (!response.batches.empty()) {
+                throw std::invalid_argument(
+                    "full snapshot response also contains incremental batches");
+            }
+            if (!response.ok) {
+                throw std::invalid_argument(
+                    "failed pull response contains a full snapshot chunk");
+            }
+            FullSnapshotCodec::validate(response.snapshot_chunk, bounds);
+            if (response.has_more != response.snapshot_chunk.has_more) {
+                throw std::invalid_argument(
+                    "pull and full snapshot continuation flags differ");
+            }
         }
 
         static std::vector<ChangeBatch> read_batches(

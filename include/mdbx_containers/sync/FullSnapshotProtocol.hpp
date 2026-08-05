@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -16,6 +17,7 @@
 #include "ChangeBatchCodec.hpp"
 #include "CodecBounds.hpp"
 #include "common.hpp"
+#include "SyncCursor.hpp"
 
 namespace mdbxc {
 namespace sync {
@@ -24,6 +26,15 @@ namespace sync {
     struct FullSnapshotManifestEntry {
         std::string dbi_name;
         std::uint32_t dbi_flags = 0u;
+    };
+
+    /// \brief Declares which user-DBI content a snapshot may replace.
+    /// \details \c ManifestOnly preserves receiver-only user DBIs. Complete
+    /// replacement is an explicit receiver opt-in and is not enabled by the
+    /// initial importer.
+    enum class FullSnapshotScope : std::uint8_t {
+        ManifestOnly = 0u,
+        CompleteUserDatabase = 1u
     };
 
     /// \brief One chunk of a full database export.
@@ -36,16 +47,27 @@ namespace sync {
         NodeId source_node_id{};
         DbId source_db_uuid{};
         std::string snapshot_id;
+        /// \brief Immutable source changelog tail captured with this snapshot.
+        SyncCursor source_tail;
         std::uint64_t chunk_index = 0u;
         bool has_more = false;
+        /// \brief Explicit replacement scope for the receiver.
+        FullSnapshotScope replacement_scope = FullSnapshotScope::ManifestOnly;
+        /// \brief Opaque token that requests the immediate next chunk.
+        /// \details Non-empty exactly when \c has_more is true. Callers return
+        /// this value unchanged in PullRequest::full_snapshot_continuation.
+        std::string continuation;
+        /// \brief Version of the immutable manifest contract.
+        std::uint32_t manifest_version = 1u;
         std::vector<FullSnapshotManifestEntry> manifest;
         ChangeBatch batch;
     };
 
-    /// \brief Strict codec for the reserved full-snapshot wire boundary.
-    /// \details This codec is preparatory. v0.1 pull responders still reject
-    /// \c PullRequest::request_full_snapshot until a transport dispatcher and
-    /// validated replacement apply path are available.
+    /// \brief Strict codec for the explicit full-snapshot wire boundary.
+    /// \details Configured sources export bounded snapshot sessions through
+    /// \c PullRequest::request_full_snapshot. The initial receiver accepts
+    /// only \c ManifestOnly pages into a fresh replica and commits the staged
+    /// replacement plan atomically at the final page.
     class FullSnapshotCodec {
     public:
         static const std::uint8_t* magic() {
@@ -55,7 +77,7 @@ namespace sync {
         }
 
         static std::size_t magic_size() { return 8u; }
-        static std::uint16_t codec_version() { return 1u; }
+        static std::uint16_t codec_version() { return 2u; }
 
         static std::vector<std::uint8_t> encode(
                 const FullSnapshotChunk& chunk,
@@ -72,8 +94,12 @@ namespace sync {
             append_bytes(out, chunk.source_db_uuid.data(),
                          chunk.source_db_uuid.size());
             append_string(out, chunk.snapshot_id);
+            append_cursor(out, chunk.source_tail, bounds);
             detail::append_u64_le(out, chunk.chunk_index);
             out.push_back(chunk.has_more ? 1u : 0u);
+            append_scope(out, chunk.replacement_scope);
+            append_string(out, chunk.continuation);
+            detail::append_u32_le(out, chunk.manifest_version);
             detail::append_u32_le(
                 out, static_cast<std::uint32_t>(chunk.manifest.size()));
             for (std::size_t i = 0u; i < chunk.manifest.size(); ++i) {
@@ -105,12 +131,18 @@ namespace sync {
             out.snapshot_id = read_string(
                 cursor, bounds == nullptr ? 256u : bounds->max_snapshot_id_len,
                 "full snapshot id exceeds max_snapshot_id_len");
+            out.source_tail = read_cursor(cursor, bounds);
             out.chunk_index = read_u64_le(cursor);
             const std::uint8_t has_more = read_u8(cursor);
             if (has_more > 1u) {
                 throw std::runtime_error("Invalid full snapshot continuation flag");
             }
             out.has_more = has_more != 0u;
+            out.replacement_scope = read_scope(cursor);
+            out.continuation = read_string(
+                cursor, bounds == nullptr ? 256u : bounds->max_snapshot_id_len,
+                "full snapshot continuation exceeds max_snapshot_id_len");
+            out.manifest_version = read_u32_le(cursor);
             const std::uint32_t manifest_count = read_u32_le(cursor);
             if (bounds != nullptr &&
                 manifest_count > bounds->max_snapshot_manifest_entries) {
@@ -153,6 +185,20 @@ namespace sync {
                 throw std::length_error(
                     "full snapshot id exceeds max_snapshot_id_len");
             }
+            if (chunk.continuation.size() > bounds->max_snapshot_id_len) {
+                throw std::length_error(
+                    "full snapshot continuation exceeds max_snapshot_id_len");
+            }
+            if (chunk.has_more != !chunk.continuation.empty()) {
+                throw std::invalid_argument(
+                    "Full snapshot continuation does not match has_more");
+            }
+            if (chunk.manifest_version != 1u) {
+                throw std::invalid_argument(
+                    "Unsupported full snapshot manifest version");
+            }
+            validate_scope(chunk.replacement_scope);
+            validate_cursor(chunk.source_tail, bounds);
             if (chunk.manifest.size() > bounds->max_snapshot_manifest_entries) {
                 throw std::length_error(
                     "full snapshot manifest exceeds max_snapshot_manifest_entries");
@@ -188,6 +234,10 @@ namespace sync {
             if (chunk.batch.batch_flags != expected_flags) {
                 throw std::invalid_argument(
                     "Full snapshot continuation does not match batch flags");
+            }
+            if (chunk.batch.ops.empty()) {
+                throw std::invalid_argument(
+                    "Full snapshot chunk must contain at least one operation");
             }
             for (std::size_t i = 0u; i < chunk.batch.ops.size(); ++i) {
                 const ChangeOp& op = chunk.batch.ops[i];
@@ -263,6 +313,78 @@ namespace sync {
                 }
             }
             return false;
+        }
+
+        static void validate_scope(FullSnapshotScope scope) {
+            switch (scope) {
+                case FullSnapshotScope::ManifestOnly:
+                case FullSnapshotScope::CompleteUserDatabase:
+                    return;
+            }
+            throw std::invalid_argument("Invalid full snapshot replacement scope");
+        }
+
+        static void append_scope(std::vector<std::uint8_t>& out,
+                                 FullSnapshotScope scope) {
+            validate_scope(scope);
+            out.push_back(static_cast<std::uint8_t>(scope));
+        }
+
+        static FullSnapshotScope read_scope(Cursor& cursor) {
+            const std::uint8_t raw = read_u8(cursor);
+            switch (raw) {
+                case static_cast<std::uint8_t>(FullSnapshotScope::ManifestOnly):
+                    return FullSnapshotScope::ManifestOnly;
+                case static_cast<std::uint8_t>(
+                        FullSnapshotScope::CompleteUserDatabase):
+                    return FullSnapshotScope::CompleteUserDatabase;
+                default:
+                    throw std::runtime_error(
+                        "Invalid full snapshot replacement scope");
+            }
+        }
+
+        static void append_cursor(std::vector<std::uint8_t>& out,
+                                  const SyncCursor& value,
+                                  const CodecBounds* bounds) {
+            validate_cursor(value, bounds);
+            detail::append_u32_le(
+                out, static_cast<std::uint32_t>(value.last_seq_by_origin.size()));
+            std::map<NodeId, std::uint64_t>::const_iterator it =
+                value.last_seq_by_origin.begin();
+            for (; it != value.last_seq_by_origin.end(); ++it) {
+                append_bytes(out, it->first.data(), it->first.size());
+                detail::append_u64_le(out, it->second);
+            }
+        }
+
+        static SyncCursor read_cursor(Cursor& cursor, const CodecBounds* bounds) {
+            const std::uint32_t count = read_u32_le(cursor);
+            if (count > bounds->max_cursor_origins) {
+                throw std::length_error(
+                    "full snapshot tail exceeds max_cursor_origins");
+            }
+            SyncCursor out;
+            for (std::uint32_t i = 0u; i < count; ++i) {
+                NodeId origin{};
+                read_bytes(cursor, origin.data(), origin.size());
+                const std::uint64_t sequence = read_u64_le(cursor);
+                if (out.last_seq_by_origin.find(origin) !=
+                    out.last_seq_by_origin.end()) {
+                    throw std::runtime_error(
+                        "Duplicate origin in full snapshot tail");
+                }
+                out.last_seq_by_origin[origin] = sequence;
+            }
+            return out;
+        }
+
+        static void validate_cursor(const SyncCursor& value,
+                                    const CodecBounds* bounds) {
+            if (value.last_seq_by_origin.size() > bounds->max_cursor_origins) {
+                throw std::length_error(
+                    "full snapshot tail exceeds max_cursor_origins");
+            }
         }
 
         static void append_bytes(std::vector<std::uint8_t>& out,
