@@ -91,7 +91,7 @@ int main() {
     cfg.pathname = "data/any_value_table.mdbx";
     cfg.max_dbs = 8;
     cfg.no_subdir = true;
-    cfg.relative_to_exe = true;
+    cfg.relative_to_exe = false;
     auto conn = mdbxc::Connection::create(cfg);
 
     mdbxc::AnyValueTable<std::string> table(conn, "test_any");

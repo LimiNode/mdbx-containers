@@ -6,9 +6,11 @@ describes which public table wrappers emit `ChangeOp` records when a
 which wrappers intentionally stay outside sync until their wire format and
 round-trip semantics are defined.
 
-Sync v0.1 replicates raw physical DBI operations. It does not deserialize table
-values during transport, and remote apply replays the captured physical
-`storage_key` / `value` bytes through `SyncEngine::handle_push()`.
+The Sync v0.1 transport path replicates raw physical DBI operations. It does
+not deserialize table values during transport, and remote apply replays the
+captured physical `storage_key` / `value` bytes through
+`SyncEngine::handle_push()`. Explicit logical adapters are caller-delivered
+apply paths and are documented separately below.
 
 ## Matrix
 
@@ -18,7 +20,7 @@ values during transport, and remote apply replays the captured physical
 | `KeyTable<K>` | Supported | `Put`, `Delete`, `ClearTable`; insert, erase, range erase, and clear paths are implemented. | Raw key bytes are replayed with empty values. | `test_sync_capture`, `test_sync_engine`, `test_sync_replication` |
 | `ValueTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; set, insert, update, erase, and clear paths are implemented. | The singleton physical key and serialized value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
 | `SequenceTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; append, `insert_or_assign`, erase, and clear paths are implemented. | Stable `uint64_t` sequence keys and value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
-| `VectorStore` | Indirectly supported | Captured through its internal `SequenceTable` and `KeyValueTable` members. | The internal table operations are replicated; `VectorStore` has no separate wire type. This raw path requires one authoritative or externally serialized writer per collection. Already-open instances compare `Connection::sync_apply_generation()` and lazily rebuild their RAM index before index-dependent operations after remote apply. A connection apply/read barrier serializes remote `handle_push()` apply commits with cache-backed `VectorStore` operations. Each `VectorStore` instance serializes its own methods; C++17 builds let different readers share the connection read side, while C++11 builds use an exclusive connection mutex fallback. | `test_sync_capture`, `test_sync_replication` |
+| `VectorStore` | Raw plus limited logical adapter | Raw capture flows through its internal `SequenceTable` and `KeyValueTable` members. The schema-v1 `VectorStoreLogicalAdapter` explicitly captures and applies add, erase, and clear across ids, embeddings, text, and metadata with explicit record ids. | Raw apply replays physical member-table operations; logical apply validates the adapter marker and preflights the four-DBI record state before mutation. Both paths require one authoritative or externally serialized writer per collection. The logical adapter is opt-in and caller-delivered, not a generic multi-DBI primitive or distributed conflict resolver. | `test_sync_capture`, `test_sync_replication`, `test_vector_store_logical_adapter` |
 | `AnyValueTable<K>` | Deferred | No `ChangeOp` in v0.1. | Not applied by sync as a typed heterogeneous table. | `test_sync_capture` negative coverage |
 | `KeyMultiValueTable<K, V>` | Limited logical adapter | No raw `ChangeOp` in v0.1. | Schema v1 explicitly captures unordered insert, key erase, all-matching-value erase, and clear. Schema v2 additionally captures exact-one erase and typed `reconcile()`. Schema v3 adds bounded typed range erasure, expanded before mutation into canonical `EraseKey` changes; raw calls and general multi-writer destructive convergence remain deferred. | `test_key_value_logical_adapter`, `test_sync_capture` negative coverage |
 | `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapters | No raw `ChangeOp` in v0.1. Schema v1 captures append-only changes; schema v2 captures `AppendElement` and exact `EraseElement` by persistent id. | Both schemas require one authoritative ordered origin and fail closed for direct logical frames or unordered delivery. Schema v2 persists element identity and tombstones, and its typed capture atomically commits local mutations plus an ordered outbox envelope. Bounded `erase_at`, key/value erase, and clear resolve selectors to exact ids before mutation; `replace_with()` is also implemented for single-origin schema-v2 capture. The default resolver performs full reverse validation, while an opt-in transaction-bound proof uses a non-reusable session token, bounds its complete materialized ID set, and can reuse that validated set for trusted selector calls with a separate budget. Baseline import, multi-origin histories, and tombstone pruning/compaction remain separately deferred. | `test_key_value_logical_adapter`, `test_key_ordered_multi_value_destructive_state`, `test_key_ordered_multi_value_destructive_adapter` |
@@ -50,9 +52,10 @@ has three separate pieces that must not be treated as support by themselves:
 - `LogicalTableRegistry` reserves a two-phase preflight/apply path and validates
   the full schema tuple plus reserved flags before invoking adapters.
 
-`KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are the current
-explicit logical apply helpers with opt-in typed capture sessions. They are not
-connected to the transport pull/push path; callers own logical frame delivery.
+`KeyValueTableLogicalAdapter`, `KeyTableLogicalAdapter`, and
+`VectorStoreLogicalAdapter` are explicit logical apply helpers with opt-in
+typed capture sessions. They are not connected to the transport pull/push
+path; callers own logical frame delivery.
 
 Until a wrapper has a codec extension, a registered adapter, capture tests, and
 round-trip tests, it must remain in the deferred rows below and must not emit
@@ -62,20 +65,22 @@ Focused capture and round-trip tests currently cover representative write,
 delete, bulk, range-erase, wrapper-specific `ClearTable`, indirect
 `VectorStore`, and deferred-table negative paths.
 
-## VectorStore Raw Replication Boundary
+## VectorStore Sync Boundary
 
-`VectorStore` currently participates only through raw replication of its four
-internal DBIs: ids, embeddings, text, and metadata. This supports a
+`VectorStore` participates through raw replication of its four internal DBIs:
+ids, embeddings, text, and metadata. The opt-in schema-v1
+`VectorStoreLogicalAdapter` provides a separate logical contract for add, erase,
+and clear, with explicit ids and a four-DBI preflight. Both paths support a
 leader/follower topology or an application that serializes writers externally.
-It does not provide a distributed id allocator, cross-node conflict resolution,
-or a logical `VectorStore` wire type.
+Neither provides a distributed id allocator or cross-node conflict resolution;
+the logical adapter is an application-owned recipe rather than a generic
+multi-DBI primitive.
 
 Replicas must use the same collection name, vector metric, and compatible
 embedding serialization. A remote apply invalidates an already-open store's
 RAM index through the connection generation and it rebuilds lazily before the
-next index-dependent operation. A future multi-DBI logical adapter needs a
-global record identity scheme and explicit ordering/conflict policy before this
-restriction can be relaxed.
+next index-dependent operation. The logical adapter remains opt-in and does
+not relax the writer-serialization requirement.
 
 ## Deferred Table Rules
 

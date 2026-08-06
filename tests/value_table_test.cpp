@@ -40,7 +40,7 @@ int main() {
     cfg.pathname = "data/value_table_test.mdbx";
     cfg.max_dbs = 8;
     cfg.no_subdir = true;
-    cfg.relative_to_exe = true;
+    cfg.relative_to_exe = false;
 
     auto conn = mdbxc::Connection::create(cfg);
 
@@ -154,7 +154,7 @@ int main() {
         standalone_cfg.pathname = "data/value_table_config_test.mdbx";
         standalone_cfg.max_dbs = 2;
         standalone_cfg.no_subdir = true;
-        standalone_cfg.relative_to_exe = true;
+        standalone_cfg.relative_to_exe = false;
 
         mdbxc::ValueTable<std::string> table(standalone_cfg, "config_value");
         table.clear();

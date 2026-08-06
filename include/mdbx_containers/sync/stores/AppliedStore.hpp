@@ -11,8 +11,8 @@
 
 #include <mdbx.h>
 
-#include "../../detail/utils.hpp"
-#include "../common.hpp"
+#include <mdbx_containers/detail/utils.hpp>
+#include <mdbx_containers/sync/common.hpp>
 
 namespace mdbxc {
 namespace sync {

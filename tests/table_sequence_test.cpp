@@ -16,7 +16,7 @@ namespace {
         cfg.pathname = pathname;
         cfg.max_dbs = 8;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
         return cfg;
     }
 

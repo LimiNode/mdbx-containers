@@ -9,11 +9,11 @@
 #include <string>
 #include <vector>
 
-#include "ChangeBatch.hpp"
-#include "cancellation.hpp"
-#include "common.hpp"
-#include "FullSnapshotProtocol.hpp"
-#include "SyncCursor.hpp"
+#include <mdbx_containers/sync/protocol/ChangeBatch.hpp>
+#include <mdbx_containers/sync/core/cancellation.hpp>
+#include <mdbx_containers/sync/common.hpp>
+#include <mdbx_containers/sync/protocol/FullSnapshotProtocol.hpp>
+#include <mdbx_containers/sync/protocol/SyncCursor.hpp>
 
 namespace mdbxc {
 namespace sync {
@@ -26,14 +26,14 @@ namespace sync {
     enum class SyncResponseErrorCode : std::uint16_t {
         None                    = 0, ///< No structured sync error.
         DbIdMismatch            = 1, ///< Request targeted a different db_id.
-        UnsupportedFullSnapshot = 2, ///< Full snapshot protocol is not implemented.
+        UnsupportedFullSnapshot = 2, ///< Peer does not provide full snapshots.
         ApplyConflict           = 3, ///< Push apply failed on a sync conflict.
         SnapshotRequired        = 4, ///< Requested changelog history was pruned.
         BatchTooLarge           = 5, ///< A single retained batch exceeds the requested limit.
         SnapshotNotConfigured   = 6, ///< Responder has no enabled snapshot export.
         SnapshotSessionInvalid  = 7, ///< Snapshot session is unknown, expired, or mismatched.
         SnapshotSessionBusy     = 8, ///< Responder reached its bounded snapshot-session capacity.
-        SnapshotLogicalStateUnsupported = 9, ///< Snapshot needs a logical-state protocol not implemented here.
+        SnapshotLogicalStateUnsupported = 9, ///< Snapshot cannot transfer persisted logical state.
     };
 
     /// \brief Returns a stable diagnostic name for a sync response error code.
@@ -77,8 +77,8 @@ namespace sync {
         /// \brief Requests a full snapshot instead of an incremental delta.
         /// \details The first snapshot request has both session fields empty.
         /// Later pages repeat the server-issued id and continuation unchanged.
-        /// Responders that have not yet implemented export reject this mode
-        /// explicitly rather than treating it as changelog replay.
+        /// Responders without an enabled export reject this mode explicitly
+        /// rather than treating it as changelog replay.
         bool         request_full_snapshot = false;
         /// \brief Opaque id of an already-open full snapshot session.
         std::string  full_snapshot_id;

@@ -83,9 +83,11 @@
   перед подключением `mdbx_containers/sync.hpp`.
 - v0.1 захватывает обычные write-path'ы `KeyValueTable`, `KeyTable`,
   `ValueTable` и `SequenceTable`; `VectorStore` реплицируется косвенно через
-  внутренние `SequenceTable` и `KeyValueTable`. Это raw physical репликация
-  для leader/follower либо для одного внешне сериализованного writer'а на
-  коллекцию, а не multi-writer logical репликация.
+  внутренние `SequenceTable` и `KeyValueTable`. Дополнительно есть opt-in
+  schema-v1 `VectorStoreLogicalAdapter` для add, erase и clear по четырём DBI
+  коллекции с явными record id. Оба режима требуют leader/follower либо
+  внешней сериализации writer'ов; multi-writer conflict resolution не входит
+  в контракт.
 - `AnyValueTable`, `KeyMultiValueTable`, `KeyOrderedMultiValueTable` и
   `HashedKeyValueStore` не имеют raw-репликации в v0.1.
   `KeyMultiValueTableLogicalAdapter` даёт opt-in logical capture для
@@ -121,7 +123,8 @@
 - `SyncEngine` предоставляет pull/push/apply primitives,
   `register_logical_schema()` для committed setup logical schema markers и
   `migrate_logical_schema()` для явной замены marker после exact preflight.
-  `KeyValueTableLogicalAdapter` и `KeyTableLogicalAdapter` - первые concrete
+  `KeyValueTableLogicalAdapter`, `KeyTableLogicalAdapter` и
+  `VectorStoreLogicalAdapter` - concrete
   logical adapter helpers для явных вызовов
   `SyncEngine::apply_logical_changes()` или более низкоуровневого
   `LogicalTableRegistry::preflight_then_apply()`. Их payload codecs отделены
@@ -285,8 +288,10 @@ metadata filtering и генерация embeddings не входят в обл�
 и совместимый embedding codec. У коллекции должен быть один authoritative
 writer либо приложение должно внешне сериализовать всех writer'ов: локальный
 `add()` выделяет id из локального состояния и не даёт cross-node identity
-allocation или conflict resolution. Logical sync adapter для `VectorStore`
-пока отсутствует.
+allocation или conflict resolution. Opt-in `VectorStoreLogicalAdapter`
+использует явные id и атомарно применяет add, erase и clear по всем четырём DBI;
+это application-owned logical recipe, а не distributed allocator или
+автоматический transport path.
 
 ```cpp
 #include <mdbx_containers/vector.hpp>

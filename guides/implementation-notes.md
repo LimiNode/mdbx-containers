@@ -225,8 +225,8 @@ Operational rules:
   `PullResponse{ok=false, error_code=SnapshotRequired}`. The response carries no
   batches because applying a later retained batch would produce a sequence gap
   on the receiver. A caller can explicitly drive the bounded fresh-replica
-  snapshot session, but sync workers do not yet turn this response into an
-  automatic fallback.
+  snapshot session, and `SyncWorker` can opt into the same recovery for a fresh
+  `CompleteUserDatabase` target. Persisted importer resume remains deferred.
 - Full snapshot implementation notes are in
   `include/mdbx_containers/sync/DESIGN.md`. The manual importer remains separate
   from changelog replay: it accepts user-DBI-only chunks with an immutable
@@ -238,8 +238,10 @@ Operational rules:
   full-snapshot requests are permanent until the caller changes behavior.
   This flag is independent from `SyncTransportRetryHint`.
 - v0.1 sync captures normal write paths for `KeyValueTable`, `KeyTable`,
-  `ValueTable`, and `SequenceTable`. `VectorStore` is sync-covered only because
-  it persists through internal `SequenceTable` and `KeyValueTable` members.
+  `ValueTable`, and `SequenceTable`. `VectorStore` is covered indirectly by
+  those internal member tables and also has an explicit schema-v1
+  `VectorStoreLogicalAdapter` for add, erase, and clear across its four DBIs.
+  Both paths require one authoritative or application-serialized writer.
 - Use `SyncCaptureScope` for temporary capture attachment around a bounded
   write phase. Use raw `attach_sync_capture()` / `detach_sync_capture()` only
   for a deliberate component lifecycle and keep the same lifecycle-only rule as
@@ -279,17 +281,9 @@ Operational rules:
   include subdomain or internal headers directly (`common/...`, `detail/...`,
   `sync/...`, `vector/...`); they include through the aggregator that already
   pulls the right pieces in the right order.
-- Inside `include/mdbx_containers/`, leaf headers under one subdomain may
-  rely on the umbrella having included the cross-domain prerequisites. Do
-  not self-contain every dependency; that spreads ordering decisions across
-  every leaf and makes re-organisation brittle.
-- Always use a local include path relative to `include/mdbx_containers/`,
-  never `"mdbx_containers/..."` and never a leading `"../"` chain. The
-  `Backup.hpp`, `TransactionTracker.hpp`, and `SyncModule.hpp` headers have
-  been moved to the right submodule to make this practical (see commit
-  history on PRs #60, #66).
-- The single `../` exceptions today are the few `common/Connection.hpp`
-  and `common/Connection.ipp` includes that reach into `sync/` (the
-  pre-commit hook). When a fourth cross-subdomain dependency shows up,
-  prefer moving the source header into a shared subdomain over adding more
-  relative paths.
+- Leaf headers use sibling includes only. Cross-subdomain includes use the
+  stable `<mdbx_containers/...>` path; never add a leading `"../"` chain.
+- A domain umbrella owns the cross-domain prerequisite order. For example,
+  `sync/adapters.hpp` supplies table and logical-sync dependencies before its
+  `sync/logical/adapters/` leaf headers, while `sync/logical.hpp` exports that adapter
+  surface with the rest of logical delivery.

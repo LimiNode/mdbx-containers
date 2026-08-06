@@ -13,9 +13,9 @@
 #include <mdbx_containers/sync.hpp>
 
 #if MDBXC_SYNC_ENABLED
-#include <mdbx_containers/sync/HttpTransport.hpp>
-#include <mdbx_containers/sync/WebSocketTransport.hpp>
-#include <mdbx_containers/sync/TransportMiddleware.hpp>
+#include <mdbx_containers/sync/transport/HttpTransport.hpp>
+#include <mdbx_containers/sync/transport/WebSocketTransport.hpp>
+#include <mdbx_containers/sync/transport/TransportMiddleware.hpp>
 #endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_TRANSPORT_HPP_INCLUDED

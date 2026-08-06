@@ -30,7 +30,7 @@
 #include <utility>
 #include <vector>
 
-#include "../common/MdbxException.hpp"
+#include <mdbx_containers/common/MdbxException.hpp>
 
 #if __cplusplus >= 201703L
 #   define MDBXC_NODISCARD [[nodiscard]]

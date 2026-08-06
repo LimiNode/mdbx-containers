@@ -6,8 +6,8 @@
 /// \brief Hash-indexed key-value store for string and byte-vector keys.
 
 #include "common.hpp"
-#include "detail/ResultContainers.hpp"
-#include "Hash.hpp"
+#include "detail/result_containers.hpp"
+#include "common/hashing.hpp"
 
 #include <limits>
 #include <map>

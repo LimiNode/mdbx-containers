@@ -47,8 +47,8 @@
 #include "common/Transaction.hpp"
 #include "detail/path_utils.hpp"
 #if MDBXC_SYNC_ENABLED
-#include "sync/ISyncCaptureSink.hpp"
-#include "sync/SyncApplyObserver.hpp"
+#include "sync/capture/ISyncCaptureSink.hpp"
+#include "sync/core/SyncApplyObserver.hpp"
 #endif
 #include "common/Connection.hpp"
 #include "detail/BaseTable.hpp"

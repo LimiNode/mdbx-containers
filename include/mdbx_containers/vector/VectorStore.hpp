@@ -2,6 +2,8 @@
 #ifndef MDBX_CONTAINERS_HEADER_VECTOR_VECTOR_STORE_HPP_INCLUDED
 #define MDBX_CONTAINERS_HEADER_VECTOR_VECTOR_STORE_HPP_INCLUDED
 
+#include <mdbx_containers/SequenceTable.hpp>
+#include <mdbx_containers/KeyValueTable.hpp>
 #include "FlatVectorIndex.hpp"
 #include "VectorRecord.hpp"
 #include "SearchResult.hpp"
@@ -10,6 +12,10 @@
 #include <mutex>
 
 namespace mdbxc {
+
+namespace sync {
+    class VectorStoreLogicalAdapter;
+}
 
     /// \brief Persistent local vector store with an exact in-memory search index.
     ///
@@ -93,6 +99,8 @@ namespace mdbxc {
         const std::string& collection() const noexcept;
 
     private:
+        friend class sync::VectorStoreLogicalAdapter;
+
         std::string m_collection;
         VectorMetric m_metric;
         std::shared_ptr<Connection> m_connection;

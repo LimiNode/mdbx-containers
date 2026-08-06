@@ -46,8 +46,8 @@
 #include <vector>
 
 #include <mdbx_containers/sync/sync_module.hpp>
-#include <mdbx_containers/sync/TransportMiddleware.hpp>
-#include <mdbx_containers/sync/WebSocketTransport.hpp>
+#include <mdbx_containers/sync/transport/TransportMiddleware.hpp>
+#include <mdbx_containers/sync/transport/WebSocketTransport.hpp>
 
 #if !MDBXC_SYNC_ENABLED
 #error "mdbx_containers/sync/transports/simple_web/WebSocketTransport.hpp requires MDBXC_SYNC_ENABLED=1"

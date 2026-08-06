@@ -73,10 +73,14 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   `SequenceTable` `append()` remains a local single-writer operation with
   existing external synchronisation requirements. `VectorStore` is covered
   indirectly because its persistent write path uses `SequenceTable` and
-  `KeyValueTable`.
+  `KeyValueTable`. It also has an explicit schema-v1 logical adapter for
+  add, erase, and clear operations over its four owned DBIs.
 - End-to-end replication tests cover `ValueTable`, `KeyValueTable`,
   `KeyTable`, `SequenceTable` insert/update/delete including empty serialized
-  values, and `VectorStore` add/erase/rebuild through its public API.
+  values, and `VectorStore` add/erase/rebuild through its public API. A
+  separate logical-adapter regression covers VectorStore add/erase/clear
+  round-trip and fail-closed duplicate, schema, malformed-payload, and
+  capture-rollback cases.
 - `ConflictPolicy::Reject` is the default. `ConflictPolicy::LastWriterWins`
   is declared for future logical-key conflict resolution; `SyncEngine`
   rejects it until a reliable conflict authority exists.
@@ -93,7 +97,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `KeyTable` | Supported | Captures insert/delete, range erase, reconcile/clear paths that operate on physical keys. |
 | `ValueTable` | Supported | Captures singleton put/delete/clear using its fixed physical key. |
 | `SequenceTable` | Supported | Captures set/append/delete/clear against stable `uint64_t` record ids. `append()` remains a local single-writer helper; external synchronization is still required for concurrent appenders. |
-| `VectorStore` | Supported indirectly | Does not own a separate wire format. Its persistent writes go through `SequenceTable` and `KeyValueTable` member tables. Raw replication requires one authoritative or externally serialized writer per collection. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
+| `VectorStore` | Raw plus limited logical adapter | Raw replication covers its `SequenceTable` and `KeyValueTable` member writes. The explicit schema-v1 logical adapter captures and applies add, erase, and clear over the ids, embeddings, text, and metadata DBIs with explicit record ids. Both paths require one authoritative or application-serialized writer per collection; the logical adapter is not a multi-writer conflict resolver or automatic transport path. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. Schema v1 captures unordered insert, version-neutral batch `append()`, key erase, all-matching-value erase, and clear; schema v2 adds exact-one erase and typed `reconcile()`; schema v3 adds bounded typed `erase_range()` expanded into exact `EraseKey` changes. All destructive modes require one-writer or causally serialized updates. |
 | `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids, and single-origin `replace_with()` expands replacement state into exact changes. |
@@ -108,15 +112,17 @@ be non-empty and contain only ASCII letters, digits, `_`, and `-`; unsupported
 characters are rejected before internal DBI names are built. This prevents
 different logical collections from collapsing to the same physical DBI names.
 
-`VectorStore` sync is currently a raw physical replication path over its ids,
-embeddings, text, and metadata DBIs. Replicas must agree on collection name,
-vector metric, and embedding serialization. `VectorStore::add()` assigns ids
-from local table state, so concurrent independent writers can collide and have
-no conflict-resolution rule. The supported topology is therefore
-leader/follower or application-serialized writers per collection. A future
-multi-DBI logical adapter must introduce a global record identity scheme and
-explicit ordering/conflict semantics; raw capture must not be presented as that
-adapter.
+`VectorStore` has two explicit sync paths. Raw physical replication covers its
+ids, embeddings, text, and metadata DBIs; replicas must agree on collection
+name, vector metric, and embedding serialization. `VectorStore::add()` assigns
+ids from local table state, so concurrent independent writers can collide and
+have no conflict-resolution rule. The schema-v1
+`VectorStoreLogicalAdapter` instead captures explicit record ids and canonical
+embedding/text/metadata payloads for add, erase, and clear across all four DBIs.
+It is an opt-in application-owned logical recipe, not a generic multi-DBI
+primitive, distributed id allocator, conflict resolver, or automatic
+pull/push capability. Both paths therefore require a leader/follower or
+application-serialized writer topology per collection.
 
 `Connection::sync_apply_generation()` is a coarse invalidation marker for sync
 apply commits. `SyncEngine::handle_push()` increments it after a successful
@@ -938,10 +944,6 @@ destructive surface includes:
 Direct logical frames and unordered delivery must continue to reject every
 ordered-table destructive change before adapter callbacks.
 
-## Planned before v0.1 release (NOT YET implemented)
-
-- Full export/import via `seq=0, BATCH_HAS_MORE` chunks for empty replicas.
-
 ## What v0.1 does NOT cover (deferred to v0.2)
 
 For the table-by-table support status, capture coverage, and negative test
@@ -1033,10 +1035,10 @@ key, which is why `seq` is big-endian in the key.
 Pull detects when `request.have + 1` is older than the earliest retained
 changelog record for a known origin and returns
 `PullResponse{ok=false, error_code=SnapshotRequired}` instead of streaming a
-later non-contiguous batch. The initial full snapshot importer requires a
-fresh replica and an explicit caller-driven session; worker fallback is not
-implemented, so applications may still provision a fresh replica or use an
-application-defined snapshot outside sync v0.1.
+later non-contiguous batch. The full snapshot protocol provides an explicit
+fresh-replica importer, and `SyncWorker` can use it for
+`CompleteUserDatabase` recovery. Persisted importer resume and selective
+partial-scope continuation remain outside the implemented contract.
 
 ### `_mdbxc_origins` (OriginIndexStore)
 
@@ -1303,8 +1305,9 @@ delivery is a stale no-op.
   caller that owns the MDBX write transaction must abort that transaction; the
   registry cannot roll back a transaction it does not own.
 
-`adapters/KeyValueTableLogicalAdapter.hpp` and
-`adapters/KeyTableLogicalAdapter.hpp` provide the first concrete adapter
+`adapters/KeyValueTableLogicalAdapter.hpp`,
+`adapters/KeyTableLogicalAdapter.hpp`, and
+`adapters/VectorStoreLogicalAdapter.hpp` provide concrete adapter
 helpers. They translate typed table operations into adapter-owned logical
 payloads and apply them through
 `SyncEngine::apply_logical_changes()` or
@@ -1312,9 +1315,10 @@ payloads and apply them through
 transaction. These helpers prove the adapter contract and payload shape for
 simple tables, but they are not yet connected to the automatic pull/push wire
 pipeline.
-`KeyValueTableLogicalAdapter` supports upsert/delete/clear and
-`KeyTableLogicalAdapter` supports insert/delete/clear. Both expose an opt-in
-`LogicalCaptureSession`. The session owns a writable transaction, suppresses
+`KeyValueTableLogicalAdapter` supports upsert/delete/clear,
+`KeyTableLogicalAdapter` supports insert/delete/clear, and
+`VectorStoreLogicalAdapter` supports add/erase/clear over its four owned DBIs.
+These adapters expose opt-in `LogicalCaptureSession` types. The session owns a writable transaction, suppresses
 raw capture for its typed writes, buffers logical changes privately, and copies
 them to the caller only from `commit(out)`. Rollback, destruction, or commit
 failure discards the pending logical changes. An exception after physical
@@ -1374,9 +1378,11 @@ Logical-table support therefore has a staged contract:
 4. Enable capture only after every mutating public method maps to a tested
    logical operation.
 
-The current `KeyValueTableLogicalAdapter` capture session is intentionally
-manual and opt-in; it does not replace the normal `KeyValueTable` API or claim
-automatic coverage for every mutating table method.
+The current logical adapter capture sessions are intentionally manual and
+opt-in; they do not replace the normal table APIs or claim automatic coverage
+for every mutating table method. `VectorStoreLogicalAdapter` likewise does not
+turn the store's ordinary `add()`, `erase()`, or `clear()` calls into logical
+capture automatically.
 
 Until a later causal-context PR defines dependency cursors, Lamport/HLC order,
 or another conflict-resolution model, logical table adapters may claim only
@@ -1597,9 +1603,9 @@ snapshots without treating them as permanent transport failures.
 
 The full snapshot protocol is explicit rather than another spelling of retained
 changelog replay. The reserved request shape is
-`PullRequest::request_full_snapshot=true`; responders that implement it should
-return snapshot chunks only when the caller requested that mode, never as an
-implicit fallback from a normal incremental pull.
+`PullRequest::request_full_snapshot=true`; responders return snapshot chunks
+only when the caller requested that mode, never as an implicit fallback from a
+normal incremental pull.
 
 The implemented source session, fresh-replica importer, and worker fallback
 preserve these properties. Persisted resume and any future selective-scope
@@ -1624,10 +1630,10 @@ extension must preserve them too:
   bootstrap global cursor state. `CompleteUserDatabase` inventories all named
   non-reserved source DBIs and fails closed if a fresh destination contains a
   user DBI outside that manifest; it does not silently drop receiver-only DBIs.
-- Snapshot chunks must be distinguishable from ordinary changelog batches.
-  The reserved shape is `ChangeBatch{seq=0, batch_flags=BATCH_HAS_MORE...}`
-  with a snapshot-specific flag or versioned envelope added before release.
-  Ordinary local changelog batches keep `seq > 0`.
+- Snapshot chunks are distinguishable from ordinary changelog batches. The
+  implemented snapshot-specific envelope carries a nested
+  `ChangeBatch{seq=0, batch_flags=BATCH_HAS_MORE...}`; ordinary local changelog
+  batches keep `seq > 0`.
 - A chunk carries physical `ClearTable` / `Put` operations for user DBIs only.
   It must not export or overwrite reserved `_mdbxc_` sync metadata DBIs through
   the normal user-operation path.

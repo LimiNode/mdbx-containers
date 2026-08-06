@@ -20,6 +20,35 @@ option(MDBXC_BUILD_BENCHMARKS   "Build benchmark executables"                   
 option(MDBXC_ENABLE_STRESS_TESTS "Register long stress tests with CTest"           OFF)
 option(MDBXC_USE_ASAN "Enable AddressSanitizer for tests/examples (not for libmdbx)" ON)
 
+if(MDBXC_BUILD_TESTS)
+    include(CTest)
+    enable_testing()
+
+    # Keep relative test databases out of the source tree and remove them after
+    # every CTest fixture, including MDBX lock files left by a failed test.
+    set(MDBXC_TEST_DATA_DIR "${CMAKE_BINARY_DIR}/test-data")
+    set(MDBXC_TEST_DATA_SUBDIR "${MDBXC_TEST_DATA_DIR}/data")
+    set(MDBXC_TEST_EXE_DATA_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests/data")
+    file(MAKE_DIRECTORY "${MDBXC_TEST_DATA_SUBDIR}")
+    set(MDBXC_TEST_DATA_CLEANUP_SCRIPT
+        "${CMAKE_CURRENT_BINARY_DIR}/cleanup_test_data.cmake")
+    file(WRITE "${MDBXC_TEST_DATA_CLEANUP_SCRIPT}"
+        "file(REMOVE_RECURSE \"${MDBXC_TEST_DATA_DIR}\")\n"
+        "file(MAKE_DIRECTORY \"${MDBXC_TEST_DATA_SUBDIR}\")\n"
+        "file(REMOVE_RECURSE \"${MDBXC_TEST_EXE_DATA_DIR}\")\n")
+    add_test(NAME mdbxc_test_data_cleanup
+        COMMAND ${CMAKE_COMMAND} -P "${MDBXC_TEST_DATA_CLEANUP_SCRIPT}")
+    set_tests_properties(mdbxc_test_data_cleanup PROPERTIES
+        WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
+        FIXTURES_CLEANUP mdbxc_test_data)
+
+    function(mdbxc_configure_test_execution test_name)
+        set_tests_properties(${test_name} PROPERTIES
+            WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
+            FIXTURES_REQUIRED mdbxc_test_data)
+    endfunction()
+endif()
+
 # Optional transport backends. Off by default to keep the default build free of
 # network-stack dependencies. The *_SYNC_EXAMPLE options below preserve the
 # older example-oriented entry points and enable the matching backend when used.
@@ -270,7 +299,9 @@ if(MDBXC_SIMPLE_WEB_HTTP_TRANSPORT)
         add_test(NAME test_simple_web_http_transport
             COMMAND test_simple_web_http_transport)
         set_tests_properties(test_simple_web_http_transport PROPERTIES
-            TIMEOUT 30)
+            TIMEOUT 30
+            WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
+            FIXTURES_REQUIRED mdbxc_test_data)
         message(STATUS "HTTP binding test "
             "test_simple_web_http_transport -> "
             "${_MDBXC_SIMPLE_WEB_HTTP_TARGET}")
@@ -340,7 +371,9 @@ if(MDBXC_KURLYK_HTTP_TRANSPORT)
         add_test(NAME test_kurlyk_http_transport
             COMMAND test_kurlyk_http_transport)
         set_tests_properties(test_kurlyk_http_transport PROPERTIES
-            TIMEOUT 30)
+            TIMEOUT 30
+            WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
+            FIXTURES_REQUIRED mdbxc_test_data)
         message(STATUS "Kurlyk HTTP client test "
             "test_kurlyk_http_transport -> ${_MDBXC_KURLYK_HTTP_TARGET}")
     endif()
@@ -403,7 +436,9 @@ if(MDBXC_SIMPLE_WEB_WEBSOCKET_TRANSPORT)
         add_test(NAME test_simple_websocket_transport
             COMMAND test_simple_websocket_transport)
         set_tests_properties(test_simple_websocket_transport PROPERTIES
-            TIMEOUT 30)
+            TIMEOUT 30
+            WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
+            FIXTURES_REQUIRED mdbxc_test_data)
         message(STATUS "WebSocket binding test "
             "test_simple_websocket_transport -> "
             "${_MDBXC_SIMPLE_WEB_WEBSOCKET_TARGET}")
@@ -425,6 +460,8 @@ if(MDBXC_BUILD_TESTS)
     )
     set(MDBXC_STANDALONE_PUBLIC_HEADERS
         mdbx_containers/common.hpp
+        mdbx_containers/common/backup.hpp
+        mdbx_containers/common/hashing.hpp
         mdbx_containers/AnyValueTable.hpp
         mdbx_containers/Hash.hpp
         mdbx_containers/HashedKeyValueStore.hpp
@@ -437,36 +474,35 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/ValueTable.hpp
     )
     set(MDBXC_SYNC_STANDALONE_HEADERS
-        mdbx_containers/sync/codec_flags.hpp
-        mdbx_containers/sync/LogicalSchema.hpp
-        mdbx_containers/sync/ChangeOp.hpp
-        mdbx_containers/sync/LogicalChange.hpp
-        mdbx_containers/sync/LogicalChangeFrameCodec.hpp
-        mdbx_containers/sync/LogicalDeliveryEnvelope.hpp
-        mdbx_containers/sync/LogicalDeliveryEnvelopeCodec.hpp
-        mdbx_containers/sync/ILogicalDeliveryOutbox.hpp
-        mdbx_containers/sync/LogicalDeliveryProtocol.hpp
-        mdbx_containers/sync/ILogicalDeliveryPeer.hpp
-        mdbx_containers/sync/LogicalTableAdapter.hpp
-          mdbx_containers/sync/LogicalSchemaValidation.hpp
-          mdbx_containers/sync/adapters/KeyValueTableLogicalAdapter.hpp
-          mdbx_containers/sync/adapters/KeyTableLogicalAdapter.hpp
-          mdbx_containers/sync/adapters/KeyMultiValueTableLogicalAdapter.hpp
-          mdbx_containers/sync/adapters/KeyOrderedMultiValueTableLogicalAdapter.hpp
-          mdbx_containers/sync/adapters/KeyOrderedMultiValueDestructiveState.hpp
-          mdbx_containers/sync/adapters/KeyOrderedMultiValueTableDestructiveLogicalAdapter.hpp
-        mdbx_containers/sync/ChangeBatch.hpp
-        mdbx_containers/sync/ChangeBatchCodec.hpp
-        mdbx_containers/sync/FullSnapshotProtocol.hpp
-        mdbx_containers/sync/SyncApplyObserver.hpp
-        mdbx_containers/sync/SyncNodeSession.hpp
-        mdbx_containers/sync/SyncWorkerGuard.hpp
-        mdbx_containers/sync/DirectLogicalDeliveryPeer.hpp
-        mdbx_containers/sync/stores/LogicalDeliveryStore.hpp
-        mdbx_containers/sync/stores/LogicalDeliveryOrderStore.hpp
-        mdbx_containers/sync/stores/LogicalOutboxStore.hpp
-        mdbx_containers/sync/stores/SchemaRegistryStore.hpp
-        mdbx_containers/sync/TransportMessageCodec.hpp
+        mdbx_containers/sync/core.hpp
+        mdbx_containers/sync/protocol.hpp
+        mdbx_containers/sync/logical.hpp
+        mdbx_containers/sync/adapters.hpp
+        mdbx_containers/sync/engine.hpp
+        mdbx_containers/sync/protocol/codec_flags.hpp
+        mdbx_containers/sync/logical/LogicalSchema.hpp
+        mdbx_containers/sync/protocol/ChangeOp.hpp
+        mdbx_containers/sync/logical/LogicalChange.hpp
+        mdbx_containers/sync/logical/LogicalChangeFrameCodec.hpp
+        mdbx_containers/sync/logical/LogicalDeliveryEnvelope.hpp
+        mdbx_containers/sync/logical/LogicalDeliveryEnvelopeCodec.hpp
+        mdbx_containers/sync/logical/ILogicalDeliveryOutbox.hpp
+        mdbx_containers/sync/logical/LogicalDeliveryProtocol.hpp
+        mdbx_containers/sync/logical/ILogicalDeliveryPeer.hpp
+        mdbx_containers/sync/logical/LogicalTableAdapter.hpp
+        mdbx_containers/sync/logical/logical_schema_validation.hpp
+        mdbx_containers/sync/protocol/ChangeBatch.hpp
+        mdbx_containers/sync/protocol/ChangeBatchCodec.hpp
+        mdbx_containers/sync/protocol/FullSnapshotProtocol.hpp
+        mdbx_containers/sync/core/SyncApplyObserver.hpp
+        mdbx_containers/sync/engine/SyncNodeSession.hpp
+        mdbx_containers/sync/engine/SyncWorkerGuard.hpp
+        mdbx_containers/sync/logical/DirectLogicalDeliveryPeer.hpp
+        mdbx_containers/sync/logical/stores/LogicalDeliveryStore.hpp
+        mdbx_containers/sync/logical/stores/LogicalDeliveryOrderStore.hpp
+        mdbx_containers/sync/logical/stores/LogicalOutboxStore.hpp
+        mdbx_containers/sync/logical/stores/SchemaRegistryStore.hpp
+        mdbx_containers/sync/transport/TransportMessageCodec.hpp
     )
 
     function(mdbxc_add_test_target test_name test_file)
@@ -498,6 +534,7 @@ if(MDBXC_BUILD_TESTS)
         if(NOT _mdbxc_is_stress_test OR MDBXC_ENABLE_STRESS_TESTS)
             # IMPORTANT: we do NOT define INTERACTIVE_TEST for tests.
             add_test(NAME ${test_name} COMMAND ${test_name})
+            mdbxc_configure_test_execution(${test_name})
 
             if(_mdbxc_is_stress_test)
                 set_tests_properties(${test_name} PROPERTIES LABELS stress TIMEOUT 300)
@@ -550,6 +587,13 @@ if(MDBXC_BUILD_TESTS)
     foreach(header IN LISTS MDBXC_STANDALONE_PUBLIC_HEADERS)
         string(MAKE_C_IDENTIFIER "${header}" header_target_suffix)
         set(test_name "header_standalone_${header_target_suffix}")
+        string(LENGTH "${test_name}" test_name_length)
+        if(test_name_length GREATER 64)
+            get_filename_component(header_basename "${header}" NAME_WE)
+            string(SHA1 header_hash "${header}")
+            string(SUBSTRING "${header_hash}" 0 8 header_hash_short)
+            set(test_name "header_standalone_${header_basename}_${header_hash_short}")
+        endif()
         set(test_file "${_mdbxc_generated_test_dir}/${test_name}.cpp")
         file(WRITE "${test_file}" "#include <${header}>\n\nint main() {\n    return 0;\n}\n")
         mdbxc_add_test_target(${test_name} ${test_file})
@@ -557,6 +601,13 @@ if(MDBXC_BUILD_TESTS)
     foreach(header IN LISTS MDBXC_SYNC_STANDALONE_HEADERS)
         string(MAKE_C_IDENTIFIER "${header}" header_target_suffix)
         set(test_name "header_standalone_${header_target_suffix}")
+        string(LENGTH "${test_name}" test_name_length)
+        if(test_name_length GREATER 64)
+            get_filename_component(header_basename "${header}" NAME_WE)
+            string(SHA1 header_hash "${header}")
+            string(SUBSTRING "${header_hash}" 0 8 header_hash_short)
+            set(test_name "header_standalone_${header_basename}_${header_hash_short}")
+        endif()
         set(test_file "${_mdbxc_generated_test_dir}/${test_name}.cpp")
         file(WRITE "${test_file}" "#include <${header}>\n\nint main() {\n    return 0;\n}\n")
         mdbxc_add_test_target(${test_name} ${test_file})

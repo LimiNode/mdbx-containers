@@ -57,9 +57,11 @@
   `mdbx_containers/sync.hpp`.
 - v0.1 captures normal write paths for `KeyValueTable`, `KeyTable`,
   `ValueTable`, and `SequenceTable`; `VectorStore` is replicated indirectly
-  through its internal `SequenceTable` and `KeyValueTable` members. This is
-  raw physical replication for a leader/follower or otherwise externally
-  serialized writer per collection, not multi-writer logical replication.
+  through its internal `SequenceTable` and `KeyValueTable` members. It also
+  provides an opt-in schema-v1 `VectorStoreLogicalAdapter` for add, erase, and
+  clear across the four collection DBIs with explicit record ids. Raw and
+  logical modes require a leader/follower or otherwise externally serialized
+  writer per collection; neither provides multi-writer conflict resolution.
 - `AnyValueTable`, `KeyMultiValueTable`, `KeyOrderedMultiValueTable`, and
   `HashedKeyValueStore` are not raw-replicated in v0.1.
   `KeyMultiValueTableLogicalAdapter` provides opt-in logical capture for
@@ -95,8 +97,8 @@
   `register_logical_schema()` for committed logical schema marker setup, plus
   `migrate_logical_schema()` for explicit marker replacement after exact
   preflight.
-  `KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are the first
-  concrete logical adapter helpers for explicit
+  `KeyValueTableLogicalAdapter`, `KeyTableLogicalAdapter`, and
+  `VectorStoreLogicalAdapter` are concrete logical adapter helpers for explicit
   `SyncEngine::apply_logical_changes()` or lower-level
   `LogicalTableRegistry::preflight_then_apply()` calls. Their
   payload codecs are separate from physical table storage and are selected
@@ -253,7 +255,10 @@ Use the same collection name, vector metric, and compatible embedding codec on
 every replica. A collection has one authoritative writer, or the application
 must serialize all writers externally: local `add()` allocates ids from local
 state and does not provide cross-node identity allocation or conflict
-resolution. There is no logical `VectorStore` sync adapter yet.
+resolution. The opt-in `VectorStoreLogicalAdapter` uses explicit ids and
+atomically applies add, erase, and clear across all four collection DBIs; it is
+an application-owned logical recipe, not a distributed allocator or automatic
+transport path.
 
 ```cpp
 #include <mdbx_containers/vector.hpp>

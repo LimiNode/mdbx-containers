@@ -51,7 +51,7 @@ int main() {
     cfg.pathname = "data/sequence_table_test.mdbx";
     cfg.max_dbs = 10;
     cfg.no_subdir = true;
-    cfg.relative_to_exe = true;
+    cfg.relative_to_exe = false;
 
     auto conn = mdbxc::Connection::create(cfg);
 
@@ -312,7 +312,7 @@ int main() {
         standalone_cfg.pathname = "data/sequence_table_config_test.mdbx";
         standalone_cfg.max_dbs = 2;
         standalone_cfg.no_subdir = true;
-        standalone_cfg.relative_to_exe = true;
+        standalone_cfg.relative_to_exe = false;
 
         mdbxc::SequenceTable<std::string> table(standalone_cfg, "config_seq");
         table.clear();
