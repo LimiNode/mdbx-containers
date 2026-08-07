@@ -24,33 +24,36 @@ if(MDBXC_BUILD_TESTS)
     include(CTest)
     enable_testing()
 
-    # Keep relative test databases out of the source tree and remove them after
-    # every CTest fixture, including MDBX lock files left by a failed test.
-    set(MDBXC_TEST_DATA_DIR "${CMAKE_BINARY_DIR}/test-data")
-    set(MDBXC_TEST_DATA_SUBDIR "${MDBXC_TEST_DATA_DIR}/data")
-    set(MDBXC_TEST_EXE_DATA_DIR "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests/data")
-    file(MAKE_DIRECTORY "${MDBXC_TEST_DATA_SUBDIR}")
-    set(MDBXC_TEST_DATA_CLEANUP_SCRIPT
-        "${CMAKE_CURRENT_BINARY_DIR}/cleanup_test_data.cmake")
-    file(WRITE "${MDBXC_TEST_DATA_CLEANUP_SCRIPT}"
-        "file(REMOVE_RECURSE \"${MDBXC_TEST_DATA_DIR}\")\n"
-        "file(MAKE_DIRECTORY \"${MDBXC_TEST_DATA_SUBDIR}\")\n"
-        "file(REMOVE_RECURSE \"${MDBXC_TEST_EXE_DATA_DIR}\")\n")
-    add_test(NAME mdbxc_test_data_setup
-        COMMAND ${CMAKE_COMMAND} -P "${MDBXC_TEST_DATA_CLEANUP_SCRIPT}")
-    set_tests_properties(mdbxc_test_data_setup PROPERTIES
-        WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
-        FIXTURES_SETUP mdbxc_test_data)
-    add_test(NAME mdbxc_test_data_cleanup
-        COMMAND ${CMAKE_COMMAND} -P "${MDBXC_TEST_DATA_CLEANUP_SCRIPT}")
-    set_tests_properties(mdbxc_test_data_cleanup PROPERTIES
-        WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
-        FIXTURES_CLEANUP mdbxc_test_data)
-
+    # Every test has its own working directory and executable-relative data
+    # directory. This keeps parallel tests from sharing relative MDBX paths and
+    # removes database and lock files even when a test fails.
+    set(MDBXC_TEST_DATA_ROOT "${CMAKE_BINARY_DIR}/test-data")
+    file(MAKE_DIRECTORY "${MDBXC_TEST_DATA_ROOT}")
     function(mdbxc_configure_test_execution test_name)
+        set(_mdbxc_test_data_dir
+            "${MDBXC_TEST_DATA_ROOT}/${test_name}")
+        set(_mdbxc_test_exe_data_dir
+            "${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests/${test_name}/data")
+        set(_mdbxc_fixture "mdbxc_test_data_${test_name}")
+        set(_mdbxc_cleanup_script
+            "${CMAKE_CURRENT_BINARY_DIR}/cleanup_test_data_${test_name}.cmake")
+        file(WRITE "${_mdbxc_cleanup_script}"
+            "file(REMOVE_RECURSE \"${_mdbxc_test_data_dir}\")\n"
+            "file(MAKE_DIRECTORY \"${_mdbxc_test_data_dir}/data\")\n"
+            "file(REMOVE_RECURSE \"${_mdbxc_test_exe_data_dir}\")\n")
+        add_test(NAME ${test_name}_test_data_setup
+            COMMAND ${CMAKE_COMMAND} -P "${_mdbxc_cleanup_script}")
+        set_tests_properties(${test_name}_test_data_setup PROPERTIES
+            WORKING_DIRECTORY "${MDBXC_TEST_DATA_ROOT}"
+            FIXTURES_SETUP ${_mdbxc_fixture})
+        add_test(NAME ${test_name}_test_data_cleanup
+            COMMAND ${CMAKE_COMMAND} -P "${_mdbxc_cleanup_script}")
+        set_tests_properties(${test_name}_test_data_cleanup PROPERTIES
+            WORKING_DIRECTORY "${MDBXC_TEST_DATA_ROOT}"
+            FIXTURES_CLEANUP ${_mdbxc_fixture})
         set_tests_properties(${test_name} PROPERTIES
-            WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
-            FIXTURES_REQUIRED mdbxc_test_data)
+            WORKING_DIRECTORY "${_mdbxc_test_data_dir}"
+            FIXTURES_REQUIRED ${_mdbxc_fixture})
     endfunction()
 endif()
 
@@ -294,7 +297,7 @@ if(MDBXC_SIMPLE_WEB_HTTP_TRANSPORT)
         add_executable(test_simple_web_http_transport
             tests/optional/test_simple_web_http_transport.cpp)
         set_target_properties(test_simple_web_http_transport PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests/test_simple_web_http_transport
         )
         target_compile_features(test_simple_web_http_transport PRIVATE
             cxx_std_11)
@@ -303,10 +306,8 @@ if(MDBXC_SIMPLE_WEB_HTTP_TRANSPORT)
             ${_MDBXC_SIMPLE_WEB_HTTP_TARGET})
         add_test(NAME test_simple_web_http_transport
             COMMAND test_simple_web_http_transport)
-        set_tests_properties(test_simple_web_http_transport PROPERTIES
-            TIMEOUT 30
-            WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
-            FIXTURES_REQUIRED mdbxc_test_data)
+        mdbxc_configure_test_execution(test_simple_web_http_transport)
+        set_tests_properties(test_simple_web_http_transport PROPERTIES TIMEOUT 30)
         message(STATUS "HTTP binding test "
             "test_simple_web_http_transport -> "
             "${_MDBXC_SIMPLE_WEB_HTTP_TARGET}")
@@ -357,7 +358,7 @@ if(MDBXC_KURLYK_HTTP_TRANSPORT)
         add_executable(test_kurlyk_http_transport
             tests/optional/test_kurlyk_http_transport.cpp)
         set_target_properties(test_kurlyk_http_transport PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests/test_kurlyk_http_transport
         )
         target_compile_features(test_kurlyk_http_transport PRIVATE cxx_std_17)
         mdbxc_enable_asan(test_kurlyk_http_transport)
@@ -375,10 +376,8 @@ if(MDBXC_KURLYK_HTTP_TRANSPORT)
         endforeach()
         add_test(NAME test_kurlyk_http_transport
             COMMAND test_kurlyk_http_transport)
-        set_tests_properties(test_kurlyk_http_transport PROPERTIES
-            TIMEOUT 30
-            WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
-            FIXTURES_REQUIRED mdbxc_test_data)
+        mdbxc_configure_test_execution(test_kurlyk_http_transport)
+        set_tests_properties(test_kurlyk_http_transport PROPERTIES TIMEOUT 30)
         message(STATUS "Kurlyk HTTP client test "
             "test_kurlyk_http_transport -> ${_MDBXC_KURLYK_HTTP_TARGET}")
     endif()
@@ -424,7 +423,7 @@ if(MDBXC_SIMPLE_WEB_WEBSOCKET_TRANSPORT)
         add_executable(test_simple_websocket_transport
             tests/optional/test_simple_websocket_transport.cpp)
         set_target_properties(test_simple_websocket_transport PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests/test_simple_websocket_transport
         )
         target_compile_features(test_simple_websocket_transport PRIVATE cxx_std_11)
         mdbxc_enable_asan(test_simple_websocket_transport)
@@ -440,10 +439,8 @@ if(MDBXC_SIMPLE_WEB_WEBSOCKET_TRANSPORT)
         endforeach()
         add_test(NAME test_simple_websocket_transport
             COMMAND test_simple_websocket_transport)
-        set_tests_properties(test_simple_websocket_transport PROPERTIES
-            TIMEOUT 30
-            WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
-            FIXTURES_REQUIRED mdbxc_test_data)
+        mdbxc_configure_test_execution(test_simple_websocket_transport)
+        set_tests_properties(test_simple_websocket_transport PROPERTIES TIMEOUT 30)
         message(STATUS "WebSocket binding test "
             "test_simple_websocket_transport -> "
             "${_MDBXC_SIMPLE_WEB_WEBSOCKET_TARGET}")
@@ -491,7 +488,7 @@ if(MDBXC_BUILD_TESTS)
     function(mdbxc_add_test_target test_name test_file)
         add_executable(${test_name} ${test_file})
         set_target_properties(${test_name} PROPERTIES
-            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests
+            RUNTIME_OUTPUT_DIRECTORY ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/tests/${test_name}
         )
         target_compile_features(${test_name} PRIVATE cxx_std_11)
 

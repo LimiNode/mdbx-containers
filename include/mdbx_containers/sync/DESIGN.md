@@ -114,11 +114,18 @@ different logical collections from collapsing to the same physical DBI names.
 
 `VectorStore` has two explicit sync paths. Raw physical replication covers its
 ids, embeddings, text, and metadata DBIs; replicas must agree on collection
-name, vector metric, and embedding serialization. `VectorStore::add()` assigns
+name and embedding serialization. The vector metric is local query
+configuration and is not stored in the logical schema marker; applications
+that require identical search ranking configure the same metric on every
+replica. `VectorStore::add()` assigns
 ids from local table state, so concurrent independent writers can collide and
 have no conflict-resolution rule. The schema-v1
 `VectorStoreLogicalAdapter` instead captures explicit record ids and canonical
 embedding/text/metadata payloads for add, erase, and clear across all four DBIs.
+When reopening a collection with an existing logical schema marker, use
+`VectorStoreLogicalAdapter::open_store_for_schema()` so all four DBIs open
+without `MDBX_CREATE`; a missing or incompatible DBI then fails closed. Direct
+`VectorStore` construction remains the create-by-default non-schema API.
 Logical erase removes the three payload rows but retains the ids marker, so an
 erased id cannot be reused by a later local append. Clear is the explicit
 allocator reset and removes every marker and payload row. Incoming adds validate

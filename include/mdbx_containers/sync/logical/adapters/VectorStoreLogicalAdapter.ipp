@@ -200,18 +200,73 @@
                 MDBX_txn* txn,
                 std::uint32_t& collection_dimension,
                 std::size_t& live_embedding_count) const {
+            validate_collection_state(
+                txn, collection_dimension, live_embedding_count);
+        }
+
+        void validate_collection_state(MDBX_txn* txn) const {
+            std::uint32_t collection_dimension = 0u;
+            std::size_t live_embedding_count = 0u;
+            validate_collection_state(
+                txn, collection_dimension, live_embedding_count);
+        }
+
+        void validate_collection_state(
+                MDBX_txn* txn,
+                std::uint32_t& collection_dimension,
+                std::size_t& live_embedding_count) const {
+            std::vector<std::pair<std::uint64_t, std::uint64_t> > ids;
             std::vector<std::pair<std::uint64_t, Embedding> > entries;
+            std::vector<std::pair<std::uint64_t, std::string> > texts;
+            std::vector<std::pair<std::uint64_t, std::string> > metadata;
+            m_store.m_ids.load_entries(ids, txn);
             m_store.m_embeddings.load(entries, txn);
+            m_store.m_texts.load(texts, txn);
+            m_store.m_metadata.load(metadata, txn);
+
+            std::map<std::uint64_t, std::uint8_t> record_parts;
+            std::map<std::uint64_t, const Embedding*> embeddings_by_id;
+            for (std::size_t i = 0u; i < ids.size(); ++i) {
+                record_parts[ids[i].first] |= 0x01u;
+            }
+            for (std::size_t i = 0u; i < entries.size(); ++i) {
+                record_parts[entries[i].first] |= 0x02u;
+                embeddings_by_id[entries[i].first] = &entries[i].second;
+            }
+            for (std::size_t i = 0u; i < texts.size(); ++i) {
+                record_parts[texts[i].first] |= 0x04u;
+            }
+            for (std::size_t i = 0u; i < metadata.size(); ++i) {
+                record_parts[metadata[i].first] |= 0x08u;
+            }
+
             collection_dimension = 0u;
-            live_embedding_count = entries.size();
+            live_embedding_count = 0u;
             for (std::size_t i = 0u; i < entries.size(); ++i) {
                 entries[i].second.validate();
+            }
+            for (std::map<std::uint64_t, std::uint8_t>::const_iterator it =
+                     record_parts.begin(); it != record_parts.end(); ++it) {
+                const std::uint8_t parts = it->second;
+                if (parts == 0x01u) continue;
+                if (parts != 0x0fu) {
+                    throw std::runtime_error(
+                        "VectorStore logical record is partially present");
+                }
+                const std::map<std::uint64_t, const Embedding*>::const_iterator embedding_it =
+                    embeddings_by_id.find(it->first);
+                if (embedding_it == embeddings_by_id.end()) {
+                    throw std::runtime_error(
+                        "VectorStore logical embedding state is inconsistent");
+                }
+                const Embedding& embedding = *embedding_it->second;
                 if (collection_dimension == 0u) {
-                    collection_dimension = entries[i].second.dim;
-                } else if (entries[i].second.dim != collection_dimension) {
+                    collection_dimension = embedding.dim;
+                } else if (embedding.dim != collection_dimension) {
                     throw std::runtime_error(
                         "VectorStore collection has mixed embedding dimensions");
                 }
+                ++live_embedding_count;
             }
         }
 
@@ -311,7 +366,7 @@
                 MDBX_txn* txn,
                 const LogicalChangeBatchView& changes) const {
             BatchPreflightState state;
-            validate_collection_dimension(
+            validate_collection_state(
                 txn, state.collection_dimension, state.live_embedding_count);
             for (std::size_t i = 0u; i < changes.size(); ++i) {
                 const DecodedChange decoded = decode_change(changes[i]);
@@ -338,8 +393,8 @@
         }
 
         void verify_storage(MDBX_txn* txn) const override {
-            (void)txn;
             verify_table_names();
+            validate_collection_state(txn);
         }
 
         VectorStore& m_store;

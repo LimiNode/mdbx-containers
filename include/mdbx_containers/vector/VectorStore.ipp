@@ -36,28 +36,26 @@ namespace mdbxc {
     inline VectorStore::VectorStore(const Config& config,
                                       std::string collection,
                                       VectorMetric metric)
-        : m_collection(validate_collection_name(collection))
-        , m_metric(metric)
-        , m_connection(Connection::create(config))
-        , m_ids(m_connection, make_table_name(m_collection, "ids"))
-        , m_embeddings(m_connection, make_table_name(m_collection, "embeddings"))
-        , m_texts(m_connection, make_table_name(m_collection, "texts"))
-        , m_metadata(m_connection, make_table_name(m_collection, "metadata"))
-        , m_index(metric)
-    {
-        rebuild_index();
-    }
+        : VectorStore(Connection::create(config), std::move(collection), metric,
+                      MDBX_DB_DEFAULTS | MDBX_CREATE) {}
 
     inline VectorStore::VectorStore(std::shared_ptr<Connection> connection,
                                       std::string collection,
                                       VectorMetric metric)
+        : VectorStore(std::move(connection), std::move(collection), metric,
+                      MDBX_DB_DEFAULTS | MDBX_CREATE) {}
+
+    inline VectorStore::VectorStore(std::shared_ptr<Connection> connection,
+                                      std::string collection,
+                                      VectorMetric metric,
+                                      MDBX_db_flags_t table_flags)
         : m_collection(validate_collection_name(collection))
         , m_metric(metric)
         , m_connection(require_connection(std::move(connection)))
-        , m_ids(m_connection, make_table_name(m_collection, "ids"))
-        , m_embeddings(m_connection, make_table_name(m_collection, "embeddings"))
-        , m_texts(m_connection, make_table_name(m_collection, "texts"))
-        , m_metadata(m_connection, make_table_name(m_collection, "metadata"))
+        , m_ids(m_connection, make_table_name(m_collection, "ids"), table_flags)
+        , m_embeddings(m_connection, make_table_name(m_collection, "embeddings"), table_flags)
+        , m_texts(m_connection, make_table_name(m_collection, "texts"), table_flags)
+        , m_metadata(m_connection, make_table_name(m_collection, "metadata"), table_flags)
         , m_index(metric)
     {
         rebuild_index();

@@ -99,6 +99,11 @@ namespace sync {
     private:
         friend class sync::VectorStoreLogicalAdapter;
 
+        VectorStore(std::shared_ptr<Connection> connection,
+                    std::string collection,
+                    VectorMetric metric,
+                    MDBX_db_flags_t table_flags);
+
         std::string m_collection;
         VectorMetric m_metric;
         std::shared_ptr<Connection> m_connection;

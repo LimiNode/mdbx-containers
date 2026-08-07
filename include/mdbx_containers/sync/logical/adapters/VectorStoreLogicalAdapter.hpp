@@ -5,6 +5,7 @@
 /// \file logical/adapters/VectorStoreLogicalAdapter.hpp
 /// \brief Explicit logical adapter for one \c VectorStore collection.
 
+#include <algorithm>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -66,6 +67,69 @@ namespace sync {
                     "VectorStore logical adapter schema version is unsupported");
             }
             verify_table_names();
+        }
+
+        /// \brief Opens a VectorStore with marker-aware DBI creation policy.
+        /// \details A fresh schema creates the four collection DBIs. When a
+        /// matching schema-v1 marker already exists, all four DBIs are opened
+        /// without \c MDBX_CREATE so missing or incompatible storage fails
+        /// closed. Direct \c VectorStore construction remains create-by-default.
+        static std::unique_ptr<VectorStore> open_store_for_schema(
+                const std::shared_ptr<Connection>& connection,
+                const std::string& schema_id = "mdbxc.vector_store",
+                const std::string& collection = "default",
+                VectorMetric metric = VectorMetric::COSINE) {
+            if (!connection || schema_id.empty()) {
+                throw std::invalid_argument(
+                    "VectorStore logical schema store configuration is invalid");
+            }
+
+            const std::string valid_collection =
+                VectorStore::validate_collection_name(collection);
+            const std::string expected_primary_dbi =
+                VectorStore::make_table_name(valid_collection, "ids");
+            std::vector<std::string> expected_dbis;
+            expected_dbis.push_back(expected_primary_dbi);
+            expected_dbis.push_back(
+                VectorStore::make_table_name(valid_collection, "embeddings"));
+            expected_dbis.push_back(
+                VectorStore::make_table_name(valid_collection, "texts"));
+            expected_dbis.push_back(
+                VectorStore::make_table_name(valid_collection, "metadata"));
+            std::sort(expected_dbis.begin(), expected_dbis.end());
+
+            bool marker_exists = false;
+            {
+                Transaction txn = connection->transaction(TransactionMode::READ_ONLY);
+                MDBX_dbi schema_dbi = 0;
+                const int open_rc = mdbx_dbi_open(
+                    txn.handle(), "_mdbxc_sync_schema",
+                    static_cast<MDBX_db_flags_t>(0), &schema_dbi);
+                if (open_rc != MDBX_NOTFOUND) {
+                    check_mdbx(open_rc,
+                               "VectorStore logical schema registry open failed");
+                    SchemaRegistryStore schemas(connection->env_handle());
+                    LogicalSchemaRecord marker;
+                    if (schemas.get(txn.handle(), schema_id, marker)) {
+                        if (marker.kind != LogicalTableKind::VectorStore ||
+                            marker.schema_version != supported_schema_version ||
+                            marker.flags != 0u ||
+                            marker.dbi_name != expected_primary_dbi ||
+                            marker.dbi_names != expected_dbis) {
+                            throw std::runtime_error(
+                                "VectorStore logical schema marker does not match collection DBIs");
+                        }
+                        marker_exists = true;
+                    }
+                }
+                txn.rollback();
+            }
+
+            const MDBX_db_flags_t table_flags = marker_exists
+                ? MDBX_DB_DEFAULTS
+                : static_cast<MDBX_db_flags_t>(MDBX_DB_DEFAULTS | MDBX_CREATE);
+            return std::unique_ptr<VectorStore>(
+                new VectorStore(connection, valid_collection, metric, table_flags));
         }
 
         /// \brief Returns the adapter's persistent logical schema reference.
@@ -242,8 +306,9 @@ namespace sync {
             /// \brief Clears all four collection DBIs.
             void clear() {
                 ensure_active();
-                m_pending.push_back(m_adapter.make_clear());
                 try {
+                    m_adapter.validate_collection_state(m_txn.handle());
+                    m_pending.push_back(m_adapter.make_clear());
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_adapter.m_store.m_connection, m_txn.handle());
                     m_adapter.m_store.m_ids.clear(m_txn.handle());

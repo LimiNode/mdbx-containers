@@ -284,10 +284,11 @@ metadata filtering и генерация embeddings не входят в обл�
 только из ASCII-букв, цифр, `_` и `-`.
 
 Сейчас sync воспроизводит четыре внутренних DBI этого store как raw physical
-изменения. На всех replica используйте одно имя коллекции, одну vector metric
-и совместимый embedding codec. У коллекции должен быть один authoritative
-writer либо приложение должно внешне сериализовать всех writer'ов: локальный
-`add()` выделяет id из локального состояния и не даёт cross-node identity
+изменения. На всех replica используйте одно имя коллекции и совместимый
+embedding codec. Vector metric является локальной конфигурацией query; если
+search ranking должен совпадать, настройте одинаковую metric на каждой replica.
+У коллекции должен быть один authoritative writer либо приложение должно
+внешне сериализовать всех writer'ов: локальный `add()` выделяет id из локального состояния и не даёт cross-node identity
 allocation или conflict resolution. Opt-in `VectorStoreLogicalAdapter`
 использует явные id и атомарно применяет add, erase и clear по всем четырём DBI.
 При erase id marker сохраняется как allocation high-water, а clear сбрасывает

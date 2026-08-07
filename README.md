@@ -251,9 +251,11 @@ Collection names are validated, not rewritten: use non-empty names containing
 only ASCII letters, digits, `_`, and `-`.
 
 Sync currently replays this store's four internal DBIs as raw physical changes.
-Use the same collection name, vector metric, and compatible embedding codec on
-every replica. A collection has one authoritative writer, or the application
-must serialize all writers externally: local `add()` allocates ids from local
+Use the same collection name and compatible embedding codec on every replica.
+The vector metric is local query configuration; configure the same metric on
+every replica when search rankings must match. A collection has one
+authoritative writer, or the application must serialize all writers externally:
+local `add()` allocates ids from local
 state and does not provide cross-node identity allocation or conflict
 resolution. The opt-in `VectorStoreLogicalAdapter` uses explicit ids and
 atomically applies add, erase, and clear across all four collection DBIs. Erase

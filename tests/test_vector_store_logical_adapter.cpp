@@ -52,6 +52,32 @@ static void initialize_adapter(
     engine.register_logical_adapter(adapter);
 }
 
+static void drop_named_dbi(const std::shared_ptr<mdbxc::Connection>& connection,
+                           const std::string& name) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::WRITABLE);
+    MDBX_dbi dbi = 0;
+    mdbxc::check_mdbx(mdbx_dbi_open(
+        transaction.handle(), name.c_str(), static_cast<MDBX_db_flags_t>(0), &dbi),
+                      "VectorStore test DBI open failed");
+    mdbxc::check_mdbx(mdbx_drop(transaction.handle(), dbi, true),
+                      "VectorStore test DBI drop failed");
+    transaction.commit();
+}
+
+static bool named_dbi_exists(const std::shared_ptr<mdbxc::Connection>& connection,
+                             const std::string& name) {
+    mdbxc::Transaction transaction =
+        connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+    MDBX_dbi dbi = 0;
+    const int rc = mdbx_dbi_open(
+        transaction.handle(), name.c_str(), static_cast<MDBX_db_flags_t>(0), &dbi);
+    transaction.rollback();
+    if (rc == MDBX_NOTFOUND) return false;
+    mdbxc::check_mdbx(rc, "VectorStore test DBI existence check failed");
+    return true;
+}
+
 int main() {
     const mdbxc::sync::NodeId db_uuid = make_id(42u);
     auto source_connection = mdbxc::Connection::create(
@@ -258,6 +284,95 @@ int main() {
         erase_dimension_changes).ok);
     MDBXC_TEST_ASSERT(erase_source.count() == 1u);
     MDBXC_TEST_ASSERT(erase_replica.count() == 1u);
+
+    const std::string schema_open_path =
+        "data/vector_store_logical_schema_open.mdbx";
+    const std::string schema_open_id = "vector-store-schema-open";
+    {
+        auto schema_connection = mdbxc::Connection::create(make_config(schema_open_path));
+        mdbxc::VectorStore schema_store(schema_connection, "schema_open");
+        schema_store.clear();
+        mdbxc::sync::SyncEngine schema_engine(schema_connection);
+        mdbxc::sync::VectorStoreLogicalAdapter schema_adapter(
+            schema_store, schema_open_id);
+        initialize_adapter(schema_engine, schema_adapter, make_id(5u), db_uuid);
+    }
+    auto schema_connection = mdbxc::Connection::create(make_config(schema_open_path));
+    {
+        mdbxc::Transaction transaction =
+            schema_connection->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::SchemaRegistryStore schemas(schema_connection->env_handle());
+        mdbxc::sync::LogicalSchemaRecord marker;
+        MDBXC_TEST_ASSERT(schemas.get(transaction.handle(), schema_open_id, marker));
+        MDBXC_TEST_ASSERT(marker.kind == mdbxc::sync::LogicalTableKind::VectorStore);
+        MDBXC_TEST_ASSERT(marker.schema_version == 1u);
+        MDBXC_TEST_ASSERT(marker.flags == 0u);
+        MDBXC_TEST_ASSERT(marker.dbi_name == "vectors_schema_open_ids");
+        MDBXC_TEST_ASSERT(marker.dbi_names.size() == 4u);
+        MDBXC_TEST_ASSERT(marker.dbi_names[0] == "vectors_schema_open_embeddings");
+        MDBXC_TEST_ASSERT(marker.dbi_names[1] == "vectors_schema_open_ids");
+        MDBXC_TEST_ASSERT(marker.dbi_names[2] == "vectors_schema_open_metadata");
+        MDBXC_TEST_ASSERT(marker.dbi_names[3] == "vectors_schema_open_texts");
+        transaction.rollback();
+    }
+    {
+        std::unique_ptr<mdbxc::VectorStore> reopened =
+            mdbxc::sync::VectorStoreLogicalAdapter::open_store_for_schema(
+                schema_connection, schema_open_id, "schema_open");
+        MDBXC_TEST_ASSERT(reopened->count() == 0u);
+    }
+    const std::string missing_embedding_dbi =
+        "vectors_schema_open_embeddings";
+    drop_named_dbi(schema_connection, missing_embedding_dbi);
+    bool schema_open_failed = false;
+    try {
+        std::unique_ptr<mdbxc::VectorStore> reopened =
+            mdbxc::sync::VectorStoreLogicalAdapter::open_store_for_schema(
+                schema_connection, schema_open_id, "schema_open");
+    } catch (const std::exception&) {
+        schema_open_failed = true;
+    }
+    MDBXC_TEST_ASSERT(schema_open_failed);
+    MDBXC_TEST_ASSERT(!named_dbi_exists(schema_connection, missing_embedding_dbi));
+    mdbxc::VectorStore direct_store(schema_connection, "schema_open");
+    MDBXC_TEST_ASSERT(named_dbi_exists(schema_connection, missing_embedding_dbi));
+
+    auto corrupt_connection = mdbxc::Connection::create(
+        make_config("data/vector_store_logical_corrupt_clear.mdbx"));
+    mdbxc::VectorStore corrupt_store(corrupt_connection, "corrupt_clear");
+    corrupt_store.clear();
+    mdbxc::sync::SyncEngine corrupt_engine(corrupt_connection);
+    mdbxc::sync::VectorStoreLogicalAdapter corrupt_adapter(corrupt_store);
+    initialize_adapter(corrupt_engine, corrupt_adapter, make_id(6u), db_uuid);
+    std::uint64_t corrupt_id = 0u;
+    {
+        std::unique_ptr<mdbxc::sync::VectorStoreLogicalAdapter::
+            LogicalCaptureSession> session = corrupt_adapter.begin_capture_session();
+        corrupt_id = session->add(make_vector(1.0f, 0.0f), "corrupt", "{}");
+        std::vector<mdbxc::sync::LogicalChange> corrupt_seed;
+        session->commit(corrupt_seed);
+    }
+    mdbxc::KeyValueTable<std::uint64_t, std::string> corrupt_texts(
+        corrupt_connection, "vectors_corrupt_clear_texts");
+    MDBXC_TEST_ASSERT(corrupt_texts.erase(corrupt_id));
+    std::vector<mdbxc::sync::LogicalChange> corrupt_clear(
+        1u, corrupt_adapter.make_clear());
+    MDBXC_TEST_ASSERT(!corrupt_engine.apply_logical_changes(corrupt_clear).ok);
+    MDBXC_TEST_ASSERT(corrupt_store.count() == 1u);
+    {
+        std::unique_ptr<mdbxc::sync::VectorStoreLogicalAdapter::
+            LogicalCaptureSession> session = corrupt_adapter.begin_capture_session();
+        bool local_clear_failed = false;
+        try {
+            session->clear();
+        } catch (const std::runtime_error&) {
+            local_clear_failed = true;
+        }
+        MDBXC_TEST_ASSERT(local_clear_failed);
+        MDBXC_TEST_ASSERT(session->pending_size() == 0u);
+        session->rollback();
+    }
+    MDBXC_TEST_ASSERT(corrupt_store.count() == 1u);
 
     return 0;
 }

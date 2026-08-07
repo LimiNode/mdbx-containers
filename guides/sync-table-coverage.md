@@ -76,11 +76,18 @@ Neither provides a distributed id allocator or cross-node conflict resolution;
 the logical adapter is an application-owned recipe rather than a generic
 multi-DBI primitive.
 
-Replicas must use the same collection name, vector metric, and compatible
-embedding serialization. A remote apply invalidates an already-open store's
-RAM index through the connection generation and it rebuilds lazily before the
-next index-dependent operation. The logical adapter remains opt-in and does
-not relax the writer-serialization requirement.
+For a collection with an existing logical schema marker, reopen through
+`VectorStoreLogicalAdapter::open_store_for_schema()`. It opens all four DBIs
+without `MDBX_CREATE`, so missing or incompatible storage fails closed; direct
+`VectorStore` construction remains create-by-default for non-schema use.
+
+Replicas must use the same collection name and compatible embedding
+serialization. The vector metric is local query configuration rather than
+logical schema state; applications that require identical search ranking must
+configure every replica with the same metric. A remote apply invalidates an
+already-open store's RAM index through the connection generation and it rebuilds
+lazily before the next index-dependent operation. The logical adapter remains
+opt-in and does not relax the writer-serialization requirement.
 
 ## Deferred Table Rules
 
