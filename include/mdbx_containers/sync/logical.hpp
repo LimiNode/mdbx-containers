@@ -3,26 +3,27 @@
 #define MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_HPP_INCLUDED
 
 /// \file sync/logical.hpp
-/// \brief Umbrella for logical schema, delivery, and adapter APIs.
+/// \brief Umbrella for logical schema, delivery, and durable logical state.
 
-#include <mdbx_containers/sync/sync_module.hpp>
+#include "config.hpp"
 
 #if MDBXC_SYNC_ENABLED
-#include <mdbx_containers/sync/logical/LogicalSchema.hpp>
-#include <mdbx_containers/sync/logical/LogicalChange.hpp>
-#include <mdbx_containers/sync/logical/LogicalChangeFrameCodec.hpp>
-#include <mdbx_containers/sync/logical/LogicalDeliveryEnvelope.hpp>
-#include <mdbx_containers/sync/logical/LogicalDeliveryEnvelopeCodec.hpp>
-#include <mdbx_containers/sync/logical/LogicalDeliveryProtocol.hpp>
-#include <mdbx_containers/sync/logical/ILogicalDeliveryOutbox.hpp>
-#include <mdbx_containers/sync/logical/ILogicalDeliveryPeer.hpp>
-#include <mdbx_containers/sync/logical/LogicalTableAdapter.hpp>
-#include <mdbx_containers/sync/logical/logical_schema_validation.hpp>
-#include <mdbx_containers/sync/adapters.hpp>
-#include <mdbx_containers/sync/logical/stores/LogicalDeliveryStore.hpp>
-#include <mdbx_containers/sync/logical/stores/LogicalDeliveryOrderStore.hpp>
-#include <mdbx_containers/sync/logical/stores/LogicalOutboxStore.hpp>
-#include <mdbx_containers/sync/logical/stores/SchemaRegistryStore.hpp>
+#include "protocol.hpp"
+#include "storage.hpp"
+#include "logical/LogicalSchema.hpp"
+#include "logical/LogicalChange.hpp"
+#include "logical/LogicalChangeFrameCodec.hpp"
+#include "logical/LogicalDeliveryEnvelope.hpp"
+#include "logical/LogicalDeliveryEnvelopeCodec.hpp"
+#include "logical/LogicalDeliveryProtocol.hpp"
+#include "logical/ILogicalDeliveryOutbox.hpp"
+#include "logical/ILogicalDeliveryPeer.hpp"
+#include "logical/LogicalTableAdapter.hpp"
+#include "logical/stores/SchemaRegistryStore.hpp"
+#include "logical/stores/LogicalDeliveryStore.hpp"
+#include "logical/stores/LogicalDeliveryOrderStore.hpp"
+#include "logical/stores/LogicalOutboxStore.hpp"
+#include "logical/logical_schema_validation.hpp"
 #endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_HPP_INCLUDED

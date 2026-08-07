@@ -5,14 +5,9 @@
 /// \file engine/SyncNodeSession.hpp
 /// \brief RAII helper for common sync node application wiring.
 
-#include <mdbx_containers/sync/sync_module.hpp>
-
 #if MDBXC_SYNC_ENABLED
 
-#include <mdbx_containers/sync/capture/ISyncCaptureSink.hpp>
-#include <mdbx_containers/sync/core/SyncApplyObserver.hpp>
-#include <mdbx_containers/sync/capture/SyncCaptureScope.hpp>
-#include <mdbx_containers/sync/engine/SyncWorkerGuard.hpp>
+#include "SyncWorkerGuard.hpp"
 
 #include <cstdint>
 #include <memory>

@@ -36,6 +36,11 @@ if(MDBXC_BUILD_TESTS)
         "file(REMOVE_RECURSE \"${MDBXC_TEST_DATA_DIR}\")\n"
         "file(MAKE_DIRECTORY \"${MDBXC_TEST_DATA_SUBDIR}\")\n"
         "file(REMOVE_RECURSE \"${MDBXC_TEST_EXE_DATA_DIR}\")\n")
+    add_test(NAME mdbxc_test_data_setup
+        COMMAND ${CMAKE_COMMAND} -P "${MDBXC_TEST_DATA_CLEANUP_SCRIPT}")
+    set_tests_properties(mdbxc_test_data_setup PROPERTIES
+        WORKING_DIRECTORY "${MDBXC_TEST_DATA_DIR}"
+        FIXTURES_SETUP mdbxc_test_data)
     add_test(NAME mdbxc_test_data_cleanup
         COMMAND ${CMAKE_COMMAND} -P "${MDBXC_TEST_DATA_CLEANUP_SCRIPT}")
     set_tests_properties(mdbxc_test_data_cleanup PROPERTIES
@@ -463,7 +468,6 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/common/backup.hpp
         mdbx_containers/common/hashing.hpp
         mdbx_containers/AnyValueTable.hpp
-        mdbx_containers/Hash.hpp
         mdbx_containers/HashedKeyValueStore.hpp
         mdbx_containers/KeyMultiValueTable.hpp
         mdbx_containers/KeyOrderedMultiValueTable.hpp
@@ -473,36 +477,15 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/TableSequence.hpp
         mdbx_containers/ValueTable.hpp
     )
-    set(MDBXC_SYNC_STANDALONE_HEADERS
+    set(MDBXC_SYNC_DOMAIN_UMBRELLAS
         mdbx_containers/sync/core.hpp
         mdbx_containers/sync/protocol.hpp
+        mdbx_containers/sync/storage.hpp
+        mdbx_containers/sync/capture.hpp
         mdbx_containers/sync/logical.hpp
         mdbx_containers/sync/adapters.hpp
         mdbx_containers/sync/engine.hpp
-        mdbx_containers/sync/protocol/codec_flags.hpp
-        mdbx_containers/sync/logical/LogicalSchema.hpp
-        mdbx_containers/sync/protocol/ChangeOp.hpp
-        mdbx_containers/sync/logical/LogicalChange.hpp
-        mdbx_containers/sync/logical/LogicalChangeFrameCodec.hpp
-        mdbx_containers/sync/logical/LogicalDeliveryEnvelope.hpp
-        mdbx_containers/sync/logical/LogicalDeliveryEnvelopeCodec.hpp
-        mdbx_containers/sync/logical/ILogicalDeliveryOutbox.hpp
-        mdbx_containers/sync/logical/LogicalDeliveryProtocol.hpp
-        mdbx_containers/sync/logical/ILogicalDeliveryPeer.hpp
-        mdbx_containers/sync/logical/LogicalTableAdapter.hpp
-        mdbx_containers/sync/logical/logical_schema_validation.hpp
-        mdbx_containers/sync/protocol/ChangeBatch.hpp
-        mdbx_containers/sync/protocol/ChangeBatchCodec.hpp
-        mdbx_containers/sync/protocol/FullSnapshotProtocol.hpp
-        mdbx_containers/sync/core/SyncApplyObserver.hpp
-        mdbx_containers/sync/engine/SyncNodeSession.hpp
-        mdbx_containers/sync/engine/SyncWorkerGuard.hpp
-        mdbx_containers/sync/logical/DirectLogicalDeliveryPeer.hpp
-        mdbx_containers/sync/logical/stores/LogicalDeliveryStore.hpp
-        mdbx_containers/sync/logical/stores/LogicalDeliveryOrderStore.hpp
-        mdbx_containers/sync/logical/stores/LogicalOutboxStore.hpp
-        mdbx_containers/sync/logical/stores/SchemaRegistryStore.hpp
-        mdbx_containers/sync/transport/TransportMessageCodec.hpp
+        mdbx_containers/sync/transport.hpp
     )
 
     function(mdbxc_add_test_target test_name test_file)
@@ -598,15 +581,15 @@ if(MDBXC_BUILD_TESTS)
         file(WRITE "${test_file}" "#include <${header}>\n\nint main() {\n    return 0;\n}\n")
         mdbxc_add_test_target(${test_name} ${test_file})
     endforeach()
-    foreach(header IN LISTS MDBXC_SYNC_STANDALONE_HEADERS)
+    foreach(header IN LISTS MDBXC_SYNC_DOMAIN_UMBRELLAS)
         string(MAKE_C_IDENTIFIER "${header}" header_target_suffix)
-        set(test_name "header_standalone_${header_target_suffix}")
+        set(test_name "header_domain_${header_target_suffix}")
         string(LENGTH "${test_name}" test_name_length)
         if(test_name_length GREATER 64)
             get_filename_component(header_basename "${header}" NAME_WE)
             string(SHA1 header_hash "${header}")
             string(SUBSTRING "${header_hash}" 0 8 header_hash_short)
-            set(test_name "header_standalone_${header_basename}_${header_hash_short}")
+            set(test_name "header_domain_${header_basename}_${header_hash_short}")
         endif()
         set(test_file "${_mdbxc_generated_test_dir}/${test_name}.cpp")
         file(WRITE "${test_file}" "#include <${header}>\n\nint main() {\n    return 0;\n}\n")

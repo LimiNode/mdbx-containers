@@ -5,15 +5,21 @@
 /// \file protocol.hpp
 /// \brief Transport-level request and response structures for sync.
 
-#include <cstdint>
-#include <string>
-#include <vector>
+#include "config.hpp"
 
-#include <mdbx_containers/sync/protocol/ChangeBatch.hpp>
-#include <mdbx_containers/sync/core/cancellation.hpp>
-#include <mdbx_containers/sync/common.hpp>
-#include <mdbx_containers/sync/protocol/FullSnapshotProtocol.hpp>
-#include <mdbx_containers/sync/protocol/SyncCursor.hpp>
+#if MDBXC_SYNC_ENABLED
+#include "core.hpp"
+#include "protocol/codec_flags.hpp"
+#include "protocol/CodecBounds.hpp"
+#include "protocol/ChangeOp.hpp"
+#include "protocol/ChangeBatch.hpp"
+#include "protocol/ChangeBatchCodec.hpp"
+#include "protocol/IdentityProvider.hpp"
+#include "protocol/SyncCursor.hpp"
+#include "protocol/FullSnapshotProtocol.hpp"
+#endif
+
+#if MDBXC_SYNC_ENABLED
 
 namespace mdbxc {
 namespace sync {
@@ -153,5 +159,7 @@ namespace sync {
 
 } // namespace sync
 } // namespace mdbxc
+
+#endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_PROTOCOL_HPP_INCLUDED

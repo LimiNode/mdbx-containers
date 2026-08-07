@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <limits>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <stdexcept>
@@ -19,11 +20,15 @@ namespace mdbxc {
 namespace sync {
 
     /// \brief Adapter-local operations for a vector record collection.
-    enum VectorStoreLogicalOpcode {
-        VectorStoreLogicalAdd   = 1,
-        VectorStoreLogicalErase = 2,
-        VectorStoreLogicalClear = 3
+    enum class VectorStoreLogicalOpcode : std::uint32_t {
+        Add   = 1u,
+        Erase = 2u,
+        Clear = 3u
     };
+
+    constexpr std::uint32_t opcode_value(VectorStoreLogicalOpcode opcode) {
+        return static_cast<std::uint32_t>(opcode);
+    }
 
     /// \brief Logical adapter for one persistent \c VectorStore collection.
     /// \details The adapter owns no transport. It provides an explicit typed
@@ -36,17 +41,19 @@ namespace sync {
     /// causally serialized delivery; it does not provide distributed id
     /// allocation or conflict resolution.
     class VectorStoreLogicalAdapter : public ILogicalTableAdapter {
+    private:
+        static const std::uint32_t supported_schema_version = 1u;
+
     public:
-        static const std::uint32_t schema_version = 1u;
 
         /// \brief Constructs an adapter bound to \p store.
         /// \param store Existing vector collection.
         /// \param schema_id Persistent logical schema identifier.
-        /// \throws std::invalid_argument for an empty schema id or zero version.
+        /// \throws std::invalid_argument for an empty schema id or unsupported version.
         explicit VectorStoreLogicalAdapter(
                 VectorStore& store,
                 const std::string& schema_id = "mdbxc.vector_store",
-                std::uint32_t version = schema_version)
+                std::uint32_t version = supported_schema_version)
             : m_store(store),
               m_schema_id(schema_id),
               m_schema_version(version) {
@@ -54,9 +61,9 @@ namespace sync {
                 throw std::invalid_argument(
                     "VectorStore logical adapter schema id is empty");
             }
-            if (m_schema_version == 0u) {
+            if (m_schema_version != supported_schema_version) {
                 throw std::invalid_argument(
-                    "VectorStore logical adapter schema version is zero");
+                    "VectorStore logical adapter schema version is unsupported");
             }
             verify_table_names();
         }
@@ -113,7 +120,7 @@ namespace sync {
         LogicalChange make_erase(std::uint64_t id) const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = VectorStoreLogicalErase;
+            change.opcode = opcode_value(VectorStoreLogicalOpcode::Erase);
             append_u8(change.payload, payload_version);
             detail::append_u64_le(change.payload, id);
             return change;
@@ -123,7 +130,7 @@ namespace sync {
         LogicalChange make_clear() const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = VectorStoreLogicalClear;
+            change.opcode = opcode_value(VectorStoreLogicalOpcode::Clear);
             return change;
         }
 
@@ -168,7 +175,7 @@ namespace sync {
                 ensure_active();
                 embedding.validate();
                 m_adapter.m_store.ensure_index_fresh_locked();
-                if (m_adapter.m_store.m_index.dim() != 0 &&
+                if (m_adapter.m_store.m_index.dim() != 0u &&
                     embedding.dim != m_adapter.m_store.m_index.dim()) {
                     throw std::invalid_argument(
                         "Embedding dimension does not match index dimension");
@@ -203,17 +210,19 @@ namespace sync {
                 }
             }
 
-            /// \brief Erases one record when it exists.
-            /// \return Whether a complete record existed and was removed.
+            /// \brief Erases one live record while retaining its id marker.
+            /// \return Whether a live record existed and was removed.
             bool erase(std::uint64_t id) {
                 ensure_active();
                 const LogicalChange change = m_adapter.make_erase(id);
                 const RecordState state =
                     m_adapter.record_state(m_txn.handle(), id);
-                if (!state.any()) {
+                const RecordStateKind state_kind = state.kind();
+                if (state_kind == RecordStateKind::Unused ||
+                    state_kind == RecordStateKind::Erased) {
                     return false;
                 }
-                if (!state.complete()) {
+                if (state_kind == RecordStateKind::Corrupt) {
                     throw std::runtime_error(
                         "VectorStore logical record is partially present");
                 }
@@ -299,7 +308,6 @@ namespace sync {
 
         private:
             void erase_record(std::uint64_t id, MDBX_txn* txn) {
-                m_adapter.m_store.m_ids.erase(id, txn);
                 m_adapter.m_store.m_embeddings.erase(id, txn);
                 m_adapter.m_store.m_texts.erase(id, txn);
                 m_adapter.m_store.m_metadata.erase(id, txn);
@@ -341,20 +349,7 @@ namespace sync {
             try {
                 std::lock_guard<std::mutex> store_lock(m_store.m_store_mutex);
                 const DecodedChange decoded = decode_change(change);
-                const RecordState state = record_state(txn, decoded.id);
-                if (decoded.opcode == VectorStoreLogicalAdd) {
-                    if (state.any()) {
-                        return LogicalApplyResult::failure(
-                            state.complete()
-                                ? "VectorStore logical record id already exists"
-                                : "VectorStore logical record is partially present");
-                    }
-                } else if (decoded.opcode == VectorStoreLogicalErase &&
-                           state.any() && !state.complete()) {
-                    return LogicalApplyResult::failure(
-                        "VectorStore logical record is partially present");
-                }
-                return LogicalApplyResult::success();
+                return preflight_decoded_change(txn, decoded);
             } catch (const std::exception& e) {
                 return LogicalApplyResult::failure(
                     std::string("VectorStore logical preflight failed: ") +
@@ -365,17 +360,31 @@ namespace sync {
             }
         }
 
+        LogicalApplyResult preflight_batch(
+                MDBX_txn* txn,
+                const LogicalChangeBatchView& changes) const override {
+            try {
+                std::lock_guard<std::mutex> store_lock(m_store.m_store_mutex);
+                return preflight_batch_locked(txn, changes);
+            } catch (const std::exception& e) {
+                return LogicalApplyResult::failure(
+                    std::string("VectorStore logical batch preflight failed: ") +
+                    e.what());
+            } catch (...) {
+                return LogicalApplyResult::failure(
+                    "VectorStore logical batch preflight failed");
+            }
+        }
+
         LogicalApplyResult apply(
                 MDBX_txn* txn,
                 const LogicalChange& change) override {
-            const LogicalApplyResult validation = preflight(txn, change);
-            if (!validation.ok) return validation;
             try {
                 std::lock_guard<std::mutex> store_lock(m_store.m_store_mutex);
                 const DecodedChange decoded = decode_change(change);
                 Connection::SyncCaptureSuppressionScope suppress_capture(
                     *m_store.m_connection, txn);
-                if (decoded.opcode == VectorStoreLogicalAdd) {
+                if (decoded.opcode == opcode_value(VectorStoreLogicalOpcode::Add)) {
                     m_store.m_ids.insert_or_assign(decoded.id,
                                                    std::uint64_t(0), txn);
                     m_store.m_embeddings.insert_or_assign(
@@ -384,8 +393,7 @@ namespace sync {
                         decoded.id, decoded.text, txn);
                     m_store.m_metadata.insert_or_assign(
                         decoded.id, decoded.metadata_json, txn);
-                } else if (decoded.opcode == VectorStoreLogicalErase) {
-                    m_store.m_ids.erase(decoded.id, txn);
+                } else if (decoded.opcode == opcode_value(VectorStoreLogicalOpcode::Erase)) {
                     m_store.m_embeddings.erase(decoded.id, txn);
                     m_store.m_texts.erase(decoded.id, txn);
                     m_store.m_metadata.erase(decoded.id, txn);
@@ -407,214 +415,8 @@ namespace sync {
         }
 
     private:
-        static const std::uint8_t payload_version = 1u;
+#include "VectorStoreLogicalAdapter.ipp"
 
-        struct PayloadCursor {
-            const std::uint8_t* data;
-            std::size_t size;
-            std::size_t pos;
-        };
-
-        struct DecodedChange {
-            std::uint32_t opcode;
-            std::uint64_t id;
-            Embedding embedding;
-            std::string text;
-            std::string metadata_json;
-        };
-
-        struct RecordState {
-            bool ids;
-            bool embeddings;
-            bool texts;
-            bool metadata;
-
-            RecordState()
-                : ids(false), embeddings(false), texts(false), metadata(false) {}
-
-            bool any() const {
-                return ids || embeddings || texts || metadata;
-            }
-
-            bool complete() const {
-                return ids && embeddings && texts && metadata;
-            }
-        };
-
-        static void require(PayloadCursor& cursor, std::size_t size) {
-            if (cursor.pos > cursor.size || size > cursor.size - cursor.pos) {
-                throw std::runtime_error(
-                    "VectorStore logical payload underrun");
-            }
-        }
-
-        static std::uint8_t read_u8(PayloadCursor& cursor) {
-            require(cursor, 1u);
-            return cursor.data[cursor.pos++];
-        }
-
-        static std::uint64_t read_u64(PayloadCursor& cursor) {
-            require(cursor, 8u);
-            const std::uint64_t value =
-                detail::read_u64_le(cursor.data + cursor.pos);
-            cursor.pos += 8u;
-            return value;
-        }
-
-        static std::vector<std::uint8_t> read_blob(PayloadCursor& cursor) {
-            require(cursor, 4u);
-            const std::uint32_t size =
-                detail::read_u32_le(cursor.data + cursor.pos);
-            cursor.pos += 4u;
-            require(cursor, size);
-            std::vector<std::uint8_t> value;
-            if (size != 0u) {
-                value.assign(cursor.data + cursor.pos,
-                             cursor.data + cursor.pos + size);
-            }
-            cursor.pos += size;
-            return value;
-        }
-
-        static void validate_blob_size(std::size_t size, const char* label) {
-            if (size > static_cast<std::size_t>(
-                           (std::numeric_limits<std::uint32_t>::max)())) {
-                throw std::length_error(
-                    std::string("VectorStore logical ") + label +
-                    " is too large");
-            }
-        }
-
-        static void append_blob(std::vector<std::uint8_t>& out,
-                                const std::vector<std::uint8_t>& value) {
-            validate_blob_size(value.size(), "blob");
-            detail::append_u32_le(out, static_cast<std::uint32_t>(value.size()));
-            out.insert(out.end(), value.begin(), value.end());
-        }
-
-        static void append_blob(std::vector<std::uint8_t>& out,
-                                const std::string& value) {
-            validate_blob_size(value.size(), "string");
-            detail::append_u32_le(out, static_cast<std::uint32_t>(value.size()));
-            out.insert(out.end(), value.begin(), value.end());
-        }
-
-        static void append_u8(std::vector<std::uint8_t>& out,
-                              std::uint8_t value) {
-            out.push_back(value);
-        }
-
-        static LogicalChange make_add_from_bytes_impl(
-                const LogicalSchemaRef& schema,
-                std::uint64_t id,
-                const std::vector<std::uint8_t>& embedding_bytes,
-                const std::string& text,
-                const std::string& metadata_json) {
-            validate_blob_size(embedding_bytes.size(), "embedding payload");
-            validate_blob_size(text.size(), "text payload");
-            validate_blob_size(metadata_json.size(), "metadata payload");
-            LogicalChange change;
-            change.schema = schema;
-            change.opcode = VectorStoreLogicalAdd;
-            append_u8(change.payload, payload_version);
-            detail::append_u64_le(change.payload, id);
-            append_blob(change.payload, embedding_bytes);
-            append_blob(change.payload, text);
-            append_blob(change.payload, metadata_json);
-            return change;
-        }
-
-        LogicalChange make_add_from_bytes(
-                std::uint64_t id,
-                const std::vector<std::uint8_t>& embedding_bytes,
-                const std::string& text,
-                const std::string& metadata_json) const {
-            return make_add_from_bytes_impl(schema_ref(), id, embedding_bytes,
-                                            text, metadata_json);
-        }
-
-        DecodedChange decode_change(const LogicalChange& change) const {
-            if (change.flags != 0u || change.schema.schema_id != m_schema_id ||
-                change.schema.kind != LogicalTableKind::VectorStore ||
-                change.schema.schema_version != m_schema_version) {
-                throw std::runtime_error(
-                    "VectorStore logical schema or flags mismatch");
-            }
-            DecodedChange decoded;
-            decoded.opcode = change.opcode;
-            decoded.id = 0u;
-            PayloadCursor cursor = {
-                change.payload.empty() ? nullptr : &change.payload[0],
-                change.payload.size(), 0u};
-            if (change.opcode == VectorStoreLogicalClear) {
-                if (!change.payload.empty()) {
-                    throw std::runtime_error(
-                        "VectorStore logical clear payload is not empty");
-                }
-                return decoded;
-            }
-            if (change.opcode != VectorStoreLogicalAdd &&
-                change.opcode != VectorStoreLogicalErase) {
-                throw std::runtime_error(
-                    "VectorStore logical opcode is unsupported");
-            }
-            if (read_u8(cursor) != payload_version) {
-                throw std::runtime_error(
-                    "VectorStore logical payload version is unsupported");
-            }
-            decoded.id = read_u64(cursor);
-            if (change.opcode == VectorStoreLogicalAdd) {
-                const std::vector<std::uint8_t> embedding_bytes =
-                    read_blob(cursor);
-                decoded.embedding = Embedding::from_bytes(
-                    embedding_bytes.empty() ? nullptr : &embedding_bytes[0],
-                    embedding_bytes.size());
-                const std::vector<std::uint8_t> text_bytes = read_blob(cursor);
-                const std::vector<std::uint8_t> metadata_bytes =
-                    read_blob(cursor);
-                decoded.text = std::string(text_bytes.begin(), text_bytes.end());
-                decoded.metadata_json = std::string(
-                    metadata_bytes.begin(), metadata_bytes.end());
-            }
-            if (cursor.pos != cursor.size) {
-                throw std::runtime_error(
-                    "VectorStore logical payload has trailing bytes");
-            }
-            return decoded;
-        }
-
-        RecordState record_state(MDBX_txn* txn, std::uint64_t id) const {
-            RecordState state;
-            state.ids = m_store.m_ids.contains(id, txn);
-            state.embeddings = m_store.m_embeddings.contains(id, txn);
-            state.texts = m_store.m_texts.contains(id, txn);
-            state.metadata = m_store.m_metadata.contains(id, txn);
-            return state;
-        }
-
-        void verify_table_names() const {
-            const std::vector<std::string> names = affected_dbis();
-            for (std::size_t i = 0; i < names.size(); ++i) {
-                if (names[i].empty()) {
-                    throw std::invalid_argument(
-                        "VectorStore logical adapter DBI name is empty");
-                }
-            }
-        }
-
-        void initialize_storage(MDBX_txn* txn) const override {
-            (void)txn;
-            verify_table_names();
-        }
-
-        void verify_storage(MDBX_txn* txn) const override {
-            (void)txn;
-            verify_table_names();
-        }
-
-        VectorStore& m_store;
-        std::string m_schema_id;
-        std::uint32_t m_schema_version;
     };
 
 } // namespace sync

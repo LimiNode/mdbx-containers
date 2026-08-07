@@ -1,13 +1,11 @@
 #pragma once
-#ifndef MDBX_CONTAINERS_HEADER_SYNC_TRANSPORT_ISYNCPEER_HPP_INCLUDED
-#define MDBX_CONTAINERS_HEADER_SYNC_TRANSPORT_ISYNCPEER_HPP_INCLUDED
+#ifndef MDBX_CONTAINERS_HEADER_SYNC_ENGINE_ISYNCPEER_HPP_INCLUDED
+#define MDBX_CONTAINERS_HEADER_SYNC_ENGINE_ISYNCPEER_HPP_INCLUDED
 
-/// \file transport/ISyncPeer.hpp
-/// \brief Abstract transport-level peer used by \c SyncEngine.
+/// \file engine/ISyncPeer.hpp
+/// \brief Abstract peer used by \c SyncWorker and \c SyncEngine clients.
 
 #include <cstdint>
-
-#include <mdbx_containers/sync/protocol.hpp>
 
 namespace mdbxc {
 namespace sync {
@@ -67,4 +65,4 @@ namespace sync {
 } // namespace sync
 } // namespace mdbxc
 
-#endif // MDBX_CONTAINERS_HEADER_SYNC_TRANSPORT_ISYNCPEER_HPP_INCLUDED
+#endif // MDBX_CONTAINERS_HEADER_SYNC_ENGINE_ISYNCPEER_HPP_INCLUDED

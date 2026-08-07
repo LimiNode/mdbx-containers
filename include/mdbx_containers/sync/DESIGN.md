@@ -97,7 +97,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `KeyTable` | Supported | Captures insert/delete, range erase, reconcile/clear paths that operate on physical keys. |
 | `ValueTable` | Supported | Captures singleton put/delete/clear using its fixed physical key. |
 | `SequenceTable` | Supported | Captures set/append/delete/clear against stable `uint64_t` record ids. `append()` remains a local single-writer helper; external synchronization is still required for concurrent appenders. |
-| `VectorStore` | Raw plus limited logical adapter | Raw replication covers its `SequenceTable` and `KeyValueTable` member writes. The explicit schema-v1 logical adapter captures and applies add, erase, and clear over the ids, embeddings, text, and metadata DBIs with explicit record ids. Both paths require one authoritative or application-serialized writer per collection; the logical adapter is not a multi-writer conflict resolver or automatic transport path. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
+| `VectorStore` | Raw plus limited logical adapter | Raw replication covers its `SequenceTable` and `KeyValueTable` member writes. The explicit schema-v1 logical adapter captures and applies add, erase, and clear over the ids, embeddings, text, and metadata DBIs with explicit record ids. Erase retains the ids marker as the persistent allocation high-water; clear resets all four DBIs. Both paths require one authoritative or application-serialized writer per collection; the logical adapter is not a multi-writer conflict resolver or automatic transport path. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. Schema v1 captures unordered insert, version-neutral batch `append()`, key erase, all-matching-value erase, and clear; schema v2 adds exact-one erase and typed `reconcile()`; schema v3 adds bounded typed `erase_range()` expanded into exact `EraseKey` changes. All destructive modes require one-writer or causally serialized updates. |
 | `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids, and single-origin `replace_with()` expands replacement state into exact changes. |
@@ -119,6 +119,10 @@ ids from local table state, so concurrent independent writers can collide and
 have no conflict-resolution rule. The schema-v1
 `VectorStoreLogicalAdapter` instead captures explicit record ids and canonical
 embedding/text/metadata payloads for add, erase, and clear across all four DBIs.
+Logical erase removes the three payload rows but retains the ids marker, so an
+erased id cannot be reused by a later local append. Clear is the explicit
+allocator reset and removes every marker and payload row. Incoming adds validate
+their embedding dimension against the persisted collection before mutation.
 It is an opt-in application-owned logical recipe, not a generic multi-DBI
 primitive, distributed id allocator, conflict resolver, or automatic
 pull/push capability. Both paths therefore require a leader/follower or

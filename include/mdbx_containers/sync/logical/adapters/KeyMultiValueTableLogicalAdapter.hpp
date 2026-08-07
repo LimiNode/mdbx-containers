@@ -21,13 +21,17 @@ namespace mdbxc {
 namespace sync {
 
     /// \brief Opcodes understood by \c KeyMultiValueTableLogicalAdapter.
-    enum KeyMultiValueLogicalOpcode {
-        KeyMultiValueLogicalInsertOne       = 1,
-        KeyMultiValueLogicalEraseKey        = 2,
-        KeyMultiValueLogicalEraseAllValues  = 3,
-        KeyMultiValueLogicalClear           = 4,
-        KeyMultiValueLogicalEraseOneValue   = 5
+    enum class KeyMultiValueLogicalOpcode : std::uint32_t {
+        InsertOne       = 1u,
+        EraseKey        = 2u,
+        EraseAllValues  = 3u,
+        Clear           = 4u,
+        EraseOneValue   = 5u
     };
+
+    constexpr std::uint32_t opcode_value(KeyMultiValueLogicalOpcode opcode) {
+        return static_cast<std::uint32_t>(opcode);
+    }
 
     /// \brief Logical adapter for an unordered \c KeyMultiValueTable.
     /// \details The adapter transports public key/value bytes, never the
@@ -38,6 +42,16 @@ namespace sync {
              class KeyCodec, class ValueCodec,
              class Options = DefaultTableOptions>
     class KeyMultiValueTableLogicalAdapter : public ILogicalTableAdapter {
+    private:
+        static const std::uint32_t schema_version_v1 = 1u;
+        static const std::uint32_t schema_version_v2 = 2u;
+        static const std::uint32_t schema_version_v3 = 3u;
+
+        static bool supports_schema_version(std::uint32_t schema_version) {
+            return schema_version >= schema_version_v1 &&
+                   schema_version <= schema_version_v3;
+        }
+
     public:
         typedef KeyMultiValueTable<KeyT, ValueT, Options> table_type;
 
@@ -50,7 +64,7 @@ namespace sync {
 
         KeyMultiValueTableLogicalAdapter(table_type& table,
                                          const std::string& schema_id,
-                                         std::uint32_t schema_version = 1)
+                                         std::uint32_t schema_version = schema_version_v1)
             : m_table(table),
               m_schema_id(schema_id),
               m_schema_version(schema_version) {
@@ -62,8 +76,7 @@ namespace sync {
                 throw std::invalid_argument(
                     "KeyMultiValueTableLogicalAdapter DBI name is empty");
             }
-            if (m_schema_version != 1u && m_schema_version != 2u &&
-                m_schema_version != 3u) {
+            if (!supports_schema_version(m_schema_version)) {
                 throw std::invalid_argument(
                     "KeyMultiValueTableLogicalAdapter schema version is unsupported");
             }
@@ -87,34 +100,35 @@ namespace sync {
 
         LogicalChange make_insert_one(const KeyT& key,
                                       const ValueT& value) const {
-            return make_pair_change(KeyMultiValueLogicalInsertOne, key, value);
+            return make_pair_change(opcode_value(KeyMultiValueLogicalOpcode::InsertOne),
+                                    key, value);
         }
 
         LogicalChange make_erase_key(const KeyT& key) const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyMultiValueLogicalEraseKey;
+            change.opcode = opcode_value(KeyMultiValueLogicalOpcode::EraseKey);
             encode_key(key, change.payload);
             return change;
         }
 
         LogicalChange make_erase_all_values(const KeyT& key,
                                              const ValueT& value) const {
-            return make_pair_change(KeyMultiValueLogicalEraseAllValues,
+            return make_pair_change(opcode_value(KeyMultiValueLogicalOpcode::EraseAllValues),
                                     key, value);
         }
 
         LogicalChange make_erase_one_value(const KeyT& key,
                                             const ValueT& value) const {
             require_schema_v2();
-            return make_pair_change(KeyMultiValueLogicalEraseOneValue,
+            return make_pair_change(opcode_value(KeyMultiValueLogicalOpcode::EraseOneValue),
                                     key, value);
         }
 
         LogicalChange make_clear() const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyMultiValueLogicalClear;
+            change.opcode = opcode_value(KeyMultiValueLogicalOpcode::Clear);
             return change;
         }
 
@@ -133,14 +147,14 @@ namespace sync {
         /// deactivates the session, including before its first table mutation.
         /// Other single-operation preparation or encoding failures before
         /// mutation leave the session active.
-        class LogicalCaptureSession {
+        class LogicalCaptureSession
+                : private detail::CapturedLogicalTransaction {
         public:
             explicit LogicalCaptureSession(
                     const KeyMultiValueTableLogicalAdapter& adapter)
-                : m_adapter(adapter),
-                  m_txn(adapter.m_table.connection()->transaction(
-                      TransactionMode::WRITABLE)),
-                  m_active(true) {
+                : detail::CapturedLogicalTransaction(
+                      *adapter.m_table.connection()),
+                  m_adapter(adapter) {
                 const LogicalApplyResult marker_result =
                     validate_logical_adapter_marker(
                         m_txn.handle(),
@@ -411,19 +425,7 @@ namespace sync {
             /// durability and delivery enqueueing must share one transaction.
             void commit(std::vector<LogicalChange>& out) {
                 ensure_active();
-                const std::size_t old_size = out.size();
-                out.insert(out.end(), m_pending.begin(), m_pending.end());
-                try {
-                    m_txn.commit();
-                } catch (...) {
-                    out.erase(out.begin() +
-                              static_cast<std::ptrdiff_t>(old_size),
-                              out.end());
-                    rollback_and_deactivate();
-                    throw;
-                }
-                m_pending.clear();
-                m_active = false;
+                commit_pending(out);
             }
 
             /// \brief Commits captured mutations and their delivery atomically.
@@ -432,20 +434,7 @@ namespace sync {
                     const DbId& destination,
                     const CodecBounds* bounds = nullptr) {
                 ensure_active();
-                LogicalChangeFrame frame;
-                frame.changes = m_pending;
-                try {
-                    const LogicalDeliveryEnvelope envelope =
-                        outbox.enqueue_logical_delivery(
-                            m_txn.handle(), destination, frame, bounds);
-                    m_txn.commit();
-                    m_pending.clear();
-                    m_active = false;
-                    return envelope;
-                } catch (...) {
-                    rollback_and_deactivate();
-                    throw;
-                }
+                return commit_pending_to_outbox(outbox, destination, bounds);
             }
 
             void rollback() noexcept {
@@ -494,29 +483,12 @@ namespace sync {
                 }
             }
 
-            void rollback_and_deactivate() noexcept {
-                try {
-                    m_pending.clear();
-                } catch (...) {
-                }
-                try {
-                    m_txn.rollback();
-                } catch (...) {
-                }
-                m_active = false;
-            }
-
             void ensure_active() const {
-                if (!m_active) {
-                    throw std::logic_error(
-                        "KeyMultiValue logical capture session is not active");
-                }
+                detail::CapturedLogicalTransaction::ensure_active(
+                    "KeyMultiValue logical capture session is not active");
             }
 
             const KeyMultiValueTableLogicalAdapter& m_adapter;
-            Transaction m_txn;
-            std::vector<LogicalChange> m_pending;
-            bool m_active;
         };
 
         std::unique_ptr<LogicalCaptureSession> begin_capture_session() const {
@@ -542,29 +514,29 @@ namespace sync {
             try {
                 Connection::SyncCaptureSuppressionScope suppress_capture(
                     *m_table.connection(), txn);
-                if (change.opcode == KeyMultiValueLogicalInsertOne) {
+                if (change.opcode == opcode_value(KeyMultiValueLogicalOpcode::InsertOne)) {
                     const std::pair<KeyT, ValueT> pair =
                         decode_pair(change.payload);
                     m_table.insert(pair.first, pair.second, txn);
                     return LogicalApplyResult::success();
                 }
-                if (change.opcode == KeyMultiValueLogicalEraseKey) {
+                if (change.opcode == opcode_value(KeyMultiValueLogicalOpcode::EraseKey)) {
                     (void)m_table.erase(decode_key(change.payload), txn);
                     return LogicalApplyResult::success();
                 }
-                if (change.opcode == KeyMultiValueLogicalEraseAllValues) {
+                if (change.opcode == opcode_value(KeyMultiValueLogicalOpcode::EraseAllValues)) {
                     const std::pair<KeyT, ValueT> pair =
                         decode_pair(change.payload);
                     (void)m_table.erase(pair.first, pair.second, txn);
                     return LogicalApplyResult::success();
                 }
-                if (change.opcode == KeyMultiValueLogicalEraseOneValue) {
+                if (change.opcode == opcode_value(KeyMultiValueLogicalOpcode::EraseOneValue)) {
                     const std::pair<KeyT, ValueT> pair =
                         decode_pair(change.payload);
                     (void)m_table.erase_one(pair.first, pair.second, txn);
                     return LogicalApplyResult::success();
                 }
-                if (change.opcode == KeyMultiValueLogicalClear) {
+                if (change.opcode == opcode_value(KeyMultiValueLogicalOpcode::Clear)) {
                     m_table.clear(txn);
                     return LogicalApplyResult::success();
                 }
@@ -581,158 +553,8 @@ namespace sync {
         }
 
     private:
-        struct PayloadCursor {
-            const std::uint8_t* data;
-            std::size_t size;
-            std::size_t pos;
-        };
+#include "KeyMultiValueTableLogicalAdapter.ipp"
 
-        LogicalChange make_pair_change(std::uint32_t opcode,
-                                        const KeyT& key,
-                                        const ValueT& value) const {
-            LogicalChange change;
-            change.schema = schema_ref();
-            change.opcode = opcode;
-            encode_pair(key, value, change.payload);
-            return change;
-        }
-
-        static void require(PayloadCursor& cursor, std::size_t size) {
-            if (cursor.pos > cursor.size || size > cursor.size - cursor.pos) {
-                throw std::runtime_error(
-                    "KeyMultiValue logical payload underrun");
-            }
-        }
-
-        static void append_blob(std::vector<std::uint8_t>& out,
-                                const std::vector<std::uint8_t>& bytes) {
-            if (bytes.size() >
-                static_cast<std::size_t>(
-                    (std::numeric_limits<std::uint32_t>::max)())) {
-                throw std::length_error(
-                    "KeyMultiValue logical payload blob is too large");
-            }
-            detail::append_u32_le(out,
-                static_cast<std::uint32_t>(bytes.size()));
-            out.insert(out.end(), bytes.begin(), bytes.end());
-        }
-
-        static std::vector<std::uint8_t> read_blob(PayloadCursor& cursor) {
-            require(cursor, 4u);
-            const std::uint32_t size =
-                detail::read_u32_le(cursor.data + cursor.pos);
-            cursor.pos += 4u;
-            require(cursor, size);
-            std::vector<std::uint8_t> out;
-            if (size != 0u) {
-                out.assign(cursor.data + cursor.pos,
-                           cursor.data + cursor.pos + size);
-            }
-            cursor.pos += size;
-            return out;
-        }
-
-        static PayloadCursor make_cursor(
-                const std::vector<std::uint8_t>& payload) {
-            PayloadCursor cursor = {
-                payload.empty() ? nullptr : &payload[0],
-                payload.size(),
-                0u
-            };
-            return cursor;
-        }
-
-        static void ensure_end(const PayloadCursor& cursor) {
-            if (cursor.pos != cursor.size) {
-                throw std::runtime_error(
-                    "KeyMultiValue logical payload has trailing bytes");
-            }
-        }
-
-        static void encode_key(const KeyT& key,
-                               std::vector<std::uint8_t>& out) {
-            out.clear();
-            append_blob(out, KeyCodec::encode(key));
-        }
-
-        static void encode_pair(const KeyT& key,
-                                const ValueT& value,
-                                std::vector<std::uint8_t>& out) {
-            out.clear();
-            append_blob(out, KeyCodec::encode(key));
-            append_blob(out, ValueCodec::encode(value));
-        }
-
-        static KeyT decode_key(const std::vector<std::uint8_t>& payload) {
-            PayloadCursor cursor = make_cursor(payload);
-            const KeyT key = KeyCodec::decode(read_blob(cursor));
-            ensure_end(cursor);
-            return key;
-        }
-
-        static std::pair<KeyT, ValueT> decode_pair(
-                const std::vector<std::uint8_t>& payload) {
-            PayloadCursor cursor = make_cursor(payload);
-            const KeyT key = KeyCodec::decode(read_blob(cursor));
-            const ValueT value = ValueCodec::decode(read_blob(cursor));
-            ensure_end(cursor);
-            return std::make_pair(key, value);
-        }
-
-        void require_schema_v2() const {
-            if (m_schema_version != 2u && m_schema_version != 3u) {
-                throw std::logic_error(
-                    "KeyMultiValue exact-one erase requires schema version 2 or 3");
-            }
-        }
-
-        void require_schema_v3() const {
-            if (m_schema_version != 3u) {
-                throw std::logic_error(
-                    "KeyMultiValue range erase requires schema version 3");
-            }
-        }
-
-        LogicalApplyResult validate_payload(
-                const LogicalChange& change) const {
-            try {
-                if (change.opcode == KeyMultiValueLogicalInsertOne ||
-                    change.opcode == KeyMultiValueLogicalEraseAllValues ||
-                    change.opcode == KeyMultiValueLogicalEraseOneValue) {
-                    if (change.opcode == KeyMultiValueLogicalEraseOneValue &&
-                        m_schema_version != 2u && m_schema_version != 3u) {
-                        return LogicalApplyResult::failure(
-                            "KeyMultiValue exact-one erase requires schema version 2 or 3");
-                    }
-                    (void)decode_pair(change.payload);
-                    return LogicalApplyResult::success();
-                }
-                if (change.opcode == KeyMultiValueLogicalEraseKey) {
-                    (void)decode_key(change.payload);
-                    return LogicalApplyResult::success();
-                }
-                if (change.opcode == KeyMultiValueLogicalClear) {
-                    if (!change.payload.empty()) {
-                        return LogicalApplyResult::failure(
-                            "KeyMultiValue logical clear payload must be empty");
-                    }
-                    return LogicalApplyResult::success();
-                }
-            } catch (const std::exception& e) {
-                return LogicalApplyResult::failure(
-                    std::string("KeyMultiValue logical payload is invalid: ") +
-                    e.what());
-            } catch (...) {
-                return LogicalApplyResult::failure(
-                    "KeyMultiValue logical payload is invalid");
-            }
-            return LogicalApplyResult::failure(
-                "KeyMultiValue logical adapter opcode is unsupported");
-        }
-
-        table_type& m_table;
-        std::string m_schema_id;
-        std::uint32_t m_schema_version;
     };
 
 } // namespace sync

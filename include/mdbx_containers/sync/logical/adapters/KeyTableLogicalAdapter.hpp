@@ -20,11 +20,15 @@ namespace mdbxc {
 namespace sync {
 
     /// \brief Opcodes understood by \c KeyTableLogicalAdapter.
-    enum KeyTableLogicalOpcode {
-        KeyTableLogicalInsert = 1,
-        KeyTableLogicalDelete = 2,
-        KeyTableLogicalClear  = 3
+    enum class KeyTableLogicalOpcode : std::uint32_t {
+        Insert = 1u,
+        Delete = 2u,
+        Clear  = 3u
     };
+
+    constexpr std::uint32_t opcode_value(KeyTableLogicalOpcode opcode) {
+        return static_cast<std::uint32_t>(opcode);
+    }
 
     /// \brief Logical adapter for typed \c KeyTable insert/delete/clear ops.
     /// \details The adapter reuses the explicit key codec tags used by
@@ -33,6 +37,9 @@ namespace sync {
              class KeyCodec,
              class Options = DefaultTableOptions>
     class KeyTableLogicalAdapter : public ILogicalTableAdapter {
+    private:
+        static const std::uint32_t default_schema_version = 1u;
+
     public:
         typedef KeyTable<KeyT, Options> table_type;
 
@@ -42,7 +49,7 @@ namespace sync {
 
         KeyTableLogicalAdapter(table_type& table,
                                const std::string& schema_id,
-                               std::uint32_t schema_version = 1)
+                               std::uint32_t schema_version = default_schema_version)
             : m_table(table),
               m_schema_id(schema_id),
               m_schema_version(schema_version) {
@@ -54,7 +61,7 @@ namespace sync {
                 throw std::invalid_argument(
                     "KeyTableLogicalAdapter DBI name is empty");
             }
-            if (m_schema_version == 0) {
+            if (m_schema_version < default_schema_version) {
                 throw std::invalid_argument(
                     "KeyTableLogicalAdapter schema version is zero");
             }
@@ -81,7 +88,7 @@ namespace sync {
         LogicalChange make_insert(const KeyT& key) const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyTableLogicalInsert;
+            change.opcode = opcode_value(KeyTableLogicalOpcode::Insert);
             encode_key_only(key, change.payload);
             return change;
         }
@@ -89,7 +96,7 @@ namespace sync {
         LogicalChange make_delete(const KeyT& key) const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyTableLogicalDelete;
+            change.opcode = opcode_value(KeyTableLogicalOpcode::Delete);
             encode_key_only(key, change.payload);
             return change;
         }
@@ -97,7 +104,7 @@ namespace sync {
         LogicalChange make_clear() const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyTableLogicalClear;
+            change.opcode = opcode_value(KeyTableLogicalOpcode::Clear);
             return change;
         }
 
@@ -112,14 +119,14 @@ namespace sync {
         /// and becomes inactive. Preparation or encoding failures before
         /// transaction mutation leave it active. The adapter, table, and
         /// connection referenced by the adapter must outlive the session.
-        class LogicalCaptureSession {
+        class LogicalCaptureSession
+                : private detail::CapturedLogicalTransaction {
         public:
             explicit LogicalCaptureSession(
                     const KeyTableLogicalAdapter& adapter)
-                : m_adapter(adapter),
-                  m_txn(adapter.m_table.connection()->transaction(
-                      TransactionMode::WRITABLE)),
-                  m_active(true) {
+                : detail::CapturedLogicalTransaction(
+                      *adapter.m_table.connection()),
+                  m_adapter(adapter) {
                 const LogicalApplyResult marker_result =
                     validate_logical_adapter_marker(
                         m_txn.handle(),
@@ -198,19 +205,7 @@ namespace sync {
             /// durability and delivery enqueueing must share one transaction.
             void commit(std::vector<LogicalChange>& out) {
                 ensure_active();
-                const std::size_t old_size = out.size();
-                out.insert(out.end(), m_pending.begin(), m_pending.end());
-                try {
-                    m_txn.commit();
-                } catch (...) {
-                    out.erase(out.begin() +
-                              static_cast<std::ptrdiff_t>(old_size),
-                              out.end());
-                    rollback_and_deactivate();
-                    throw;
-                }
-                m_pending.clear();
-                m_active = false;
+                commit_pending(out);
             }
 
             /// \brief Commits captured table mutations and their delivery atomically.
@@ -219,20 +214,7 @@ namespace sync {
                     const DbId& destination,
                     const CodecBounds* bounds = nullptr) {
                 ensure_active();
-                LogicalChangeFrame frame;
-                frame.changes = m_pending;
-                try {
-                    const LogicalDeliveryEnvelope envelope =
-                        outbox.enqueue_logical_delivery(
-                            m_txn.handle(), destination, frame, bounds);
-                    m_txn.commit();
-                    m_pending.clear();
-                    m_active = false;
-                    return envelope;
-                } catch (...) {
-                    rollback_and_deactivate();
-                    throw;
-                }
+                return commit_pending_to_outbox(outbox, destination, bounds);
             }
 
             void rollback() noexcept {
@@ -247,26 +229,12 @@ namespace sync {
             }
 
         private:
-            void rollback_and_deactivate() noexcept {
-                try {
-                    m_pending.clear();
-                    m_txn.rollback();
-                } catch (...) {
-                }
-                m_active = false;
-            }
-
             void ensure_active() const {
-                if (!m_active) {
-                    throw std::logic_error(
-                        "KeyTable logical capture session is not active");
-                }
+                detail::CapturedLogicalTransaction::ensure_active(
+                    "KeyTable logical capture session is not active");
             }
 
             const KeyTableLogicalAdapter& m_adapter;
-            Transaction m_txn;
-            std::vector<LogicalChange> m_pending;
-            bool m_active;
         };
 
         std::unique_ptr<LogicalCaptureSession> begin_capture_session() const {
@@ -290,17 +258,17 @@ namespace sync {
             try {
                 Connection::SyncCaptureSuppressionScope suppress_capture(
                     *m_table.connection(), txn);
-                if (change.opcode == KeyTableLogicalInsert) {
+                if (change.opcode == opcode_value(KeyTableLogicalOpcode::Insert)) {
                     const KeyT key = decode_key_only(change.payload);
                     (void)m_table.insert(key, txn);
                     return LogicalApplyResult::success();
                 }
-                if (change.opcode == KeyTableLogicalDelete) {
+                if (change.opcode == opcode_value(KeyTableLogicalOpcode::Delete)) {
                     const KeyT key = decode_key_only(change.payload);
                     (void)m_table.erase(key, txn);
                     return LogicalApplyResult::success();
                 }
-                if (change.opcode == KeyTableLogicalClear) {
+                if (change.opcode == opcode_value(KeyTableLogicalOpcode::Clear)) {
                     m_table.clear(txn);
                     return LogicalApplyResult::success();
                 }
@@ -317,111 +285,8 @@ namespace sync {
         }
 
     private:
-        struct PayloadCursor {
-            const std::uint8_t* data;
-            std::size_t size;
-            std::size_t pos;
-        };
+#include "KeyTableLogicalAdapter.ipp"
 
-        static void require(PayloadCursor& cursor, std::size_t size) {
-            if (cursor.pos > cursor.size ||
-                size > cursor.size - cursor.pos) {
-                throw std::runtime_error(
-                    "KeyTable logical payload underrun");
-            }
-        }
-
-        static void append_blob(std::vector<std::uint8_t>& out,
-                                const std::vector<std::uint8_t>& value) {
-            if (value.size() >
-                static_cast<std::size_t>(
-                    std::numeric_limits<std::uint32_t>::max())) {
-                throw std::length_error(
-                    "KeyTable logical payload blob is too large");
-            }
-            detail::append_u32_le(out,
-                static_cast<std::uint32_t>(value.size()));
-            out.insert(out.end(), value.begin(), value.end());
-        }
-
-        static std::vector<std::uint8_t> read_blob(PayloadCursor& cursor) {
-            require(cursor, 4u);
-            const std::uint32_t size =
-                detail::read_u32_le(cursor.data + cursor.pos);
-            cursor.pos += 4u;
-            require(cursor, size);
-            std::vector<std::uint8_t> out;
-            if (size != 0u) {
-                out.assign(cursor.data + cursor.pos,
-                           cursor.data + cursor.pos + size);
-            }
-            cursor.pos += size;
-            return out;
-        }
-
-        static PayloadCursor make_cursor(
-                const std::vector<std::uint8_t>& payload) {
-            PayloadCursor cursor = {
-                payload.empty() ? nullptr : &payload[0],
-                payload.size(),
-                0u
-            };
-            return cursor;
-        }
-
-        static void ensure_end(const PayloadCursor& cursor) {
-            if (cursor.pos != cursor.size) {
-                throw std::runtime_error(
-                    "KeyTable logical payload has trailing bytes");
-            }
-        }
-
-        static void encode_key_only(const KeyT& key,
-                                    std::vector<std::uint8_t>& out) {
-            out.clear();
-            const std::vector<std::uint8_t> encoded_key =
-                KeyCodec::encode(key);
-            append_blob(out, encoded_key);
-        }
-
-        static KeyT decode_key_only(
-                const std::vector<std::uint8_t>& payload) {
-            PayloadCursor cursor = make_cursor(payload);
-            const std::vector<std::uint8_t> encoded_key = read_blob(cursor);
-            ensure_end(cursor);
-            return KeyCodec::decode(encoded_key);
-        }
-
-        LogicalApplyResult validate_payload(
-                const LogicalChange& change) const {
-            try {
-                if (change.opcode == KeyTableLogicalInsert ||
-                    change.opcode == KeyTableLogicalDelete) {
-                    (void)decode_key_only(change.payload);
-                    return LogicalApplyResult::success();
-                }
-                if (change.opcode == KeyTableLogicalClear) {
-                    if (!change.payload.empty()) {
-                        return LogicalApplyResult::failure(
-                            "KeyTable clear payload must be empty");
-                    }
-                    return LogicalApplyResult::success();
-                }
-            } catch (const std::exception& e) {
-                return LogicalApplyResult::failure(
-                    std::string("KeyTable logical payload is invalid: ") +
-                    e.what());
-            } catch (...) {
-                return LogicalApplyResult::failure(
-                    "KeyTable logical payload is invalid");
-            }
-            return LogicalApplyResult::failure(
-                "KeyTable logical adapter opcode is unsupported");
-        }
-
-        table_type& m_table;
-        std::string m_schema_id;
-        std::uint32_t m_schema_version;
     };
 
 } // namespace sync

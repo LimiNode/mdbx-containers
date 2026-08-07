@@ -114,8 +114,10 @@ delivery. The logical core uses the following contracts:
   the transport pull/push path yet; callers own logical frame delivery.
 - `VectorStoreLogicalAdapter` is an explicit schema-v1 apply helper with an
   opt-in typed capture session. It carries explicit record ids and applies
-  add, erase, and clear atomically across the four collection DBIs. Callers
-  own logical frame delivery and must serialize conflicting writers.
+  add, erase, and clear atomically across the four collection DBIs. Erase
+  retains the ids marker as allocation high-water, while clear resets every
+  DBI; incoming adds validate their embedding dimension before mutation.
+  Callers own logical frame delivery and must serialize conflicting writers.
 - `KeyMultiValueTableLogicalAdapter` follows the same explicit logical-frame
   path. Schema v1 provides unordered insert, version-neutral batch `append()`,
   key erase, all-matching-value erase, and clear; schema v2 adds exact-one

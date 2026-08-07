@@ -9,7 +9,7 @@
 #include <string>
 #include <vector>
 
-#include <mdbx_containers/sync/protocol/codec_flags.hpp>
+#include "codec_flags.hpp"
 
 namespace mdbxc {
 namespace sync {

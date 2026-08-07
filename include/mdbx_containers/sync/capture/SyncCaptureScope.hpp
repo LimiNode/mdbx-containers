@@ -5,12 +5,9 @@
 /// \file capture/SyncCaptureScope.hpp
 /// \brief RAII helper for temporarily attaching an \c ISyncCaptureSink.
 
-#include <mdbx_containers/sync/sync_module.hpp>
-
 #if MDBXC_SYNC_ENABLED
 
-#include <mdbx_containers/common.hpp>
-#include <mdbx_containers/sync/capture/ISyncCaptureSink.hpp>
+#include "ISyncCaptureSink.hpp"
 
 #include <cstdint>
 #include <exception>

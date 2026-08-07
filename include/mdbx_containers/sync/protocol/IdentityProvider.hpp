@@ -10,8 +10,8 @@
 #include <string>
 #include <vector>
 
-#include <mdbx_containers/sync/protocol/ChangeOp.hpp>
-#include <mdbx_containers/sync/protocol/codec_flags.hpp>
+#include "ChangeOp.hpp"
+#include "codec_flags.hpp"
 
 namespace mdbxc {
 namespace sync {

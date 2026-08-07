@@ -9,23 +9,17 @@
 /// non-zero. Otherwise the include is a no-op so applications that do not
 /// need replication pay zero compile-time or runtime cost.
 
-#include "sync/sync_module.hpp"
+#include "sync/config.hpp"
 
 #if MDBXC_SYNC_ENABLED
 #include "sync/core.hpp"
 #include "sync/protocol.hpp"
-#include "sync/transport/TransportMessageCodec.hpp"
+#include "sync/storage.hpp"
+#include "sync/capture.hpp"
 #include "sync/logical.hpp"
+#include "sync/adapters.hpp"
 #include "sync/engine.hpp"
-#include "sync/transport/ISyncPeer.hpp"
-#include "sync/transport/HttpTransport.hpp"
-#include "sync/transport/WebSocketTransport.hpp"
-#include "sync/transport/TransportMiddleware.hpp"
-#include "sync/stores/MetaStore.hpp"
-#include "sync/stores/OriginIndexStore.hpp"
-#include "sync/stores/ChangeLogStore.hpp"
-#include "sync/stores/AppliedStore.hpp"
-#include "sync/stores/IdentityIndexStore.hpp"
+#include "sync/transport.hpp"
 #endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_HPP_INCLUDED

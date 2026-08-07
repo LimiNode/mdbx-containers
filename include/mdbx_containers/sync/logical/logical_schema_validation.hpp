@@ -13,8 +13,6 @@
 
 #include "LogicalDeliveryEnvelope.hpp"
 #include "LogicalTableAdapter.hpp"
-#include <mdbx_containers/sync/stores/MetaStore.hpp>
-#include <mdbx_containers/sync/logical/stores/SchemaRegistryStore.hpp>
 
 namespace mdbxc {
 namespace sync {

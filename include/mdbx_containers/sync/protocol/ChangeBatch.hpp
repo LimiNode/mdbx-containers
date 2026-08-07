@@ -8,9 +8,8 @@
 #include <cstdint>
 #include <vector>
 
-#include <mdbx_containers/sync/protocol/ChangeOp.hpp>
-#include <mdbx_containers/sync/protocol/codec_flags.hpp>
-#include <mdbx_containers/sync/common.hpp>
+#include "ChangeOp.hpp"
+#include "codec_flags.hpp"
 
 namespace mdbxc {
 namespace sync {

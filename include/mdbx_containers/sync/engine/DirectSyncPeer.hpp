@@ -6,8 +6,8 @@
 /// \brief In-process transport that forwards \c ISyncPeer calls to a remote
 ///        \c SyncEngine instance. Intended for tests; no serialization.
 
-#include <mdbx_containers/sync/transport/ISyncPeer.hpp>
-#include <mdbx_containers/sync/engine/SyncEngine.hpp>
+#include "ISyncPeer.hpp"
+#include "SyncEngine.hpp"
 
 namespace mdbxc {
 namespace sync {

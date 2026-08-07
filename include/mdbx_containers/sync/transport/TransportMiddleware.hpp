@@ -21,9 +21,8 @@
 #include <string>
 #include <vector>
 
-#include <mdbx_containers/sync/transport/HttpTransport.hpp>
-#include <mdbx_containers/sync/transport/ISyncPeer.hpp>
-#include <mdbx_containers/sync/transport/WebSocketTransport.hpp>
+#include "HttpTransport.hpp"
+#include "WebSocketTransport.hpp"
 
 namespace mdbxc {
 namespace sync {

@@ -256,9 +256,11 @@ every replica. A collection has one authoritative writer, or the application
 must serialize all writers externally: local `add()` allocates ids from local
 state and does not provide cross-node identity allocation or conflict
 resolution. The opt-in `VectorStoreLogicalAdapter` uses explicit ids and
-atomically applies add, erase, and clear across all four collection DBIs; it is
-an application-owned logical recipe, not a distributed allocator or automatic
-transport path.
+atomically applies add, erase, and clear across all four collection DBIs. Erase
+retains the id marker as allocation high-water, while clear resets all four
+DBIs. Incoming logical adds validate their embedding dimension before mutation.
+It is an application-owned logical recipe, not a distributed allocator or
+automatic transport path.
 
 ```cpp
 #include <mdbx_containers/vector.hpp>

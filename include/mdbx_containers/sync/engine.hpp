@@ -5,15 +5,21 @@
 /// \file sync/engine.hpp
 /// \brief Umbrella for sync engine, worker, and direct peer APIs.
 
-#include <mdbx_containers/sync/sync_module.hpp>
+#include "config.hpp"
 
 #if MDBXC_SYNC_ENABLED
-#include <mdbx_containers/sync/engine/SyncEngine.hpp>
-#include <mdbx_containers/sync/engine/SyncWorker.hpp>
-#include <mdbx_containers/sync/engine/SyncWorkerGuard.hpp>
-#include <mdbx_containers/sync/engine/SyncNodeSession.hpp>
-#include <mdbx_containers/sync/engine/DirectSyncPeer.hpp>
-#include <mdbx_containers/sync/logical/DirectLogicalDeliveryPeer.hpp>
+#include "core.hpp"
+#include "protocol.hpp"
+#include "storage.hpp"
+#include "capture.hpp"
+#include "logical.hpp"
+#include "engine/ISyncPeer.hpp"
+#include "engine/SyncEngine.hpp"
+#include "engine/SyncWorker.hpp"
+#include "engine/SyncWorkerGuard.hpp"
+#include "engine/SyncNodeSession.hpp"
+#include "engine/DirectSyncPeer.hpp"
+#include "engine/DirectLogicalDeliveryPeer.hpp"
 #endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_ENGINE_HPP_INCLUDED

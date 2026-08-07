@@ -22,7 +22,6 @@
 #ifndef XXH_NAMESPACE
 #   define XXH_NAMESPACE MDBXC_XXH_
 #endif
-#include <mdbx_containers/detail/xxhash.h>
 
 namespace mdbxc {
 

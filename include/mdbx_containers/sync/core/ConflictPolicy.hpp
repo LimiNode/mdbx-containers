@@ -1,8 +1,8 @@
 #pragma once
-#ifndef MDBX_CONTAINERS_HEADER_SYNC_ENGINE_CONFLICTPOLICY_HPP_INCLUDED
-#define MDBX_CONTAINERS_HEADER_SYNC_ENGINE_CONFLICTPOLICY_HPP_INCLUDED
+#ifndef MDBX_CONTAINERS_HEADER_SYNC_CORE_CONFLICTPOLICY_HPP_INCLUDED
+#define MDBX_CONTAINERS_HEADER_SYNC_CORE_CONFLICTPOLICY_HPP_INCLUDED
 
-/// \file engine/ConflictPolicy.hpp
+/// \file core/ConflictPolicy.hpp
 /// \brief How a replica resolves conflicting updates to the same logical key.
 
 namespace mdbxc {
@@ -21,4 +21,4 @@ namespace sync {
 } // namespace sync
 } // namespace mdbxc
 
-#endif // MDBX_CONTAINERS_HEADER_SYNC_ENGINE_CONFLICTPOLICY_HPP_INCLUDED
+#endif // MDBX_CONTAINERS_HEADER_SYNC_CORE_CONFLICTPOLICY_HPP_INCLUDED

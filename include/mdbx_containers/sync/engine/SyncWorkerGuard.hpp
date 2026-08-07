@@ -5,7 +5,7 @@
 /// \file engine/SyncWorkerGuard.hpp
 /// \brief RAII helper for a background \c SyncWorker session.
 
-#include <mdbx_containers/sync/engine/SyncWorker.hpp>
+#include "SyncWorker.hpp"
 
 namespace mdbxc {
 namespace sync {

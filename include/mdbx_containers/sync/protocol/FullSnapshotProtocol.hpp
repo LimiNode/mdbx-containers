@@ -15,10 +15,9 @@
 #include <string>
 #include <vector>
 
-#include <mdbx_containers/sync/protocol/ChangeBatchCodec.hpp>
-#include <mdbx_containers/sync/protocol/CodecBounds.hpp>
-#include <mdbx_containers/sync/common.hpp>
-#include <mdbx_containers/sync/protocol/SyncCursor.hpp>
+#include "ChangeBatchCodec.hpp"
+#include "CodecBounds.hpp"
+#include "SyncCursor.hpp"
 
 namespace mdbxc {
 namespace sync {

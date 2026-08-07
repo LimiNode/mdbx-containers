@@ -23,10 +23,15 @@ namespace mdbxc {
 namespace sync {
 
     /// \brief Opcodes for schema-version-2 destructive ordered tables.
-    enum KeyOrderedMultiValueDestructiveLogicalOpcode {
-        KeyOrderedMultiValueDestructiveLogicalAppend = 1,
-        KeyOrderedMultiValueDestructiveLogicalErase = 2
+    enum class KeyOrderedMultiValueDestructiveLogicalOpcode : std::uint32_t {
+        Append = 1u,
+        Erase = 2u
     };
+
+    constexpr std::uint32_t opcode_value(
+            KeyOrderedMultiValueDestructiveLogicalOpcode opcode) {
+        return static_cast<std::uint32_t>(opcode);
+    }
 
     /// \brief Ordered logical adapter with stable identities and tombstones.
     /// \details Schema version 2 is intentionally distinct from the v1
@@ -38,6 +43,9 @@ namespace sync {
              class Options = DefaultTableOptions>
     class KeyOrderedMultiValueTableDestructiveLogicalAdapter
             : public ILogicalTableAdapter {
+    private:
+        static const std::uint32_t supported_schema_version = 2u;
+
     public:
         typedef KeyOrderedMultiValueTable<KeyT, ValueT, Options> table_type;
 
@@ -53,7 +61,7 @@ namespace sync {
                 const std::string& schema_id,
                 const std::string& state_dbi_name,
                 const std::string& by_key_dbi_name,
-                std::uint32_t schema_version = 2u)
+                std::uint32_t schema_version = supported_schema_version)
             : m_table(table),
               m_schema_id(schema_id),
               m_schema_version(schema_version),
@@ -67,7 +75,7 @@ namespace sync {
                 throw std::invalid_argument(
                     "KeyOrderedMultiValue destructive logical DBI name is empty");
             }
-            if (m_schema_version != 2u) {
+            if (m_schema_version != supported_schema_version) {
                 throw std::invalid_argument(
                     "KeyOrderedMultiValue destructive logical adapter supports only schema version 2");
             }
@@ -113,7 +121,7 @@ namespace sync {
                     LogicalSchemaRecord marker;
                     if (schemas.get(txn.handle(), schema_id, marker)) {
                         if (marker.kind != LogicalTableKind::KeyOrderedMultiValue ||
-                            marker.schema_version != 2u ||
+                            marker.schema_version != supported_schema_version ||
                             marker.dbi_name != primary_dbi_name) {
                             throw std::runtime_error(
                                 "KeyOrderedMultiValue destructive schema marker does not match primary DBI");
@@ -178,7 +186,8 @@ namespace sync {
                                   const ValueT& value) const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyOrderedMultiValueDestructiveLogicalAppend;
+            change.opcode = opcode_value(
+                KeyOrderedMultiValueDestructiveLogicalOpcode::Append);
             encode_append(id, key, value, change.payload);
             return change;
         }
@@ -190,7 +199,8 @@ namespace sync {
                 const std::vector<std::uint8_t>& value_bytes) const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyOrderedMultiValueDestructiveLogicalAppend;
+            change.opcode = opcode_value(
+                KeyOrderedMultiValueDestructiveLogicalOpcode::Append);
             encode_append_bytes(id, key_bytes, value_bytes, change.payload);
             return change;
         }
@@ -200,7 +210,8 @@ namespace sync {
         LogicalChange make_erase(const OrderedElementId& id) const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyOrderedMultiValueDestructiveLogicalErase;
+            change.opcode = opcode_value(
+                KeyOrderedMultiValueDestructiveLogicalOpcode::Erase);
             change.payload = encode_ordered_element_id_logical(id);
             return change;
         }
@@ -939,7 +950,8 @@ namespace sync {
             std::size_t find_pending_append(const OrderedElementId& id) const {
                 for (std::size_t i = 0u; i < m_pending.size(); ++i) {
                     if (m_pending[i].opcode ==
-                            KeyOrderedMultiValueDestructiveLogicalAppend &&
+                            opcode_value(
+                                KeyOrderedMultiValueDestructiveLogicalOpcode::Append) &&
                         decode_change(m_pending[i]).id == id) {
                         return i;
                     }
@@ -1079,296 +1091,8 @@ namespace sync {
         }
 
     private:
-        struct PayloadCursor {
-            const std::uint8_t* data;
-            std::size_t size;
-            std::size_t pos;
-        };
+#include "KeyOrderedMultiValueTableDestructiveLogicalAdapter.ipp"
 
-        struct DecodedChange {
-            OrderedElementId id;
-            bool is_append;
-            KeyT key;
-            ValueT value;
-            std::vector<std::uint8_t> key_bytes;
-            std::vector<std::uint8_t> value_bytes;
-
-            DecodedChange() : is_append(false) {}
-        };
-
-        static void require(const PayloadCursor& cursor, std::size_t count) {
-            if (cursor.pos > cursor.size || count > cursor.size - cursor.pos) {
-                throw std::runtime_error(
-                    "KeyOrderedMultiValue destructive payload underrun");
-            }
-        }
-
-        static void append_blob(std::vector<std::uint8_t>& out,
-                                const std::vector<std::uint8_t>& bytes) {
-            if (bytes.size() > static_cast<std::size_t>(
-                    (std::numeric_limits<std::uint32_t>::max)())) {
-                throw std::length_error(
-                    "KeyOrderedMultiValue destructive payload blob is too large");
-            }
-            detail::append_u32_le(out, static_cast<std::uint32_t>(bytes.size()));
-            out.insert(out.end(), bytes.begin(), bytes.end());
-        }
-
-        static std::vector<std::uint8_t> read_blob(PayloadCursor& cursor) {
-            require(cursor, 4u);
-            const std::uint32_t count =
-                detail::read_u32_le(cursor.data + cursor.pos);
-            cursor.pos += 4u;
-            require(cursor, count);
-            std::vector<std::uint8_t> out;
-            if (count != 0u) {
-                out.assign(cursor.data + cursor.pos,
-                           cursor.data + cursor.pos + count);
-            }
-            cursor.pos += count;
-            return out;
-        }
-
-        static PayloadCursor make_cursor(
-                const std::vector<std::uint8_t>& payload) {
-            PayloadCursor cursor = {
-                payload.empty() ? nullptr : &payload[0], payload.size(), 0u
-            };
-            return cursor;
-        }
-
-        static std::vector<std::uint8_t> read_id(PayloadCursor& cursor) {
-            const std::size_t size = NodeId().size() + 8u;
-            require(cursor, size);
-            std::vector<std::uint8_t> out(cursor.data + cursor.pos,
-                                          cursor.data + cursor.pos + size);
-            cursor.pos += size;
-            return out;
-        }
-
-        static void require_end(const PayloadCursor& cursor) {
-            if (cursor.pos != cursor.size) {
-                throw std::runtime_error(
-                    "KeyOrderedMultiValue destructive payload has trailing bytes");
-            }
-        }
-
-        static KeyT decode_canonical_key(const std::vector<std::uint8_t>& bytes) {
-            const KeyT key = KeyCodec::decode(bytes);
-            if (KeyCodec::encode(key) != bytes) {
-                throw std::runtime_error(
-                    "KeyOrderedMultiValue destructive key is non-canonical");
-            }
-            return key;
-        }
-
-        static ValueT decode_canonical_value(
-                const std::vector<std::uint8_t>& bytes) {
-            const ValueT value = ValueCodec::decode(bytes);
-            if (ValueCodec::encode(value) != bytes) {
-                throw std::runtime_error(
-                    "KeyOrderedMultiValue destructive value is non-canonical");
-            }
-            return value;
-        }
-
-        static void encode_append(const OrderedElementId& id,
-                                  const KeyT& key,
-                                  const ValueT& value,
-                                  std::vector<std::uint8_t>& out) {
-            encode_append_bytes(id, KeyCodec::encode(key), ValueCodec::encode(value),
-                                out);
-        }
-
-        static void encode_append_bytes(
-                const OrderedElementId& id,
-                const std::vector<std::uint8_t>& key_bytes,
-                const std::vector<std::uint8_t>& value_bytes,
-                std::vector<std::uint8_t>& out) {
-            out = encode_ordered_element_id_logical(id);
-            append_blob(out, key_bytes);
-            append_blob(out, value_bytes);
-        }
-
-        static DecodedChange decode_change(const LogicalChange& change) {
-            DecodedChange out;
-            if (change.opcode == KeyOrderedMultiValueDestructiveLogicalErase) {
-                out.id = decode_ordered_element_id_logical(change.payload);
-                return out;
-            }
-            if (change.opcode != KeyOrderedMultiValueDestructiveLogicalAppend) {
-                throw std::runtime_error(
-                    "KeyOrderedMultiValue destructive opcode is unsupported");
-            }
-            PayloadCursor cursor = make_cursor(change.payload);
-            out.id = decode_ordered_element_id_logical(read_id(cursor));
-            out.key_bytes = read_blob(cursor);
-            out.value_bytes = read_blob(cursor);
-            require_end(cursor);
-            out.key = decode_canonical_key(out.key_bytes);
-            out.value = decode_canonical_value(out.value_bytes);
-            out.is_append = true;
-            return out;
-        }
-
-        LogicalApplyResult validate_state(MDBX_txn* txn,
-                                          const DecodedChange& decoded) const {
-            const LogicalApplyResult marker_result =
-                validate_logical_adapter_marker(
-                    txn, m_table.connection()->env_handle(), *this);
-            if (!marker_result.ok) return marker_result;
-            if (decoded.is_append) {
-                m_state.verify_introduced_high_water(txn, decoded.id.origin);
-                SchemaRegistryStore schemas(m_table.connection()->env_handle());
-                LogicalSchemaRecord marker;
-                if (!schemas.get(txn, m_schema_id, marker) ||
-                    compare_node_id(marker.ordered_delivery_origin_node_id,
-                                    decoded.id.origin) != 0) {
-                    return LogicalApplyResult::failure(
-                        "Append OrderedElementId origin does not match schema marker");
-                }
-            }
-            OrderedElementStateRecord record;
-            const bool exists = m_state.get(txn, decoded.id, record);
-            const std::uint64_t introduced =
-                m_state.highest_introduced(txn, decoded.id.origin);
-            if (exists && decoded.id.sequence > introduced) {
-                return LogicalApplyResult::failure(
-                    "Ordered element introduced high-water mark is corrupt");
-            }
-            if (decoded.is_append && exists) {
-                if (!record.live) {
-                    return LogicalApplyResult::failure(
-                        "OrderedElementId is tombstoned");
-                }
-                if (record.key != decoded.key_bytes ||
-                    record.value != decoded.value_bytes) {
-                    return LogicalApplyResult::failure(
-                        "OrderedElementId conflicts with persisted state");
-                }
-            }
-            if (decoded.is_append && !exists &&
-                decoded.id.sequence <= introduced) {
-                return LogicalApplyResult::failure(
-                    "OrderedElementId is not above the introduced high-water mark");
-            }
-            if (!decoded.is_append && (!exists || !record.live)) {
-                return LogicalApplyResult::failure(
-                    "OrderedElementId is not live");
-            }
-            if (decoded.is_append) {
-                ensure_key_parity(txn, decoded.key, decoded.key_bytes);
-            } else {
-                ensure_key_parity(txn, decode_canonical_key(record.key),
-                                  record.key);
-            }
-            return LogicalApplyResult::success();
-        }
-
-        void append_live_element(MDBX_txn* txn,
-                                 const OrderedElementId& id,
-                                 const KeyT& key,
-                                 const ValueT& value) const {
-            const std::vector<std::uint8_t> key_bytes = KeyCodec::encode(key);
-            const std::vector<std::uint8_t> value_bytes = ValueCodec::encode(value);
-            m_state.verify_introduced_high_water(txn, id.origin);
-            m_table.append(key, value, txn);
-            m_state.put_live(txn, id, key_bytes, value_bytes);
-            ensure_key_parity(txn, key, key_bytes);
-        }
-
-        void append_live_element_prevalidated(
-                MDBX_txn* txn,
-                const OrderedElementId& id,
-                const KeyT& key,
-                const ValueT& value,
-                const std::vector<std::uint8_t>& key_bytes,
-                const std::vector<std::uint8_t>& value_bytes) const {
-            m_table.append(key, value, txn);
-            m_state.put_live_prevalidated(txn, id, key_bytes, value_bytes);
-        }
-
-        void erase_live_element(MDBX_txn* txn,
-                                const OrderedElementId& id,
-                                bool preserve_tombstone,
-                                OrderedElementCandidateSet* candidates = nullptr) const {
-            OrderedElementStateRecord record;
-            if (!m_state.get(txn, id, record, candidates) || !record.live) {
-                throw std::runtime_error("Ordered element is not live");
-            }
-            const KeyT key = decode_canonical_key(record.key);
-            const std::vector<OrderedElementId> ids =
-                m_state.live_ids_for_key(txn, record.key, candidates);
-            std::size_t index = ids.size();
-            for (std::size_t i = 0u; i < ids.size(); ++i) {
-                if (ids[i] == id) {
-                    index = i;
-                    break;
-                }
-            }
-            if (index == ids.size()) {
-                throw std::runtime_error("Ordered element key index is missing id");
-            }
-            bool erased = false;
-            if (candidates == nullptr) {
-                erased = m_table.erase_at(key, index, txn);
-            } else {
-                erased = m_table.db_erase_at(
-                    key, index, txn,
-                    [candidates]() {
-                        candidates->inspect_record();
-                    });
-            }
-            if (!erased) {
-                throw std::runtime_error("Ordered element physical value is missing");
-            }
-            if (preserve_tombstone) {
-                m_state.tombstone(txn, id, candidates);
-            } else {
-                m_state.erase_live(txn, id, candidates);
-            }
-            ensure_key_parity(txn, key, record.key, candidates);
-        }
-
-        void ensure_key_parity(MDBX_txn* txn,
-                               const KeyT& key,
-                               const std::vector<std::uint8_t>& key_bytes,
-                               OrderedElementCandidateSet* candidates = nullptr) const {
-            std::vector<ValueT> values;
-            if (candidates == nullptr) {
-                values = m_table.find(key, txn);
-            } else {
-                m_table.db_collect_values(
-                    key, values, txn,
-                    [candidates]() {
-                        candidates->inspect_record();
-                    });
-            }
-            std::vector<OrderedElementId> ids =
-                m_state.live_ids_for_key(txn, key_bytes, candidates);
-            std::vector<OrderedElementId> state_ids =
-                m_state.live_state_ids_for_key(txn, key_bytes, candidates);
-            std::sort(ids.begin(), ids.end(), OrderedElementIdLess());
-            std::sort(state_ids.begin(), state_ids.end(), OrderedElementIdLess());
-            if (values.size() != ids.size() || ids != state_ids) {
-                throw std::runtime_error(
-                    "Ordered element state, index, and table counts differ");
-            }
-            for (std::size_t i = 0u; i < ids.size(); ++i) {
-                OrderedElementStateRecord record;
-                if (!m_state.get(txn, ids[i], record, candidates) || !record.live ||
-                    record.key != key_bytes ||
-                    record.value != ValueCodec::encode(values[i])) {
-                    throw std::runtime_error(
-                        "Ordered element state and table value order differs");
-                }
-            }
-        }
-
-        table_type& m_table;
-        std::string m_schema_id;
-        std::uint32_t m_schema_version;
-        OrderedElementStateStore m_state;
     };
 
 } // namespace sync

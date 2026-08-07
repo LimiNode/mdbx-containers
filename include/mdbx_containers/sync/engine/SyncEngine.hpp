@@ -38,30 +38,6 @@
 
 #include <mdbx.h>
 
-#include <mdbx_containers/common.hpp>
-#include <mdbx_containers/sync/common.hpp>
-#include <mdbx_containers/sync/engine/ConflictPolicy.hpp>
-#include <mdbx_containers/sync/protocol/ChangeBatch.hpp>
-#include <mdbx_containers/sync/protocol/ChangeBatchCodec.hpp>
-#include <mdbx_containers/sync/protocol/ChangeOp.hpp>
-#include <mdbx_containers/sync/logical/LogicalDeliveryEnvelopeCodec.hpp>
-#include <mdbx_containers/sync/logical/ILogicalDeliveryOutbox.hpp>
-#include <mdbx_containers/sync/logical/LogicalDeliveryProtocol.hpp>
-#include <mdbx_containers/sync/logical/ILogicalDeliveryPeer.hpp>
-#include <mdbx_containers/sync/logical/LogicalChangeFrameCodec.hpp>
-#include <mdbx_containers/sync/logical/LogicalTableAdapter.hpp>
-#include <mdbx_containers/sync/logical/logical_schema_validation.hpp>
-#include <mdbx_containers/sync/protocol.hpp>
-#include <mdbx_containers/sync/protocol/SyncCursor.hpp>
-#include <mdbx_containers/sync/stores/AppliedStore.hpp>
-#include <mdbx_containers/sync/stores/ChangeLogStore.hpp>
-#include <mdbx_containers/sync/logical/stores/LogicalDeliveryStore.hpp>
-#include <mdbx_containers/sync/logical/stores/LogicalDeliveryOrderStore.hpp>
-#include <mdbx_containers/sync/logical/stores/LogicalOutboxStore.hpp>
-#include <mdbx_containers/sync/stores/MetaStore.hpp>
-#include <mdbx_containers/sync/stores/OriginIndexStore.hpp>
-#include <mdbx_containers/sync/logical/stores/SchemaRegistryStore.hpp>
-
 namespace mdbxc {
 namespace sync {
 

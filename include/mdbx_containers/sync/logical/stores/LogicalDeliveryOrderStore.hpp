@@ -14,9 +14,6 @@
 
 #include <mdbx.h>
 
-#include <mdbx_containers/common.hpp>
-#include <mdbx_containers/sync/logical/LogicalDeliveryEnvelope.hpp>
-#include <mdbx_containers/sync/common.hpp>
 
 namespace mdbxc {
 namespace sync {

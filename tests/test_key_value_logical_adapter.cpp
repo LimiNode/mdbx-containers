@@ -69,8 +69,91 @@ static_assert(!mdbxc::sync::detail::KeyValueLogicalIntegerLocalSupported<
                   char32_t>::value,
               "char32_t must not be supported by integer codec");
 
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyMultiValueLogicalOpcode::InsertOne) == 1u,
+              "KeyMultiValue insert opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyMultiValueLogicalOpcode::EraseKey) == 2u,
+              "KeyMultiValue erase-key opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyMultiValueLogicalOpcode::EraseAllValues) == 3u,
+              "KeyMultiValue erase-all opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyMultiValueLogicalOpcode::Clear) == 4u,
+              "KeyMultiValue clear opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyMultiValueLogicalOpcode::EraseOneValue) == 5u,
+              "KeyMultiValue exact-erase opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyOrderedMultiValueLogicalOpcode::AppendOne) == 1u,
+              "KeyOrderedMultiValue append opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyOrderedMultiValueDestructiveLogicalOpcode::Append) == 1u,
+              "Destructive ordered append opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyOrderedMultiValueDestructiveLogicalOpcode::Erase) == 2u,
+              "Destructive ordered erase opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyTableLogicalOpcode::Insert) == 1u,
+              "KeyTable insert opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyTableLogicalOpcode::Delete) == 2u,
+              "KeyTable delete opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyTableLogicalOpcode::Clear) == 3u,
+              "KeyTable clear opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyValueTableLogicalOpcode::Upsert) == 1u,
+              "KeyValue upsert opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyValueTableLogicalOpcode::Delete) == 2u,
+              "KeyValue delete opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::KeyValueTableLogicalOpcode::Clear) == 3u,
+              "KeyValue clear opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::VectorStoreLogicalOpcode::Add) == 1u,
+              "VectorStore add opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::VectorStoreLogicalOpcode::Erase) == 2u,
+              "VectorStore erase opcode must retain its wire value");
+static_assert(mdbxc::sync::opcode_value(
+                  mdbxc::sync::VectorStoreLogicalOpcode::Clear) == 3u,
+              "VectorStore clear opcode must retain its wire value");
+
 void cleanup(const std::string& p) {
     std::remove(p.c_str());
+}
+
+void test_blob_payload_helper_preserves_wire_layout() {
+    const std::uint8_t input_raw[] = {0x41u, 0x42u, 0x43u};
+    const std::vector<std::uint8_t> input(
+        input_raw, input_raw + sizeof(input_raw) / sizeof(input_raw[0]));
+    std::vector<std::uint8_t> encoded;
+    mdbxc::sync::detail::append_blob_payload(
+        encoded, input, "test logical");
+
+    const std::uint8_t expected_raw[] = {
+        3u, 0u, 0u, 0u, 0x41u, 0x42u, 0x43u
+    };
+    const std::vector<std::uint8_t> expected(
+        expected_raw,
+        expected_raw + sizeof(expected_raw) / sizeof(expected_raw[0]));
+    MDBXC_TEST_ASSERT(encoded == expected);
+
+    mdbxc::sync::detail::BlobPayloadCursor cursor(encoded);
+    MDBXC_TEST_ASSERT(cursor.read_blob("test logical") == input);
+    cursor.ensure_end("test logical");
+
+    bool malformed_payload_threw = false;
+    std::vector<std::uint8_t> malformed(encoded.begin(), encoded.end() - 1u);
+    try {
+        mdbxc::sync::detail::BlobPayloadCursor malformed_cursor(malformed);
+        (void)malformed_cursor.read_blob("test logical");
+    } catch (const std::runtime_error&) {
+        malformed_payload_threw = true;
+    }
+    MDBXC_TEST_ASSERT(malformed_payload_threw);
 }
 
 mdbxc::sync::NodeId make_node(std::uint8_t seed) {
@@ -1415,9 +1498,11 @@ void test_key_ordered_multi_value_logical_capture_commits_to_outbox() {
         MDBXC_TEST_ASSERT(envelope.origin_sequence == 1u);
         MDBXC_TEST_ASSERT(envelope.frame.changes.size() == 2u);
         MDBXC_TEST_ASSERT(envelope.frame.changes[0].opcode ==
-            mdbxc::sync::KeyOrderedMultiValueLogicalAppendOne);
+            mdbxc::sync::opcode_value(
+                mdbxc::sync::KeyOrderedMultiValueLogicalOpcode::AppendOne));
         MDBXC_TEST_ASSERT(envelope.frame.changes[1].opcode ==
-            mdbxc::sync::KeyOrderedMultiValueLogicalAppendOne);
+            mdbxc::sync::opcode_value(
+                mdbxc::sync::KeyOrderedMultiValueLogicalOpcode::AppendOne));
     }
 
     const std::vector<std::string> values = table.find(7);
@@ -2110,13 +2195,17 @@ void test_key_multi_value_logical_capture_session_commits_typed_writes() {
 
     MDBXC_TEST_ASSERT(changes.size() == 6u);
     MDBXC_TEST_ASSERT(changes[0].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalInsertOne);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::InsertOne));
     MDBXC_TEST_ASSERT(changes[3].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalEraseAllValues);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::EraseAllValues));
     MDBXC_TEST_ASSERT(changes[4].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalEraseKey);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::EraseKey));
     MDBXC_TEST_ASSERT(changes[5].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalClear);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::Clear));
     MDBXC_TEST_ASSERT(table.count() == 0u);
 
     std::vector<mdbxc::KeyMultiValueTable<int, std::string>::value_type>
@@ -2132,9 +2221,11 @@ void test_key_multi_value_logical_capture_session_commits_typed_writes() {
     }
     MDBXC_TEST_ASSERT(append_changes.size() == 2u);
     MDBXC_TEST_ASSERT(append_changes[0].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalInsertOne);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::InsertOne));
     MDBXC_TEST_ASSERT(append_changes[1].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalInsertOne);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::InsertOne));
     MDBXC_TEST_ASSERT(table.count(3, "three") == 2u);
 
     {
@@ -2208,7 +2299,8 @@ void test_key_multi_value_logical_capture_session_reconciles_multiplicity() {
 
     bool captured_erase_one = false;
     for (std::size_t i = 0u; i < changes.size(); ++i) {
-        if (changes[i].opcode == mdbxc::sync::KeyMultiValueLogicalEraseOneValue) {
+        if (changes[i].opcode == mdbxc::sync::opcode_value(
+                mdbxc::sync::KeyMultiValueLogicalOpcode::EraseOneValue)) {
             captured_erase_one = true;
         }
     }
@@ -2310,13 +2402,17 @@ void test_key_multi_value_logical_capture_session_appends_and_erases_bounded_ran
 
     MDBXC_TEST_ASSERT(changes.size() == 4u);
     MDBXC_TEST_ASSERT(changes[0].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalInsertOne);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::InsertOne));
     MDBXC_TEST_ASSERT(changes[1].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalInsertOne);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::InsertOne));
     MDBXC_TEST_ASSERT(changes[2].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalEraseKey);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::EraseKey));
     MDBXC_TEST_ASSERT(changes[3].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalEraseKey);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::EraseKey));
     MDBXC_TEST_ASSERT(source_table.count() == 3u);
     MDBXC_TEST_ASSERT(source_table.count(1, "one") == 1u);
     MDBXC_TEST_ASSERT(source_table.count(4, "four") == 1u);
@@ -2587,7 +2683,8 @@ void test_key_multi_value_logical_capture_session_commits_to_outbox() {
     MDBXC_TEST_ASSERT(pending.size() == 1u);
     MDBXC_TEST_ASSERT(pending[0].frame.changes.size() == 1u);
     MDBXC_TEST_ASSERT(pending[0].frame.changes[0].opcode ==
-                      mdbxc::sync::KeyMultiValueLogicalInsertOne);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyMultiValueLogicalOpcode::InsertOne));
 
     conn->disconnect();
     cleanup(path);
@@ -2842,11 +2939,14 @@ void test_key_table_logical_capture_session_commits_typed_local_writes() {
 
     MDBXC_TEST_ASSERT(changes.size() == 3u);
     MDBXC_TEST_ASSERT(changes[0].opcode ==
-                      mdbxc::sync::KeyTableLogicalInsert);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyTableLogicalOpcode::Insert));
     MDBXC_TEST_ASSERT(changes[1].opcode ==
-                      mdbxc::sync::KeyTableLogicalInsert);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyTableLogicalOpcode::Insert));
     MDBXC_TEST_ASSERT(changes[2].opcode ==
-                      mdbxc::sync::KeyTableLogicalDelete);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyTableLogicalOpcode::Delete));
     MDBXC_TEST_ASSERT(!table.contains(1));
     MDBXC_TEST_ASSERT(table.contains(2));
 
@@ -3156,7 +3256,8 @@ void test_key_value_logical_engine_accepts_multi_dbi_adapter_with_primary_contra
 
     mdbxc::sync::LogicalChange change;
     change.schema = adapter.schema_ref();
-    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    change.opcode = mdbxc::sync::opcode_value(
+        mdbxc::sync::KeyValueTableLogicalOpcode::Upsert);
     std::vector<mdbxc::sync::LogicalChange> changes;
     changes.push_back(change);
     const mdbxc::sync::LogicalApplyResult result =
@@ -3200,7 +3301,8 @@ void test_key_value_logical_engine_rejects_multi_dbi_primary_mismatch() {
 
     mdbxc::sync::LogicalChange change;
     change.schema = adapter.schema_ref();
-    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    change.opcode = mdbxc::sync::opcode_value(
+        mdbxc::sync::KeyValueTableLogicalOpcode::Upsert);
     std::vector<mdbxc::sync::LogicalChange> changes;
     changes.push_back(change);
     const mdbxc::sync::LogicalApplyResult result =
@@ -3240,7 +3342,8 @@ void test_key_value_logical_engine_accepts_legacy_single_dbi_default_primary() {
 
     mdbxc::sync::LogicalChange change;
     change.schema = adapter.schema_ref();
-    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    change.opcode = mdbxc::sync::opcode_value(
+        mdbxc::sync::KeyValueTableLogicalOpcode::Upsert);
     std::vector<mdbxc::sync::LogicalChange> changes;
     changes.push_back(change);
     const mdbxc::sync::LogicalApplyResult result =
@@ -3283,7 +3386,8 @@ void test_key_value_logical_engine_rejects_legacy_multi_dbi_without_primary() {
 
     mdbxc::sync::LogicalChange change;
     change.schema = adapter.schema_ref();
-    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    change.opcode = mdbxc::sync::opcode_value(
+        mdbxc::sync::KeyValueTableLogicalOpcode::Upsert);
     std::vector<mdbxc::sync::LogicalChange> changes;
     changes.push_back(change);
     const mdbxc::sync::LogicalApplyResult result =
@@ -3329,7 +3433,8 @@ void run_primary_contract_rejection(
 
     mdbxc::sync::LogicalChange change;
     change.schema = adapter.schema_ref();
-    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    change.opcode = mdbxc::sync::opcode_value(
+        mdbxc::sync::KeyValueTableLogicalOpcode::Upsert);
     std::vector<mdbxc::sync::LogicalChange> changes;
     changes.push_back(change);
     const mdbxc::sync::LogicalApplyResult result =
@@ -3410,7 +3515,8 @@ void test_key_value_logical_engine_suppresses_generic_raw_capture() {
     std::vector<mdbxc::sync::LogicalChange> changes;
     mdbxc::sync::LogicalChange change;
     change.schema = adapter.schema_ref();
-    change.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    change.opcode = mdbxc::sync::opcode_value(
+        mdbxc::sync::KeyValueTableLogicalOpcode::Upsert);
     changes.push_back(change);
     const mdbxc::sync::LogicalApplyResult result =
         engine.apply_logical_changes(changes);
@@ -3478,11 +3584,14 @@ void test_key_value_logical_capture_session_commits_typed_local_writes() {
 
     MDBXC_TEST_ASSERT(changes.size() == 3u);
     MDBXC_TEST_ASSERT(changes[0].opcode ==
-                      mdbxc::sync::KeyValueLogicalUpsert);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyValueTableLogicalOpcode::Upsert));
     MDBXC_TEST_ASSERT(changes[1].opcode ==
-                      mdbxc::sync::KeyValueLogicalUpsert);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyValueTableLogicalOpcode::Upsert));
     MDBXC_TEST_ASSERT(changes[2].opcode ==
-                      mdbxc::sync::KeyValueLogicalDelete);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyValueTableLogicalOpcode::Delete));
     MDBXC_TEST_ASSERT(!source_table.contains(1));
     const std::pair<bool, std::string> source_found =
         source_table.find_compat(2);
@@ -3568,7 +3677,8 @@ void test_key_value_logical_capture_session_commits_to_outbox_atomically() {
     MDBXC_TEST_ASSERT(pending.size() == 1u);
     MDBXC_TEST_ASSERT(pending[0].frame.changes.size() == 1u);
     MDBXC_TEST_ASSERT(pending[0].frame.changes[0].opcode ==
-                      mdbxc::sync::KeyValueLogicalUpsert);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyValueTableLogicalOpcode::Upsert));
 
     conn->disconnect();
     cleanup(path);
@@ -4980,7 +5090,8 @@ void test_key_value_logical_capture_session_captures_clear() {
 
     MDBXC_TEST_ASSERT(changes.size() == 1u);
     MDBXC_TEST_ASSERT(changes[0].opcode ==
-                      mdbxc::sync::KeyValueLogicalClear);
+                      mdbxc::sync::opcode_value(
+                          mdbxc::sync::KeyValueTableLogicalOpcode::Clear));
     MDBXC_TEST_ASSERT(table.count() == 0u);
 
     conn->disconnect();
@@ -5175,7 +5286,8 @@ void test_key_value_logical_adapter_decodes_literal_little_endian_payload() {
 
     mdbxc::sync::LogicalChange literal;
     literal.schema = adapter.schema_ref();
-    literal.opcode = mdbxc::sync::KeyValueLogicalUpsert;
+    literal.opcode = mdbxc::sync::opcode_value(
+        mdbxc::sync::KeyValueTableLogicalOpcode::Upsert);
     const std::uint8_t literal_payload[] = {
         4, 0, 0, 0,
         1, 0, 0, 0,
@@ -5913,6 +6025,7 @@ void test_ordered_logical_delivery_dispatch_rejects_invalid_acknowledgements() {
 } // namespace
 
 int main() {
+    test_blob_payload_helper_preserves_wire_layout();
     test_key_value_logical_adapter_applies_basic_ops();
     test_key_value_logical_adapter_applies_through_sync_engine();
     test_key_table_logical_adapter_applies_through_sync_engine();

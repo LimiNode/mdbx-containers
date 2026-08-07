@@ -17,12 +17,8 @@
 #include <string>
 #include <vector>
 
-#include <mdbx_containers/sync/sync_module.hpp>
-
 #if MDBXC_SYNC_ENABLED
 #include <mdbx.h>
-
-#include <mdbx_containers/sync/protocol/ChangeOp.hpp>
 
 namespace mdbxc {
 namespace sync {

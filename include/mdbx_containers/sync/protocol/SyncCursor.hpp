@@ -8,7 +8,6 @@
 #include <cstdint>
 #include <map>
 
-#include <mdbx_containers/sync/common.hpp>
 
 namespace mdbxc {
 namespace sync {

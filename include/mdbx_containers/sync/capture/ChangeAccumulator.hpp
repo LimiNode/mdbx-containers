@@ -32,9 +32,7 @@
 
 #if MDBXC_SYNC_ENABLED
 
-#include <mdbx_containers/sync/capture/ISyncCaptureSink.hpp>
-#include <mdbx_containers/sync/stores/ChangeLogStore.hpp>
-#include <mdbx_containers/sync/stores/MetaStore.hpp>
+#include "ISyncCaptureSink.hpp"
 
 namespace mdbxc {
 namespace sync {

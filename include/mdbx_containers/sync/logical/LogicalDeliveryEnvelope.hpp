@@ -8,9 +8,7 @@
 #include <cstdint>
 #include <string>
 
-#include <mdbx_containers/sync/protocol/CodecBounds.hpp>
 #include "LogicalChange.hpp"
-#include <mdbx_containers/sync/common.hpp>
 
 namespace mdbxc {
 namespace sync {

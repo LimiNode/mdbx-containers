@@ -564,7 +564,8 @@ void test_destructive_capture_resolves_bounded_broad_erasure() {
         }
         for (std::size_t i = 0u; i < envelope.frame.changes.size(); ++i) {
             if (envelope.frame.changes[i].opcode !=
-                mdbxc::sync::KeyOrderedMultiValueDestructiveLogicalErase) {
+                mdbxc::sync::opcode_value(
+                    mdbxc::sync::KeyOrderedMultiValueDestructiveLogicalOpcode::Erase)) {
                 throw std::runtime_error("broad erasure emitted a non-exact opcode");
             }
         }
@@ -819,7 +820,8 @@ void test_destructive_capture_clears_bounded_tombstone_heavy_table() {
         }
         for (std::size_t i = 0u; i < envelope.frame.changes.size(); ++i) {
             if (envelope.frame.changes[i].opcode !=
-                mdbxc::sync::KeyOrderedMultiValueDestructiveLogicalErase) {
+                mdbxc::sync::opcode_value(
+                    mdbxc::sync::KeyOrderedMultiValueDestructiveLogicalOpcode::Erase)) {
                 throw std::runtime_error("ordered broad clear emitted a non-erase");
             }
         }

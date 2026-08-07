@@ -17,11 +17,6 @@
 #include <string>
 #include <thread>
 
-#include <mdbx_containers/sync/transport/ISyncPeer.hpp>
-#include <mdbx_containers/sync/core/cancellation.hpp>
-#include <mdbx_containers/sync/engine/SyncEngine.hpp>
-#include <mdbx_containers/sync/protocol.hpp>
-
 namespace mdbxc {
 namespace sync {
 

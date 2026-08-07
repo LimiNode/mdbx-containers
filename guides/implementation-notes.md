@@ -276,14 +276,40 @@ Operational rules:
 
 - Supported public include points are `mdbx_containers.hpp` (umbrella for the
   full public surface), the per-domain aggregators `common.hpp`, `tables.hpp`,
-  `vector.hpp`, `sync.hpp`, and the root table/helper headers such as
-  `KeyValueTable.hpp`, `ValueTable.hpp`, and `Hash.hpp`. End users must not
-  include subdomain or internal headers directly (`common/...`, `detail/...`,
-  `sync/...`, `vector/...`); they include through the aggregator that already
-  pulls the right pieces in the right order.
-- Leaf headers use sibling includes only. Cross-subdomain includes use the
-  stable `<mdbx_containers/...>` path; never add a leading `"../"` chain.
-- A domain umbrella owns the cross-domain prerequisite order. For example,
-  `sync/adapters.hpp` supplies table and logical-sync dependencies before its
-  `sync/logical/adapters/` leaf headers, while `sync/logical.hpp` exports that adapter
-  surface with the rest of logical delivery.
+  `vector.hpp`, `sync.hpp`, and `sync/transport.hpp`, the root table headers
+  such as `KeyValueTable.hpp` and `ValueTable.hpp`, and the public utility
+  headers `common/backup.hpp` and `common/hashing.hpp`. Explicitly documented
+  concrete transport-backend headers under `sync/transports/...` are also
+  public integration entry points. Other subdomain headers are internal leaves
+  (`common/...`, `detail/...`, `sync/...`, `vector/...`); consumers include
+  them through the aggregator that owns their prerequisite order.
+- Header self-sufficiency is required only for supported public entry points,
+  not for every internal leaf. A leaf may rely on prerequisites supplied by
+  its owning domain umbrella and is not a supported standalone include.
+- Leaf headers include only same-domain siblings, implementation fragments,
+  standard-library headers, and third-party headers they use directly. Do not
+  add a cross-domain project include merely to make a leaf compile in isolation.
+- Include spelling documents the dependency boundary. A header includes files
+  in its own domain subtree with quoted paths relative to that domain; it uses
+  the public `<mdbx_containers/...>` path for a different top-level domain.
+  For example, `sync/adapters.hpp` includes its own prerequisites as
+  `"config.hpp"`, `"logical.hpp"`, and
+  `"logical/adapters/detail/blob_payload.hpp"`, while its table prerequisites
+  remain `<mdbx_containers/tables.hpp>` and
+  `<mdbx_containers/vector.hpp>`. The root `sync.hpp` likewise includes its
+  sibling domain umbrellas as `"sync/core.hpp"` and `"sync/adapters.hpp"`.
+- A domain umbrella owns cross-domain prerequisites and their order. It must
+  provide the complete dependency closure before including its leaves. For
+  example, `sync/adapters.hpp` supplies table and logical-sync prerequisites
+  before adapter leaves. `sync/logical.hpp` exports logical delivery and its
+  durable state without depending on table-bound adapters.
+- Cross-domain project dependencies belong in a domain umbrella or a higher
+  public aggregate. Use the stable `<mdbx_containers/...>` path there; never
+  add a leading `"../"` chain anywhere.
+- When a leaf needs a declaration from another domain, fix the owning umbrella
+  and its include order rather than adding a direct leaf-to-leaf dependency.
+  This keeps dependency flow visible at domain boundaries and prevents hidden
+  back edges and include cycles.
+- `common.hpp` is the explicit integration seam for the two narrow sync hook
+  interfaces used by header-only `Connection`. It may include those interfaces
+  directly; do not extend this exception to other sync implementation headers.

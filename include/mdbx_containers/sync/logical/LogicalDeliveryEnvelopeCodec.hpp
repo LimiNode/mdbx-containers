@@ -12,10 +12,8 @@
 #include <string>
 #include <vector>
 
-#include <mdbx_containers/sync/protocol/CodecBounds.hpp>
 #include "LogicalChangeFrameCodec.hpp"
 #include "LogicalDeliveryEnvelope.hpp"
-#include <mdbx_containers/sync/common.hpp>
 
 namespace mdbxc {
 namespace sync {

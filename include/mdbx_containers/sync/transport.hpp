@@ -10,12 +10,14 @@
 /// integrations such as Simple-Web-Server. Concrete backend headers include
 /// the specific framework-neutral headers they need instead of this aggregate.
 
-#include <mdbx_containers/sync.hpp>
+#include "config.hpp"
 
 #if MDBXC_SYNC_ENABLED
-#include <mdbx_containers/sync/transport/HttpTransport.hpp>
-#include <mdbx_containers/sync/transport/WebSocketTransport.hpp>
-#include <mdbx_containers/sync/transport/TransportMiddleware.hpp>
+#include "engine.hpp"
+#include "transport/TransportMessageCodec.hpp"
+#include "transport/HttpTransport.hpp"
+#include "transport/WebSocketTransport.hpp"
+#include "transport/TransportMiddleware.hpp"
 #endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_TRANSPORT_HPP_INCLUDED

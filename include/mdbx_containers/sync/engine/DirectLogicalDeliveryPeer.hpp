@@ -1,12 +1,11 @@
 #pragma once
-#ifndef MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_DIRECT_LOGICAL_DELIVERY_PEER_HPP_INCLUDED
-#define MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_DIRECT_LOGICAL_DELIVERY_PEER_HPP_INCLUDED
+#ifndef MDBX_CONTAINERS_HEADER_SYNC_ENGINE_DIRECT_LOGICAL_DELIVERY_PEER_HPP_INCLUDED
+#define MDBX_CONTAINERS_HEADER_SYNC_ENGINE_DIRECT_LOGICAL_DELIVERY_PEER_HPP_INCLUDED
 
-/// \file logical/DirectLogicalDeliveryPeer.hpp
+/// \file engine/DirectLogicalDeliveryPeer.hpp
 /// \brief In-process ordered logical delivery peer for tests and local tools.
 
-#include "ILogicalDeliveryPeer.hpp"
-#include <mdbx_containers/sync/engine/SyncEngine.hpp>
+#include "SyncEngine.hpp"
 
 namespace mdbxc {
 namespace sync {
@@ -41,4 +40,4 @@ namespace sync {
 } // namespace sync
 } // namespace mdbxc
 
-#endif // MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_DIRECT_LOGICAL_DELIVERY_PEER_HPP_INCLUDED
+#endif // MDBX_CONTAINERS_HEADER_SYNC_ENGINE_DIRECT_LOGICAL_DELIVERY_PEER_HPP_INCLUDED

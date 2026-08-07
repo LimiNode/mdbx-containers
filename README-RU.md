@@ -289,8 +289,10 @@ metadata filtering и генерация embeddings не входят в обл�
 writer либо приложение должно внешне сериализовать всех writer'ов: локальный
 `add()` выделяет id из локального состояния и не даёт cross-node identity
 allocation или conflict resolution. Opt-in `VectorStoreLogicalAdapter`
-использует явные id и атомарно применяет add, erase и clear по всем четырём DBI;
-это application-owned logical recipe, а не distributed allocator или
+использует явные id и атомарно применяет add, erase и clear по всем четырём DBI.
+При erase id marker сохраняется как allocation high-water, а clear сбрасывает
+все четыре DBI. Incoming logical add проверяет dimension embedding до mutation.
+Это application-owned logical recipe, а не distributed allocator или
 автоматический transport path.
 
 ```cpp

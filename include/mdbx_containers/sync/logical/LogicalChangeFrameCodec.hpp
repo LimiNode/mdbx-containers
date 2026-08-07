@@ -12,9 +12,7 @@
 #include <string>
 #include <vector>
 
-#include <mdbx_containers/sync/protocol/CodecBounds.hpp>
 #include "LogicalChange.hpp"
-#include <mdbx_containers/sync/common.hpp>
 
 namespace mdbxc {
 namespace sync {
@@ -333,6 +331,9 @@ namespace sync {
                 case static_cast<std::uint16_t>(
                         LogicalTableKind::KeyOrderedMultiValue):
                     return LogicalTableKind::KeyOrderedMultiValue;
+                case static_cast<std::uint16_t>(
+                        LogicalTableKind::VectorStore):
+                    return LogicalTableKind::VectorStore;
             }
             throw std::runtime_error("Invalid logical table kind");
         }

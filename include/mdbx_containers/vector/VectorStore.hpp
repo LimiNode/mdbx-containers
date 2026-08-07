@@ -2,8 +2,6 @@
 #ifndef MDBX_CONTAINERS_HEADER_VECTOR_VECTOR_STORE_HPP_INCLUDED
 #define MDBX_CONTAINERS_HEADER_VECTOR_VECTOR_STORE_HPP_INCLUDED
 
-#include <mdbx_containers/SequenceTable.hpp>
-#include <mdbx_containers/KeyValueTable.hpp>
 #include "FlatVectorIndex.hpp"
 #include "VectorRecord.hpp"
 #include "SearchResult.hpp"

@@ -21,9 +21,13 @@ namespace mdbxc {
 namespace sync {
 
     /// \brief Opcodes understood by \c KeyOrderedMultiValueTableLogicalAdapter.
-    enum KeyOrderedMultiValueLogicalOpcode {
-        KeyOrderedMultiValueLogicalAppendOne = 1
+    enum class KeyOrderedMultiValueLogicalOpcode : std::uint32_t {
+        AppendOne = 1u
     };
+
+    constexpr std::uint32_t opcode_value(KeyOrderedMultiValueLogicalOpcode opcode) {
+        return static_cast<std::uint32_t>(opcode);
+    }
 
     /// \brief Logical adapter for append-only \c KeyOrderedMultiValueTable.
     /// \details The adapter transports public key/value bytes and requires the
@@ -36,6 +40,9 @@ namespace sync {
              class Options = DefaultTableOptions>
     class KeyOrderedMultiValueTableLogicalAdapter
             : public ILogicalTableAdapter {
+    private:
+        static const std::uint32_t supported_schema_version = 1u;
+
     public:
         typedef KeyOrderedMultiValueTable<KeyT, ValueT, Options> table_type;
 
@@ -52,7 +59,7 @@ namespace sync {
         KeyOrderedMultiValueTableLogicalAdapter(
                 table_type& table,
                 const std::string& schema_id,
-                std::uint32_t schema_version = 1)
+                std::uint32_t schema_version = supported_schema_version)
             : m_table(table),
               m_schema_id(schema_id),
               m_schema_version(schema_version) {
@@ -64,7 +71,7 @@ namespace sync {
                 throw std::invalid_argument(
                     "KeyOrderedMultiValueTableLogicalAdapter DBI name is empty");
             }
-            if (m_schema_version != 1u) {
+            if (m_schema_version != supported_schema_version) {
                 throw std::invalid_argument(
                     "KeyOrderedMultiValueTableLogicalAdapter supports only schema version 1");
             }
@@ -94,7 +101,7 @@ namespace sync {
         LogicalChange make_append(const KeyT& key, const ValueT& value) const {
             LogicalChange change;
             change.schema = schema_ref();
-            change.opcode = KeyOrderedMultiValueLogicalAppendOne;
+            change.opcode = opcode_value(KeyOrderedMultiValueLogicalOpcode::AppendOne);
             encode_pair(key, value, change.payload);
             return change;
         }
@@ -109,14 +116,14 @@ namespace sync {
         /// capture, and records only \c append and its \c insert alias. A
         /// failure after physical mutation, outbox enqueue, or native commit
         /// processing begins rolls back and deactivates the session.
-        class LogicalCaptureSession {
+        class LogicalCaptureSession
+                : private detail::CapturedLogicalTransaction {
         public:
             explicit LogicalCaptureSession(
                     const KeyOrderedMultiValueTableLogicalAdapter& adapter)
-                : m_adapter(adapter),
-                  m_txn(adapter.m_table.connection()->transaction(
-                      TransactionMode::WRITABLE)),
-                  m_active(true) {
+                : detail::CapturedLogicalTransaction(
+                      *adapter.m_table.connection()),
+                  m_adapter(adapter) {
                 const LogicalApplyResult marker_result =
                     validate_logical_adapter_marker(
                         m_txn.handle(),
@@ -160,19 +167,7 @@ namespace sync {
             /// \c commit_to_outbox() when durable delivery is required.
             void commit(std::vector<LogicalChange>& out) {
                 ensure_active();
-                const std::size_t old_size = out.size();
-                out.insert(out.end(), m_pending.begin(), m_pending.end());
-                try {
-                    m_txn.commit();
-                } catch (...) {
-                    out.erase(out.begin() +
-                              static_cast<std::ptrdiff_t>(old_size),
-                              out.end());
-                    rollback_and_deactivate();
-                    throw;
-                }
-                m_pending.clear();
-                m_active = false;
+                commit_pending(out);
             }
 
             /// \brief Commits appends and an ordered delivery atomically.
@@ -181,20 +176,7 @@ namespace sync {
                     const DbId& destination,
                     const CodecBounds* bounds = nullptr) {
                 ensure_active();
-                LogicalChangeFrame frame;
-                frame.changes = m_pending;
-                try {
-                    const LogicalDeliveryEnvelope envelope =
-                        outbox.enqueue_logical_delivery(
-                            m_txn.handle(), destination, frame, bounds);
-                    m_txn.commit();
-                    m_pending.clear();
-                    m_active = false;
-                    return envelope;
-                } catch (...) {
-                    rollback_and_deactivate();
-                    throw;
-                }
+                return commit_pending_to_outbox(outbox, destination, bounds);
             }
 
             void rollback() noexcept {
@@ -223,29 +205,12 @@ namespace sync {
                 }
             }
 
-            void rollback_and_deactivate() noexcept {
-                try {
-                    m_pending.clear();
-                } catch (...) {
-                }
-                try {
-                    m_txn.rollback();
-                } catch (...) {
-                }
-                m_active = false;
-            }
-
             void ensure_active() const {
-                if (!m_active) {
-                    throw std::logic_error(
-                        "KeyOrderedMultiValue logical capture session is not active");
-                }
+                detail::CapturedLogicalTransaction::ensure_active(
+                    "KeyOrderedMultiValue logical capture session is not active");
             }
 
             const KeyOrderedMultiValueTableLogicalAdapter& m_adapter;
-            Transaction m_txn;
-            std::vector<LogicalChange> m_pending;
-            bool m_active;
         };
 
         /// \brief Starts a capture session bound to this adapter instance.
@@ -292,103 +257,8 @@ namespace sync {
         }
 
     private:
-        struct PayloadCursor {
-            const std::uint8_t* data;
-            std::size_t size;
-            std::size_t pos;
-        };
+#include "KeyOrderedMultiValueTableLogicalAdapter.ipp"
 
-        static void require(PayloadCursor& cursor, std::size_t size) {
-            if (cursor.pos > cursor.size || size > cursor.size - cursor.pos) {
-                throw std::runtime_error(
-                    "KeyOrderedMultiValue logical payload underrun");
-            }
-        }
-
-        static void append_blob(std::vector<std::uint8_t>& out,
-                                const std::vector<std::uint8_t>& bytes) {
-            if (bytes.size() > static_cast<std::size_t>(
-                    (std::numeric_limits<std::uint32_t>::max)())) {
-                throw std::length_error(
-                    "KeyOrderedMultiValue logical payload blob is too large");
-            }
-            detail::append_u32_le(out,
-                static_cast<std::uint32_t>(bytes.size()));
-            out.insert(out.end(), bytes.begin(), bytes.end());
-        }
-
-        static std::vector<std::uint8_t> read_blob(PayloadCursor& cursor) {
-            require(cursor, 4u);
-            const std::uint32_t size =
-                detail::read_u32_le(cursor.data + cursor.pos);
-            cursor.pos += 4u;
-            require(cursor, size);
-            std::vector<std::uint8_t> out;
-            if (size != 0u) {
-                out.assign(cursor.data + cursor.pos,
-                           cursor.data + cursor.pos + size);
-            }
-            cursor.pos += size;
-            return out;
-        }
-
-        static PayloadCursor make_cursor(
-                const std::vector<std::uint8_t>& payload) {
-            PayloadCursor cursor = {
-                payload.empty() ? nullptr : &payload[0],
-                payload.size(),
-                0u
-            };
-            return cursor;
-        }
-
-        static void ensure_end(const PayloadCursor& cursor) {
-            if (cursor.pos != cursor.size) {
-                throw std::runtime_error(
-                    "KeyOrderedMultiValue logical payload has trailing bytes");
-            }
-        }
-
-        static void encode_pair(const KeyT& key,
-                                const ValueT& value,
-                                std::vector<std::uint8_t>& out) {
-            out.clear();
-            append_blob(out, KeyCodec::encode(key));
-            append_blob(out, ValueCodec::encode(value));
-        }
-
-        static std::pair<KeyT, ValueT> decode_pair(
-                const std::vector<std::uint8_t>& payload) {
-            PayloadCursor cursor = make_cursor(payload);
-            const KeyT key = KeyCodec::decode(read_blob(cursor));
-            const ValueT value = ValueCodec::decode(read_blob(cursor));
-            ensure_end(cursor);
-            return std::make_pair(key, value);
-        }
-
-        static LogicalApplyResult validate_payload(
-                const LogicalChange& change) {
-            if (change.opcode != KeyOrderedMultiValueLogicalAppendOne) {
-                return LogicalApplyResult::failure(
-                    "KeyOrderedMultiValue logical adapter opcode is unsupported");
-            }
-            try {
-                (void)decode_pair(change.payload);
-                return LogicalApplyResult::success();
-            } catch (const std::exception& e) {
-                return LogicalApplyResult::failure(
-                    std::string(
-                        "KeyOrderedMultiValue logical payload is invalid: ") +
-                    e.what());
-            } catch (...) {
-                return LogicalApplyResult::failure(
-                    "KeyOrderedMultiValue logical payload is invalid");
-            }
-        }
-
-        table_type& m_table;
-        std::string m_schema_id;
-        std::uint32_t m_schema_version;
     };
 
 } // namespace sync

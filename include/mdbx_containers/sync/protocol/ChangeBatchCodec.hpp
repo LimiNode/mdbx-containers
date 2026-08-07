@@ -34,10 +34,9 @@
 /// decode error. \c BATCH_COMPRESSED_ZSTD is reserved and explicitly
 /// rejected.
 
-#include <mdbx_containers/sync/protocol/ChangeBatch.hpp>
-#include <mdbx_containers/sync/protocol/CodecBounds.hpp>
-#include <mdbx_containers/sync/protocol/codec_flags.hpp>
-#include <mdbx_containers/sync/common.hpp>
+#include "ChangeBatch.hpp"
+#include "CodecBounds.hpp"
+#include "codec_flags.hpp"
 
 namespace mdbxc {
 namespace sync {

@@ -15,10 +15,6 @@
 
 #include <mdbx.h>
 
-#include <mdbx_containers/common/MdbxException.hpp>
-#include <mdbx_containers/detail/utils.hpp>
-#include <mdbx_containers/sync/common.hpp>
-#include <mdbx_containers/sync/logical/LogicalSchema.hpp>
 
 namespace mdbxc {
 namespace sync {

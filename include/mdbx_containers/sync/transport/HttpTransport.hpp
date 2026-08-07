@@ -19,9 +19,7 @@
 #include <string>
 #include <vector>
 
-#include <mdbx_containers/sync/transport/ISyncPeer.hpp>
-#include <mdbx_containers/sync/engine/SyncEngine.hpp>
-#include <mdbx_containers/sync/transport/TransportMessageCodec.hpp>
+#include "TransportMessageCodec.hpp"
 
 namespace mdbxc {
 namespace sync {
