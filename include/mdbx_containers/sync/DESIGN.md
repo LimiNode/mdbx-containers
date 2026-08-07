@@ -1335,8 +1335,10 @@ them to the caller only from `commit(out)`. Rollback, destruction, or commit
 failure discards the pending logical changes. An exception after physical
 mutation, outbox enqueue, or native commit processing begins requests
 transaction rollback and deactivates the session, so later `commit()` or
-`commit_to_outbox()` calls are rejected. Preparation or encoding failures
-before transaction mutation leave the session active.
+`commit_to_outbox()` calls are rejected. Ordinary operation preparation or
+encoding failures before transaction mutation leave the session active.
+Persistent-storage integrity failures are session-fatal: detecting corruption
+during pre-mutation reconciliation rolls back and deactivates the session.
 Session construction validates
 the adapter against the persistent schema marker in the same writable
 transaction, before any local mutation can be performed. For `KeyTable`, only

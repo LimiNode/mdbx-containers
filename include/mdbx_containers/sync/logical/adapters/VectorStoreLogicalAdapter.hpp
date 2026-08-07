@@ -304,6 +304,9 @@ namespace sync {
             }
 
             /// \brief Clears all four collection DBIs.
+            /// \throws std::runtime_error when the persisted record layout is
+            /// corrupt. Such an integrity failure rolls back and deactivates
+            /// the session even though the clear mutation has not started.
             void clear() {
                 ensure_active();
                 try {

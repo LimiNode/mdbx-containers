@@ -298,7 +298,7 @@ jobs:
       - name: Run Simple-Web HTTP sync smoke
         run: |
           set -euo pipefail
-          build-http-fleet/bin/tests/test_simple_web_http_transport \
+          build-http-fleet/bin/tests/test_simple_web_http_transport/test_simple_web_http_transport \
           2>&1 | tee build-http-fleet/http-transport-test.log
           build-http-fleet/bin/examples/sync_13_http_simple_web_server \
             demo 127.0.0.1 18080 \
@@ -494,7 +494,7 @@ jobs:
       - name: Run WebSocket fallback example
         run: |
           set -euo pipefail
-          test_dir="build-ws-fallback/bin/tests"
+          test_dir="build-ws-fallback/bin/tests/test_simple_websocket_transport"
           test -x "$test_dir/test_simple_websocket_transport.exe"
           test -f "$test_dir/libcrypto-3-x64.dll"
           "$test_dir/test_simple_websocket_transport.exe" \
@@ -594,7 +594,7 @@ jobs:
       - name: Run Kurlyk curl fallback example
         run: |
           set -euo pipefail
-          test_dir="build-kurlyk-fallback/bin/tests"
+          test_dir="build-kurlyk-fallback/bin/tests/test_kurlyk_http_transport"
           test -x "$test_dir/test_kurlyk_http_transport.exe"
           test -f "$test_dir/libcurl-x64.dll"
           "$test_dir/test_kurlyk_http_transport.exe" \

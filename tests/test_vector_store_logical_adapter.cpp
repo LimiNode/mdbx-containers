@@ -370,6 +370,15 @@ int main() {
         }
         MDBXC_TEST_ASSERT(local_clear_failed);
         MDBXC_TEST_ASSERT(session->pending_size() == 0u);
+        std::vector<mdbxc::sync::LogicalChange> rejected_commit;
+        bool commit_rejected = false;
+        try {
+            session->commit(rejected_commit);
+        } catch (const std::logic_error&) {
+            commit_rejected = true;
+        }
+        MDBXC_TEST_ASSERT(commit_rejected);
+        MDBXC_TEST_ASSERT(rejected_commit.empty());
         session->rollback();
     }
     MDBXC_TEST_ASSERT(corrupt_store.count() == 1u);
