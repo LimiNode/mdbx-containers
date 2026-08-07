@@ -39,7 +39,7 @@ if(MDBXC_BUILD_TESTS)
             "${CMAKE_CURRENT_BINARY_DIR}/cleanup_test_data_${test_name}.cmake")
         file(WRITE "${_mdbxc_cleanup_script}"
             "file(REMOVE_RECURSE \"${_mdbxc_test_data_dir}\")\n"
-            "file(MAKE_DIRECTORY \"${_mdbxc_test_data_dir}/data\")\n"
+            "file(MAKE_DIRECTORY \"${_mdbxc_test_data_dir}\")\n"
             "file(REMOVE_RECURSE \"${_mdbxc_test_exe_data_dir}\")\n")
         add_test(NAME ${test_name}_test_data_setup
             COMMAND ${CMAKE_COMMAND} -P "${_mdbxc_cleanup_script}")
