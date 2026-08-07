@@ -347,7 +347,7 @@ jobs:
 
   windows:
     name: Windows MinGW64 (C++${{ matrix.std }})
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 45
 
     strategy:
@@ -434,7 +434,7 @@ jobs:
 
   websocket-mingw-openssl-fallback:
     name: WebSocket MinGW OpenSSL Crypto fallback
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 30
 
     defaults:
@@ -545,7 +545,7 @@ jobs:
 
   kurlyk-mingw-curl-fallback:
     name: Kurlyk MinGW libcurl fallback
-    runs-on: windows-latest
+    runs-on: windows-2022
     timeout-minutes: 30
 
     defaults:
