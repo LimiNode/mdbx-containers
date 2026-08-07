@@ -16,13 +16,6 @@
 #   include <cstddef>
 #endif
 
-#ifndef XXH_INLINE_ALL
-#   define XXH_INLINE_ALL
-#endif
-#ifndef XXH_NAMESPACE
-#   define XXH_NAMESPACE MDBXC_XXH_
-#endif
-
 namespace mdbxc {
 
     /// \struct ByteView

@@ -40,6 +40,13 @@
 #define MDBX_CONTAINERS_HEADER_ONLY
 #endif
 
+#ifndef XXH_INLINE_ALL
+#   define XXH_INLINE_ALL
+#endif
+#ifndef XXH_NAMESPACE
+#   define XXH_NAMESPACE MDBXC_XXH_
+#endif
+
 #include "detail/xxhash.h"
 #include "common/hashing.hpp"
 #include "common/MdbxException.hpp"
