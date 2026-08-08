@@ -23,7 +23,7 @@
 
 #include <mdbx.h>
 
-#include "Backup.hpp"
+#include "backup.hpp"
 #include "Config.hpp"
 #include "Transaction.hpp"
 
@@ -37,6 +37,7 @@ namespace mdbxc {
         class ISyncApplyObserver;
         class SyncCaptureScope;
         class SyncEngine;
+        class VectorStoreLogicalAdapter;
     }
 
     /// \class Connection
@@ -358,6 +359,7 @@ namespace mdbxc {
             const std::shared_ptr<SyncApplyObserverState>& state);
 
         friend class sync::SyncEngine;
+        friend class sync::VectorStoreLogicalAdapter;
         friend class VectorStore;
 #           if __cplusplus >= 201703L
         using SyncApplyMutex = std::shared_mutex;

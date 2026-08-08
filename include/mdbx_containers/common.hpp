@@ -40,6 +40,15 @@
 #define MDBX_CONTAINERS_HEADER_ONLY
 #endif
 
+#ifndef XXH_INLINE_ALL
+#   define XXH_INLINE_ALL
+#endif
+#ifndef XXH_NAMESPACE
+#   define XXH_NAMESPACE MDBXC_XXH_
+#endif
+
+#include "detail/xxhash.h"
+#include "common/hashing.hpp"
 #include "common/MdbxException.hpp"
 #include "common/Config.hpp"
 #include "common/TransactionTracker.hpp"
@@ -47,8 +56,9 @@
 #include "common/Transaction.hpp"
 #include "detail/path_utils.hpp"
 #if MDBXC_SYNC_ENABLED
-#include "sync/ISyncCaptureSink.hpp"
-#include "sync/SyncApplyObserver.hpp"
+#include "sync/protocol/ChangeOp.hpp"
+#include "sync/capture/ISyncCaptureSink.hpp"
+#include "sync/core/SyncApplyObserver.hpp"
 #endif
 #include "common/Connection.hpp"
 #include "detail/BaseTable.hpp"

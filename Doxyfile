@@ -954,6 +954,12 @@ INPUT                  = ./include \
                          ./docs/groups.dox \
                          ./docs/configuration.dox \
                          ./docs/mainpage.dox \
+                         ./docs/sync.md \
+                         ./docs/sync-RU.md \
+                         ./docs/sync-logical.md \
+                         ./docs/sync-logical-RU.md \
+                         ./docs/sync-recovery.md \
+                         ./docs/sync-recovery-RU.md \
                          ./docs/tables.dox \
                          ./tests
 

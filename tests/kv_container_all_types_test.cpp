@@ -226,7 +226,7 @@ int main() {
     cfg.pathname       = "data/kv_container_all_types_v2";
     cfg.max_dbs        = 64;
     cfg.no_subdir      = false;
-    cfg.relative_to_exe= true;
+    cfg.relative_to_exe= false;
 
     auto conn = mdbxc::Connection::create(cfg);
 

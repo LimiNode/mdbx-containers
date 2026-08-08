@@ -13,8 +13,8 @@
 
 #ifndef MDBX_CONTAINERS_HEADER_ONLY
 #if MDBXC_SYNC_ENABLED
-#include <mdbx_containers/sync/ISyncCaptureSink.hpp>
-#include <mdbx_containers/sync/SyncApplyObserver.hpp>
+#include <mdbx_containers/sync/capture/ISyncCaptureSink.hpp>
+#include <mdbx_containers/sync/core/SyncApplyObserver.hpp>
 #endif
 #endif
 

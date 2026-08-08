@@ -24,7 +24,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_1.mdbx";
         cfg.max_dbs = 10;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         mdbxc::VectorStore store(cfg, "test1");
         store.clear();
@@ -47,7 +47,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_2.mdbx";
         cfg.max_dbs = 10;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         mdbxc::VectorStore store(cfg, "test2");
         store.clear();
@@ -71,7 +71,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_3.mdbx";
         cfg.max_dbs = 10;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         {
             mdbxc::VectorStore store(cfg, "persist");
@@ -95,7 +95,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_4.mdbx";
         cfg.max_dbs = 10;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         mdbxc::VectorStore store(cfg, "erase_test");
         store.clear();
@@ -120,7 +120,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_5.mdbx";
         cfg.max_dbs = 10;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         mdbxc::VectorStore store(cfg, "dim_test");
         store.clear();
@@ -144,7 +144,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_6.mdbx";
         cfg.max_dbs = 10;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         mdbxc::VectorStore store(cfg, "empty_test");
         store.clear();
@@ -165,7 +165,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_7.mdbx";
         cfg.max_dbs = 20;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         auto conn = mdbxc::Connection::create(cfg);
 
@@ -231,7 +231,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_9.mdbx";
         cfg.max_dbs = 10;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         {
             mdbxc::VectorStore store(cfg, "failed_add");
@@ -290,7 +290,7 @@ int main() {
         cfg.pathname = "data/vector_store_test_11.mdbx";
         cfg.max_dbs = 10;
         cfg.no_subdir = true;
-        cfg.relative_to_exe = true;
+        cfg.relative_to_exe = false;
 
         mdbxc::VectorStore store(cfg, "concurrent_search");
         store.clear();

@@ -26,7 +26,7 @@ int main() {
     cfg.pathname = "data/transaction_test.mdbx";
     cfg.max_dbs = 8;
     cfg.no_subdir = true;
-    cfg.relative_to_exe = true;
+    cfg.relative_to_exe = false;
 
     auto conn = mdbxc::Connection::create(cfg);
     mdbxc::KeyValueTable<int, std::string> names(conn, "txn_names");
@@ -117,7 +117,7 @@ int main() {
         read_only_cfg.pathname = "data/read_only_table_test.mdbx";
         read_only_cfg.max_dbs = 4;
         read_only_cfg.no_subdir = true;
-        read_only_cfg.relative_to_exe = true;
+        read_only_cfg.relative_to_exe = false;
 
         {
             auto write_conn = mdbxc::Connection::create(read_only_cfg);
@@ -147,7 +147,7 @@ int main() {
         cleanup_cfg.pathname = "data/transaction_cleanup_test.mdbx";
         cleanup_cfg.max_dbs = 2;
         cleanup_cfg.no_subdir = true;
-        cleanup_cfg.relative_to_exe = true;
+        cleanup_cfg.relative_to_exe = false;
 
         auto cleanup_conn = mdbxc::Connection::create(cleanup_cfg);
         cleanup_conn->begin(mdbxc::TransactionMode::WRITABLE);
@@ -180,7 +180,7 @@ int main() {
         reset_read_cfg.pathname = "data/transaction_reset_read_test.mdbx";
         reset_read_cfg.max_dbs = 2;
         reset_read_cfg.no_subdir = true;
-        reset_read_cfg.relative_to_exe = true;
+        reset_read_cfg.relative_to_exe = false;
 
         auto reset_read_conn = mdbxc::Connection::create(reset_read_cfg);
         mdbxc::KeyValueTable<int, std::string> reset_read_table(reset_read_conn, "reset_read_names");
@@ -218,7 +218,7 @@ int main() {
         shutdown_cfg.pathname = "data/transaction_shutdown_test.mdbx";
         shutdown_cfg.max_dbs = 2;
         shutdown_cfg.no_subdir = true;
-        shutdown_cfg.relative_to_exe = true;
+        shutdown_cfg.relative_to_exe = false;
 
         auto shutdown_conn = mdbxc::Connection::create(shutdown_cfg);
 

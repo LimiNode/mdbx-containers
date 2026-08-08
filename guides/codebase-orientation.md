@@ -15,8 +15,17 @@ of truth.
 | Path | Purpose | Edit when |
 | --- | --- | --- |
 | `include/mdbx_containers.hpp` | Top-level public include for tables, sync, and vector APIs. | Changing the umbrella API. |
-| `include/mdbx_containers/*.hpp` | Public headers: aggregators, table APIs, and supported helpers such as `Hash.hpp`. | Changing table user APIs or reusable user-facing helpers. |
+| `include/mdbx_containers/*.hpp` | Public headers: aggregators and table APIs. Shared utility headers live in their owning domain. | Changing table user APIs or reusable user-facing helpers. |
 | `include/mdbx_containers/common/` | Core infrastructure: `Config`, `Connection`, `Transaction`, `MdbxException`. | Changing env/config/transaction/error behavior. |
+| `include/mdbx_containers/sync/core/` | Sync foundation: cancellation, conflict policy, and apply observers. Reached through `sync/core.hpp`. | Changing lifecycle-neutral sync primitives. |
+| `include/mdbx_containers/sync/capture/` | Raw write capture: sink interface, scope, and accumulator. Reached through `sync/capture.hpp`. | Changing capture attachment or changelog emission. |
+| `include/mdbx_containers/sync/protocol/` | Raw replication DTOs, bounds, batch/snapshot codecs, and cursors. Reached through `sync/protocol.hpp`. | Changing the raw sync wire contract. |
+| `include/mdbx_containers/sync/engine/` | Sync coordinator, peer abstraction, direct peers, worker, and session helpers. Reached through `sync/engine.hpp`. | Changing replication orchestration or worker lifecycle. |
+| `include/mdbx_containers/sync/transport/` | Framework-neutral HTTP/WebSocket seams, transport codec, and middleware. Reached through `sync/transport.hpp`. | Changing transport-neutral request handling or policy hooks. |
+| `include/mdbx_containers/sync/logical/` | Logical schema, delivery, and durable logical state. Reached through `sync/logical.hpp`. | Changing typed logical replication contracts or durable logical state. |
+| `include/mdbx_containers/sync/logical/adapters/` | Table-bound logical adapters. Reached through `sync/adapters.hpp`. | Changing typed logical replication contracts or adapter-local storage. |
+| `include/mdbx_containers/sync/stores/` | Durable raw-replication state: metadata, changelog, origin, applied-cursor, and identity indexes. Reached through `sync/storage.hpp`. | Changing raw changelog persistence or apply bookkeeping. |
+| `include/mdbx_containers/sync/transports/` | Optional bindings to concrete HTTP/WebSocket libraries. Reached through `sync/transports/*.hpp`. | Changing backend-specific transport integration. |
 | `include/mdbx_containers/detail/` | Internal building blocks: `BaseTable`, `TransactionTracker`, serialization, path utilities, vendored/private helpers. Not public API. | Changing shared mechanisms. |
 | `tests/` | Standalone CTest executables. | Adding behavior, regressions, serialization, path, or transaction checks. |
 | `examples/` | User-facing API examples. | Public usage scenarios change. |
@@ -31,7 +40,6 @@ Primary entry points:
 - User API: `include/mdbx_containers.hpp`,
   `include/mdbx_containers/KeyValueTable.hpp`,
   `include/mdbx_containers/HashedKeyValueStore.hpp`,
-  `include/mdbx_containers/Hash.hpp`,
   `include/mdbx_containers/ValueTable.hpp`,
   `include/mdbx_containers/AnyValueTable.hpp`,
   `include/mdbx_containers/KeyTable.hpp`,
@@ -88,8 +96,11 @@ Dependency rules:
 
 - Public table headers may depend on `common.hpp` and through it on
   `Connection`, `BaseTable`, and serialization helpers.
-- Public top-level helper headers such as `Hash.hpp` may be included directly
-  by users. Keep them C++11-compatible unless guarded.
+- `common/hashing.hpp` is an internal `common` leaf. Its types are exported by
+  `common.hpp` and, for table users, by `tables.hpp`; users should include an
+  owning umbrella rather than this leaf directly. `common/backup.hpp` remains
+  an explicitly supported direct utility include. Keep exported types
+  C++11-compatible unless guarded.
 - `common/Connection.*` may depend on `detail/path_utils.hpp`, `Transaction`,
   `Config`, and `check_mdbx`.
 - `detail/utils.hpp` should remain low-level: serialization, MDBX error

@@ -12,7 +12,7 @@ int main() {
     cfg.pathname = "data/key_table_test.mdbx";
     cfg.max_dbs = 8;
     cfg.no_subdir = true;
-    cfg.relative_to_exe = true;
+    cfg.relative_to_exe = false;
 
     auto conn = mdbxc::Connection::create(cfg);
 

@@ -36,7 +36,7 @@ int main() {
     cfg.pathname = "data/key_multi_value_table_test.mdbx";
     cfg.max_dbs = 8;
     cfg.no_subdir = true;
-    cfg.relative_to_exe = true;
+    cfg.relative_to_exe = false;
 
     auto conn = mdbxc::Connection::create(cfg);
 
@@ -236,7 +236,7 @@ int main() {
         limit_cfg.max_dbs = 4;
         limit_cfg.max_dupsort_value_size = 128;
         limit_cfg.no_subdir = true;
-        limit_cfg.relative_to_exe = true;
+        limit_cfg.relative_to_exe = false;
 
         auto limit_conn = mdbxc::Connection::create(limit_cfg);
         mdbxc::KeyMultiValueTable<int, std::string> table(limit_conn, "multi_oversized");

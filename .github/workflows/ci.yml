@@ -298,24 +298,40 @@ jobs:
       - name: Run Simple-Web HTTP sync smoke
         run: |
           set -euo pipefail
-          build-http-fleet/bin/tests/test_simple_web_http_transport \
+          workspace="$(pwd)"
+          test_dir="$workspace/build-http-fleet/bin/tests/test_simple_web_http_transport"
+          exe_dir="$workspace/build-http-fleet/bin/examples"
+          runtime_root="$workspace/build-http-fleet/runtime"
+          rm -rf "$runtime_root"
+          mkdir -p "$runtime_root"
+          trap 'rm -rf "$runtime_root"' EXIT
+          run_in() {
+            local name="$1"
+            shift
+            mkdir -p "$runtime_root/$name"
+            (
+              cd "$runtime_root/$name"
+              "$@"
+            )
+          }
+          run_in transport "$test_dir/test_simple_web_http_transport" \
           2>&1 | tee build-http-fleet/http-transport-test.log
-          build-http-fleet/bin/examples/sync_13_http_simple_web_server \
+          run_in demo "$exe_dir/sync_13_http_simple_web_server" \
             demo 127.0.0.1 18080 \
           2>&1 | tee build-http-fleet/http-demo.log
           grep -q "OK: sync_13_http_simple_web_server" \
             build-http-fleet/http-demo.log
-          build-http-fleet/bin/examples/sync_13_http_simple_web_server \
+          run_in worker-demo "$exe_dir/sync_13_http_simple_web_server" \
             worker-demo 127.0.0.1 18081 \
           2>&1 | tee build-http-fleet/http-worker-demo.log
           grep -q "OK: sync_13_http_simple_web_server (worker-demo)" \
             build-http-fleet/http-worker-demo.log
-          build-http-fleet/bin/examples/sync_18_http_node_fleet \
+          run_in master-replica "$exe_dir/sync_18_http_node_fleet" \
             master-replica 2 \
           2>&1 | tee build-http-fleet/master-replica.log
           grep -q "OK: sync_18_http_node_fleet (master-replica)" \
             build-http-fleet/master-replica.log
-          build-http-fleet/bin/examples/sync_18_http_node_fleet \
+          run_in mesh "$exe_dir/sync_18_http_node_fleet" \
             mesh 2 \
           2>&1 | tee build-http-fleet/mesh.log
           grep -q "OK: sync_18_http_node_fleet (mesh)" \
@@ -408,6 +424,10 @@ jobs:
           ctest --test-dir build --output-on-failure -C Release \
           2>&1 | tee build/ctest.log
 
+      - name: Collect MDBX failure diagnostics
+        if: failure()
+        run: bash .github/scripts/collect-windows-mdbx-diagnostics.sh build
+
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -494,19 +514,34 @@ jobs:
       - name: Run WebSocket fallback example
         run: |
           set -euo pipefail
-          test_dir="build-ws-fallback/bin/tests"
+          workspace="$(pwd)"
+          test_dir="$workspace/build-ws-fallback/bin/tests/test_simple_websocket_transport"
+          exe_dir="$workspace/build-ws-fallback/bin/examples"
+          runtime_root="$workspace/build-ws-fallback/runtime"
+          rm -rf "$runtime_root"
+          mkdir -p "$runtime_root/test" "$runtime_root/example"
+          trap 'rm -rf "$runtime_root"' EXIT
           test -x "$test_dir/test_simple_websocket_transport.exe"
           test -f "$test_dir/libcrypto-3-x64.dll"
-          "$test_dir/test_simple_websocket_transport.exe" \
+          (
+            cd "$runtime_root/test"
+            "$test_dir/test_simple_websocket_transport.exe"
+          ) \
           2>&1 | tee build-ws-fallback/transport-test.log
-          exe_dir="build-ws-fallback/bin/examples"
           test -x "$exe_dir/sync_17_websocket_simple_web_server.exe"
           test -f "$exe_dir/libcrypto-3-x64.dll"
           test ! -f "$exe_dir/libssl-3-x64.dll"
-          "$exe_dir/sync_17_websocket_simple_web_server.exe" 127.0.0.1 18194 \
+          (
+            cd "$runtime_root/example"
+            "$exe_dir/sync_17_websocket_simple_web_server.exe" 127.0.0.1 18194
+          ) \
           2>&1 | tee build-ws-fallback/example.log
           grep -q "OK: sync_17_websocket_simple_web_server" \
             build-ws-fallback/example.log
+
+      - name: Collect MDBX failure diagnostics
+        if: failure()
+        run: bash .github/scripts/collect-windows-mdbx-diagnostics.sh build-ws-fallback
 
       - name: Upload logs
         if: failure()
@@ -594,18 +629,33 @@ jobs:
       - name: Run Kurlyk curl fallback example
         run: |
           set -euo pipefail
-          test_dir="build-kurlyk-fallback/bin/tests"
+          workspace="$(pwd)"
+          test_dir="$workspace/build-kurlyk-fallback/bin/tests/test_kurlyk_http_transport"
+          exe_dir="$workspace/build-kurlyk-fallback/bin/examples"
+          runtime_root="$workspace/build-kurlyk-fallback/runtime"
+          rm -rf "$runtime_root"
+          mkdir -p "$runtime_root/test" "$runtime_root/example"
+          trap 'rm -rf "$runtime_root"' EXIT
           test -x "$test_dir/test_kurlyk_http_transport.exe"
           test -f "$test_dir/libcurl-x64.dll"
-          "$test_dir/test_kurlyk_http_transport.exe" \
+          (
+            cd "$runtime_root/test"
+            "$test_dir/test_kurlyk_http_transport.exe"
+          ) \
           2>&1 | tee build-kurlyk-fallback/transport-test.log
-          exe_dir="build-kurlyk-fallback/bin/examples"
           test -x "$exe_dir/sync_19_kurlyk_http_client.exe"
           test -f "$exe_dir/libcurl-x64.dll"
-          "$exe_dir/sync_19_kurlyk_http_client.exe" \
+          (
+            cd "$runtime_root/example"
+            "$exe_dir/sync_19_kurlyk_http_client.exe"
+          ) \
           2>&1 | tee build-kurlyk-fallback/example.log
           grep -q "OK: sync_19_kurlyk_http_client" \
             build-kurlyk-fallback/example.log
+
+      - name: Collect MDBX failure diagnostics
+        if: failure()
+        run: bash .github/scripts/collect-windows-mdbx-diagnostics.sh build-kurlyk-fallback
 
       - name: Upload logs
         if: failure()

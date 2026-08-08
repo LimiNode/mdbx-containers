@@ -61,7 +61,7 @@ int main() {
     cfg.pathname = "data/hashed_key_value_store_test.mdbx";
     cfg.max_dbs = 32;
     cfg.no_subdir = true;
-    cfg.relative_to_exe = true;
+    cfg.relative_to_exe = false;
 
     auto conn = mdbxc::Connection::create(cfg);
 
@@ -267,7 +267,7 @@ int main() {
         read_only_cfg.pathname = "data/hashed_large_read_only_test.mdbx";
         read_only_cfg.max_dbs = 4;
         read_only_cfg.no_subdir = true;
-        read_only_cfg.relative_to_exe = true;
+        read_only_cfg.relative_to_exe = false;
 
         {
             auto write_conn = mdbxc::Connection::create(read_only_cfg);
@@ -363,7 +363,7 @@ int main() {
         small_cfg.max_dbs = 4;
         small_cfg.max_dupsort_value_size = 128;
         small_cfg.no_subdir = true;
-        small_cfg.relative_to_exe = true;
+        small_cfg.relative_to_exe = false;
 
         auto small_conn = mdbxc::Connection::create(small_cfg);
         typedef mdbxc::HashedKeyValueStore<
@@ -384,7 +384,7 @@ int main() {
         small_cfg.pathname = "data/hashed_small_maxdbs_test.mdbx";
         small_cfg.max_dbs = 1;
         small_cfg.no_subdir = true;
-        small_cfg.relative_to_exe = true;
+        small_cfg.relative_to_exe = false;
 
         auto small_conn = mdbxc::Connection::create(small_cfg);
         typedef mdbxc::HashedKeyValueStore<
@@ -403,7 +403,7 @@ int main() {
         large_cfg.pathname = "data/hashed_large_maxdbs_test.mdbx";
         large_cfg.max_dbs = 1;
         large_cfg.no_subdir = true;
-        large_cfg.relative_to_exe = true;
+        large_cfg.relative_to_exe = false;
 
         auto large_conn = mdbxc::Connection::create(large_cfg);
         assert_throws_any([&large_conn]() {

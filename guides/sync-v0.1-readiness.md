@@ -13,9 +13,12 @@ rules, see [Sync table coverage matrix](sync-table-coverage.md).
   `ThreadLocalChangeAccumulator` is attached to the writing `Connection`;
   `SyncCaptureScope` provides RAII attach/restore for write phases.
 - `VectorStore` is covered indirectly through its internal `SequenceTable` and
-  `KeyValueTable` members. This is raw physical replication only: use one
-  authoritative or externally serialized writer per collection. It is not a
-  multi-writer logical `VectorStore` contract.
+  `KeyValueTable` members for raw physical replication. The explicit schema-v1
+  `VectorStoreLogicalAdapter` additionally captures and applies add, erase, and
+  clear with explicit record ids across the ids, embeddings, text, and metadata
+  DBIs. Both modes require one authoritative or externally serialized writer
+  per collection; the logical adapter is not a multi-writer contract and is
+  not connected to the transport pull/push path.
 - Standalone writes become standalone sync batches; an explicit transaction
   spanning multiple supported tables becomes one local atomic batch.
 - Reads, scans, vector search, and other non-mutating APIs are not captured.
@@ -109,6 +112,12 @@ delivery. The logical core uses the following contracts:
 - `KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are explicit
   apply helpers with opt-in typed capture sessions. Neither is connected to
   the transport pull/push path yet; callers own logical frame delivery.
+- `VectorStoreLogicalAdapter` is an explicit schema-v1 apply helper with an
+  opt-in typed capture session. It carries explicit record ids and applies
+  add, erase, and clear atomically across the four collection DBIs. Erase
+  retains the ids marker as allocation high-water, while clear resets every
+  DBI; incoming adds validate their embedding dimension before mutation.
+  Callers own logical frame delivery and must serialize conflicting writers.
 - `KeyMultiValueTableLogicalAdapter` follows the same explicit logical-frame
   path. Schema v1 provides unordered insert, version-neutral batch `append()`,
   key erase, all-matching-value erase, and clear; schema v2 adds exact-one

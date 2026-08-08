@@ -13,8 +13,6 @@
 
 #include <mdbx.h>
 
-#include "../../detail/utils.hpp"
-#include "../common.hpp"
 #include "OriginIndexStore.hpp"
 
 namespace mdbxc {

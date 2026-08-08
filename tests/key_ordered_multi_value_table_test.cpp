@@ -83,7 +83,7 @@ int main() {
     cfg.pathname = "data/key_ordered_multi_value_table_v2_test.mdbx";
     cfg.max_dbs = 32;
     cfg.no_subdir = true;
-    cfg.relative_to_exe = true;
+    cfg.relative_to_exe = false;
 
     auto conn = mdbxc::Connection::create(cfg);
 
@@ -247,7 +247,7 @@ int main() {
         reopen_cfg.pathname = "data/key_ordered_multi_value_reopen_v2_test.mdbx";
         reopen_cfg.max_dbs = 4;
         reopen_cfg.no_subdir = true;
-        reopen_cfg.relative_to_exe = true;
+        reopen_cfg.relative_to_exe = false;
 
         {
             auto reopen_conn = mdbxc::Connection::create(reopen_cfg);
@@ -370,7 +370,7 @@ int main() {
         limit_cfg.max_dbs = 4;
         limit_cfg.max_dupsort_value_size = 128;
         limit_cfg.no_subdir = true;
-        limit_cfg.relative_to_exe = true;
+        limit_cfg.relative_to_exe = false;
 
         auto limit_conn = mdbxc::Connection::create(limit_cfg);
         mdbxc::KeyOrderedMultiValueTable<int, std::string> table(limit_conn, "ordered_oversized");

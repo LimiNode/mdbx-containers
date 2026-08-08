@@ -1,5 +1,9 @@
 # MDBX-Containers
 
+<p align="center">
+  <img src="docs/logo-1280x640.png" alt="MDBX Containers logo" width="640">
+</p>
+
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue) ![C++ Standard](https://img.shields.io/badge/C++-11--17-orange) [![CI Windows](https://img.shields.io/github/actions/workflow/status/NewYaroslav/mdbx-containers/ci.yml?branch=main&label=Windows&logo=windows)](https://github.com/NewYaroslav/mdbx-containers/actions/workflows/ci.yml) [![CI Linux](https://img.shields.io/github/actions/workflow/status/NewYaroslav/mdbx-containers/ci.yml?branch=main&label=Linux&logo=linux)](https://github.com/NewYaroslav/mdbx-containers/actions/workflows/ci.yml) [![CI macOS](https://img.shields.io/github/actions/workflow/status/NewYaroslav/mdbx-containers/ci.yml?branch=main&label=macOS&logo=apple)](https://github.com/NewYaroslav/mdbx-containers/actions/workflows/ci.yml)
 
 [English version](README.md)
@@ -83,22 +87,26 @@
   перед подключением `mdbx_containers/sync.hpp`.
 - v0.1 захватывает обычные write-path'ы `KeyValueTable`, `KeyTable`,
   `ValueTable` и `SequenceTable`; `VectorStore` реплицируется косвенно через
-  внутренние `SequenceTable` и `KeyValueTable`. Это raw physical репликация
-  для leader/follower либо для одного внешне сериализованного writer'а на
-  коллекцию, а не multi-writer logical репликация.
+  внутренние `SequenceTable` и `KeyValueTable`. Дополнительно есть opt-in
+  schema-v1 `VectorStoreLogicalAdapter` для add, erase и clear по четырём DBI
+  коллекции с явными record id. Оба режима требуют leader/follower либо
+  внешней сериализации writer'ов; multi-writer conflict resolution не входит
+  в контракт.
 - `AnyValueTable`, `KeyMultiValueTable`, `KeyOrderedMultiValueTable` и
   `HashedKeyValueStore` не имеют raw-репликации в v0.1.
-  `KeyMultiValueTableLogicalAdapter` даёт opt-in logical capture для
-  неупорядоченных `insert`, удаления ключа, удаления всех совпадающих значений и очистки при
-  одном writer'е либо причинно сериализованных обновлениях. Raw-вызовы,
-  `append`, `reconcile` и удаление диапазона остаются за пределами scope этого
-  adapter-а. См. `sync/DESIGN.md`.
-  `KeyOrderedMultiValueTableLogicalAdapter` даёт opt-in append-only apply
-  через ordered logical delivery для одного origin stream. Direct logical frame
-  и unordered delivery отклоняются. Его typed capture session атомарно
-  коммитит локальные append вместе с ordered outbox envelope; destructive
-  ordered операции остаются deferred. Для `AnyValueTable` и
-  `HashedKeyValueStore` ещё нужны дизайны type tags и hash-index identity.
+  `KeyMultiValueTableLogicalAdapter` даёт opt-in capture неупорядоченного
+  multiset при одном writer'е либо причинно сериализованных обновлениях.
+  Schema v1 поддерживает `insert`, version-neutral batch `append()`, удаление
+  ключа, удаление всех совпадающих значений и clear; schema v2 добавляет
+  exact-one erase и `reconcile()`; schema v3 добавляет bounded typed
+  `erase_range()`, разложенный в точные удаления ключей.
+  `KeyOrderedMultiValueTableLogicalAdapter` даёт schema-v1 append-only ordered
+  delivery для одного authoritative origin. Его schema-v2 destructive adapter
+  добавляет persistent element identities, exact erasure, bounded selector
+  erasure, clear и single-origin `replace_with()`. Direct logical frames и
+  unordered delivery для ordered tables по-прежнему отклоняются. Для
+  `AnyValueTable` и `HashedKeyValueStore` ещё нужны дизайны type tags и
+  hash-index identity.
 - Для поддерживаемых таблиц прикладной CRUD-код не нужно оборачивать
   отдельными sync-вызовами на каждый метод. Прикрепите
   `ThreadLocalChangeAccumulator` к пишущему `Connection`; используйте
@@ -118,10 +126,18 @@
   Caller-created raw read-only transactions остаются допустимыми для
   read/search snapshot operations. Любое исключение из capture recording или
   flush делает transaction rollback-only; повторный `commit()` отклоняется.
+- Raw catch-up использует replay сохранённого changelog. Если получателю нужна
+  уже удалённая история, он получает `SnapshotRequired`. `SyncWorker` может
+  включить fresh-replica fallback `CompleteUserDatabase`; `ManifestOnly`
+  является ручным режимом физической замены и никогда не продвигает global raw
+  cursor. Complete raw snapshot отклоняется, когда у источника есть persistent
+  logical sync state: он не может безопасно восстановить logical delivery
+  metadata.
 - `SyncEngine` предоставляет pull/push/apply primitives,
   `register_logical_schema()` для committed setup logical schema markers и
   `migrate_logical_schema()` для явной замены marker после exact preflight.
-  `KeyValueTableLogicalAdapter` и `KeyTableLogicalAdapter` - первые concrete
+  `KeyValueTableLogicalAdapter`, `KeyTableLogicalAdapter` и
+  `VectorStoreLogicalAdapter` - concrete
   logical adapter helpers для явных вызовов
   `SyncEngine::apply_logical_changes()` или более низкоуровневого
   `LogicalTableRegistry::preflight_then_apply()`. Их payload codecs отделены
@@ -152,6 +168,9 @@
   `MDBXC_HAS_KURLYK_HTTP_TRANSPORT` для условного подключения backend headers.
   Установленный package также экспортирует CMake provider functions для этих
   готовых transport targets.
+  Начните с [обзора sync](docs/sync-RU.md), затем используйте [руководство по
+  logical и ordered sync](docs/sync-logical-RU.md) либо [руководство по
+  восстановлению и full snapshots](docs/sync-recovery-RU.md) для этих путей.
   См. [sync transport production notes](guides/sync-transport-production.md)
   про TLS/WSS, ротацию токенов, graceful shutdown, structured logging и
   offline dependency builds. См.
@@ -281,12 +300,17 @@ metadata filtering и генерация embeddings не входят в обл�
 только из ASCII-букв, цифр, `_` и `-`.
 
 Сейчас sync воспроизводит четыре внутренних DBI этого store как raw physical
-изменения. На всех replica используйте одно имя коллекции, одну vector metric
-и совместимый embedding codec. У коллекции должен быть один authoritative
-writer либо приложение должно внешне сериализовать всех writer'ов: локальный
-`add()` выделяет id из локального состояния и не даёт cross-node identity
-allocation или conflict resolution. Logical sync adapter для `VectorStore`
-пока отсутствует.
+изменения. На всех replica используйте одно имя коллекции и совместимый
+embedding codec. Vector metric является локальной конфигурацией query; если
+search ranking должен совпадать, настройте одинаковую metric на каждой replica.
+У коллекции должен быть один authoritative writer либо приложение должно
+внешне сериализовать всех writer'ов: локальный `add()` выделяет id из локального состояния и не даёт cross-node identity
+allocation или conflict resolution. Opt-in `VectorStoreLogicalAdapter`
+использует явные id и атомарно применяет add, erase и clear по всем четырём DBI.
+При erase id marker сохраняется как allocation high-water, а clear сбрасывает
+все четыре DBI. Incoming logical add проверяет dimension embedding до mutation.
+Это application-owned logical recipe, а не distributed allocator или
+автоматический transport path.
 
 ```cpp
 #include <mdbx_containers/vector.hpp>

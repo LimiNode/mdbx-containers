@@ -11,6 +11,10 @@
 
 namespace mdbxc {
 
+namespace sync {
+    class VectorStoreLogicalAdapter;
+}
+
     /// \brief Persistent local vector store with an exact in-memory search index.
     ///
     /// The store persists embeddings, text, and metadata in MDBX tables, then
@@ -93,6 +97,13 @@ namespace mdbxc {
         const std::string& collection() const noexcept;
 
     private:
+        friend class sync::VectorStoreLogicalAdapter;
+
+        VectorStore(std::shared_ptr<Connection> connection,
+                    std::string collection,
+                    VectorMetric metric,
+                    MDBX_db_flags_t table_flags);
+
         std::string m_collection;
         VectorMetric m_metric;
         std::shared_ptr<Connection> m_connection;
