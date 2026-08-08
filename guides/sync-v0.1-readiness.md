@@ -169,10 +169,11 @@ tables.
 - Extend logical-frame capability negotiation only when a new adapter requires
   a compatibility distinction beyond the existing schema marker and adapter
   registry fail-closed checks.
-- Design logical-aware recovery separately from raw complete snapshots. Raw
-  `CompleteUserDatabase` snapshots intentionally reject persistent logical
-  state; a future baseline protocol must preserve schema, outbox, replay, and
-  order-frontier invariants together.
+- Extend the transport-neutral `LogicalRecoveryRequest` /
+  `LogicalRecoveryResponse` baseline path to HTTP and WebSocket. Raw
+  `CompleteUserDatabase` snapshots intentionally continue to reject persistent
+  logical state; the DirectSyncPeer baseline already preserves schema, replay,
+  order-frontier, and source-outbox recovery invariants atomically.
 - Extend `KeyMultiValueTable` logical capture only after every added bulk or
   reconcile operation has explicit multiset replay semantics and round-trip
   coverage. Raw capture remains disabled.

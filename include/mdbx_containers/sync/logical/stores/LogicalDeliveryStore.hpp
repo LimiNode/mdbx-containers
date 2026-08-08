@@ -20,9 +20,8 @@ namespace mdbxc {
 namespace sync {
 
     /// \brief Read-only metadata decoded from an applied delivery marker.
-    /// \details The inspection record intentionally exposes only delivery
-    /// identity and stored frame metadata. It is not a pruning contract and
-    /// does not expose or decode the nested logical frame payload.
+    /// \details Recovery also retains the canonical nested frame bytes so a
+    /// recovered receiver can preserve duplicate-delivery identity exactly.
     struct LogicalDeliveryMarkerInfo {
         DbId destination_db_uuid{};        ///< Destination database id.
         NodeId origin_node_id{};           ///< Delivery origin node.
@@ -30,6 +29,13 @@ namespace sync {
         std::string frame_id;              ///< Stable sender frame id.
         std::uint16_t frame_codec_version = 0; ///< Nested frame codec version.
         std::uint32_t frame_bytes_size = 0;    ///< Stored nested frame bytes.
+        std::vector<std::uint8_t> encoded_frame; ///< Canonical nested frame.
+    };
+
+    /// \brief One durable replay-pruning boundary.
+    struct LogicalDeliveryWatermarkInfo {
+        NodeId origin_node_id{};
+        std::uint64_t sequence = 0u;
     };
 
     /// \brief Tracks applied logical delivery envelopes.
@@ -195,6 +201,45 @@ namespace sync {
             return out;
         }
 
+        /// \brief Lists every persisted replay-pruning watermark.
+        /// \details The optional watermark DBI remains absent when no marker
+        /// has ever been pruned. Recovery preserves that absence as an empty
+        /// result instead of creating it while reading.
+        std::vector<LogicalDeliveryWatermarkInfo> list_watermarks(
+                MDBX_txn* txn) const {
+            txn = checked_txn(txn,
+                              "LogicalDeliveryStore::list_watermarks");
+            open_const(txn);
+            std::vector<LogicalDeliveryWatermarkInfo> out;
+            if (!open_watermark_if_exists(txn)) {
+                return out;
+            }
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_watermark_dbi, &cursor),
+                       "LogicalDeliveryStore watermark cursor open failed");
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    LogicalDeliveryWatermarkInfo info;
+                    info.origin_node_id = decode_watermark_origin(key);
+                    info.sequence = decode_watermark(value);
+                    out.push_back(info);
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalDeliveryStore watermark cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return out;
+        }
+
         /// \brief Returns the persisted replay-pruning watermark for \p origin.
         /// \return Zero when no markers for \p origin have been pruned or
         /// the optional watermark DBI has not been created yet.
@@ -328,6 +373,66 @@ namespace sync {
             }
             check_mdbx(rc, "LogicalDeliveryStore write failed");
             return true;
+        }
+
+        /// \brief Restores one exact replay marker into a logical baseline.
+        /// \details The nested frame is decoded before writing so malformed
+        /// source metadata cannot be persisted by a recovery import.
+        void restore_marker(MDBX_txn* txn,
+                            const LogicalDeliveryMarkerInfo& marker,
+                            const CodecBounds* bounds = nullptr) {
+            txn = checked_txn(txn,
+                              "LogicalDeliveryStore::restore_marker");
+            validate_recovery_marker(marker, bounds);
+            open_marker_checked(txn);
+            const std::vector<std::uint8_t> key = make_marker_key(marker);
+            const std::vector<std::uint8_t> value =
+                make_marker_value(marker);
+            MDBX_val k = {
+                const_cast<std::uint8_t*>(key.empty() ? nullptr : &key[0]),
+                key.size()
+            };
+            MDBX_val v = {
+                const_cast<std::uint8_t*>(
+                    value.empty() ? nullptr : &value[0]),
+                value.size()
+            };
+            const int rc = mdbx_put(txn, m_dbi, &k, &v, MDBX_NOOVERWRITE);
+            if (rc == MDBX_KEYEXIST) {
+                MDBX_val existing;
+                check_mdbx(mdbx_get(txn, m_dbi, &k, &existing),
+                           "LogicalDeliveryStore recovery marker read failed");
+                if (existing.iov_len != value.size() ||
+                    (value.size() != 0u &&
+                     std::memcmp(existing.iov_base, &value[0], value.size()) != 0)) {
+                    throw std::runtime_error(
+                        "LogicalDeliveryStore recovery marker mismatch");
+                }
+                return;
+            }
+            check_mdbx(rc, "LogicalDeliveryStore recovery marker write failed");
+        }
+
+        /// \brief Restores one exact replay-pruning watermark.
+        void restore_watermark(MDBX_txn* txn,
+                               const LogicalDeliveryWatermarkInfo& watermark) {
+            txn = checked_txn(txn,
+                              "LogicalDeliveryStore::restore_watermark");
+            if (is_zero_sync_id(watermark.origin_node_id) ||
+                watermark.sequence == 0u) {
+                throw std::invalid_argument(
+                    "LogicalDeliveryStore recovery watermark is invalid");
+            }
+            const std::uint64_t existing = read_watermark(
+                txn, watermark.origin_node_id);
+            if (existing != 0u && existing != watermark.sequence) {
+                throw std::runtime_error(
+                    "LogicalDeliveryStore recovery watermark mismatch");
+            }
+            if (existing == 0u) {
+                write_watermark(txn, watermark.origin_node_id,
+                                watermark.sequence);
+            }
         }
 
     private:
@@ -470,6 +575,21 @@ namespace sync {
             return key;
         }
 
+        static std::vector<std::uint8_t> make_marker_key(
+                const LogicalDeliveryMarkerInfo& marker) {
+            const std::vector<std::uint8_t> frame_id_digest =
+                make_frame_id_digest(marker.frame_id);
+            std::vector<std::uint8_t> key;
+            key.reserve(2u + marker.origin_node_id.size() + 8u +
+                        frame_id_digest.size());
+            detail::append_u16_le(key, marker_key_version());
+            key.insert(key.end(), marker.origin_node_id.begin(),
+                       marker.origin_node_id.end());
+            detail::append_u64_le(key, marker.origin_sequence);
+            key.insert(key.end(), frame_id_digest.begin(), frame_id_digest.end());
+            return key;
+        }
+
         static std::vector<std::uint8_t> make_marker_value(
                 const LogicalDeliveryEnvelope& envelope,
                 const CodecBounds* bounds) {
@@ -512,6 +632,54 @@ namespace sync {
                 out, static_cast<std::uint32_t>(frame_bytes.size()));
             out.insert(out.end(), frame_bytes.begin(), frame_bytes.end());
             return out;
+        }
+
+        static std::vector<std::uint8_t> make_marker_value(
+                const LogicalDeliveryMarkerInfo& marker) {
+            std::vector<std::uint8_t> out;
+            out.reserve(2u + marker.destination_db_uuid.size() +
+                        marker.origin_node_id.size() + 8u + 4u +
+                        marker.frame_id.size() + 2u + 4u +
+                        marker.encoded_frame.size());
+            detail::append_u16_le(out, marker_value_version());
+            out.insert(out.end(), marker.destination_db_uuid.begin(),
+                       marker.destination_db_uuid.end());
+            out.insert(out.end(), marker.origin_node_id.begin(),
+                       marker.origin_node_id.end());
+            detail::append_u64_le(out, marker.origin_sequence);
+            detail::append_u32_le(out,
+                static_cast<std::uint32_t>(marker.frame_id.size()));
+            out.insert(out.end(), marker.frame_id.begin(), marker.frame_id.end());
+            detail::append_u16_le(out, marker.frame_codec_version);
+            detail::append_u32_le(out,
+                static_cast<std::uint32_t>(marker.encoded_frame.size()));
+            out.insert(out.end(), marker.encoded_frame.begin(),
+                       marker.encoded_frame.end());
+            return out;
+        }
+
+        static void validate_recovery_marker(
+                const LogicalDeliveryMarkerInfo& marker,
+                const CodecBounds* bounds) {
+            if (is_zero_sync_id(marker.destination_db_uuid) ||
+                is_zero_sync_id(marker.origin_node_id) ||
+                marker.origin_sequence == 0u || marker.frame_id.empty() ||
+                marker.frame_codec_version !=
+                    LogicalChangeFrameCodec::codec_version() ||
+                marker.frame_bytes_size != marker.encoded_frame.size()) {
+                throw std::invalid_argument(
+                    "LogicalDeliveryStore recovery marker is invalid");
+            }
+            if (marker.frame_id.size() >
+                    static_cast<std::size_t>(
+                        (std::numeric_limits<std::uint32_t>::max)()) ||
+                marker.encoded_frame.size() >
+                    static_cast<std::size_t>(
+                        (std::numeric_limits<std::uint32_t>::max)())) {
+                throw std::length_error(
+                    "LogicalDeliveryStore recovery marker exceeds u32 bounds");
+            }
+            (void)LogicalChangeFrameCodec::decode(marker.encoded_frame, bounds);
         }
 
         static void assert_marker_value_matches(
@@ -686,7 +854,9 @@ namespace sync {
             out.frame_codec_version = read_marker_u16(cur);
             out.frame_bytes_size = read_marker_u32(cur);
             require_bytes(cur, out.frame_bytes_size,
-                          "LogicalDeliveryStore marker value underrun");
+                           "LogicalDeliveryStore marker value underrun");
+            out.encoded_frame.assign(cur.data + cur.pos,
+                                     cur.data + cur.pos + out.frame_bytes_size);
             cur.pos += out.frame_bytes_size;
             if (cur.pos != cur.size) {
                 throw std::runtime_error(
