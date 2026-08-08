@@ -8,7 +8,7 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 
-build_dir="$1"
+build_dir="$(cd "$1" && pwd)"
 output_file="$build_dir/windows-mdbx-diagnostics.log"
 
 capture_command() {
