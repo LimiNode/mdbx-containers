@@ -385,8 +385,9 @@ namespace sync {
 
         static Cursor make_cursor(const std::vector<std::uint8_t>& encoded,
                                   const CodecBounds* bounds) {
-            if (bounds != nullptr &&
-                encoded.size() > bounds->max_transport_message_bytes) {
+            const CodecBounds& effective = logical_delivery_effective_bounds(
+                bounds);
+            if (encoded.size() > effective.max_transport_message_bytes) {
                 throw std::length_error(
                     "logical delivery protocol exceeds max_transport_message_bytes");
             }
@@ -408,8 +409,9 @@ namespace sync {
 
         static void validate_size(const std::vector<std::uint8_t>& out,
                                   const CodecBounds* bounds) {
-            if (bounds != nullptr &&
-                out.size() > bounds->max_transport_message_bytes) {
+            const CodecBounds& effective = logical_delivery_effective_bounds(
+                bounds);
+            if (out.size() > effective.max_transport_message_bytes) {
                 throw std::length_error(
                     "logical delivery protocol exceeds max_transport_message_bytes");
             }
@@ -426,8 +428,9 @@ namespace sync {
                 size > (std::numeric_limits<std::size_t>::max)() - out.size()) {
                 throw std::length_error("logical delivery protocol size overflow");
             }
-            if (bounds != nullptr &&
-                out.size() + size > bounds->max_transport_message_bytes) {
+            const CodecBounds& effective = logical_delivery_effective_bounds(
+                bounds);
+            if (out.size() + size > effective.max_transport_message_bytes) {
                 throw std::length_error(
                     "logical delivery protocol exceeds max_transport_message_bytes");
             }

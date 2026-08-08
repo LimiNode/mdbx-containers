@@ -18,8 +18,9 @@
 namespace mdbxc {
 namespace sync {
 
-    /// \brief Persists ordered logical delivery envelopes per destination.
-    /// \details Each destination has an independent monotonic sequence. Entry
+    /// \brief Persists ordered logical delivery envelopes per receiver.
+    /// \details Each destination database and receiver node pair has an
+    /// independent monotonic sequence. Entry
     /// keys use a big-endian sequence suffix so MDBX cursor scans return the
     /// pending stream in delivery order. This store owns sender-side queueing;
     /// it does not send frames or interpret receiver acknowledgements.
@@ -45,25 +46,26 @@ namespace sync {
             return m_dbi;
         }
 
-        /// \brief Appends one envelope to \p destination's ordered stream.
+        /// \brief Appends one envelope to one receiver's ordered stream.
         /// \details The generated frame id is stable for the persisted
         /// sequence. A rollback also rolls back the sequence allocation.
         LogicalDeliveryEnvelope enqueue(
                 MDBX_txn* txn,
                 const DbId& destination,
+                const NodeId& receiver,
                 const NodeId& origin,
                 const LogicalChangeFrame& frame,
                 const CodecBounds* bounds = nullptr) {
             txn = checked_txn(txn, "LogicalOutboxStore::enqueue");
-            validate_identity(destination, origin);
+            validate_identity(destination, receiver, origin);
             open_for_write(txn);
 
-            Metadata metadata = read_metadata(txn, destination);
+            Metadata metadata = read_metadata(txn, destination, receiver);
             if (is_zero_sync_id(metadata.origin_node_id)) {
                 metadata.origin_node_id = origin;
             } else if (compare_node_id(metadata.origin_node_id, origin) != 0) {
                 throw std::invalid_argument(
-                    "LogicalOutboxStore destination already belongs to a different origin");
+                    "LogicalOutboxStore receiver already belongs to a different origin");
             }
             if (metadata.next_sequence ==
                 (std::numeric_limits<std::uint64_t>::max)()) {
@@ -80,7 +82,7 @@ namespace sync {
             const std::vector<std::uint8_t> encoded =
                 LogicalDeliveryEnvelopeCodec::encode(envelope, bounds);
             const std::vector<std::uint8_t> key =
-                make_entry_key(destination, metadata.next_sequence);
+                make_entry_key(destination, receiver, metadata.next_sequence);
             MDBX_val raw_key = make_val(key);
             MDBX_val raw_value = make_val(encoded);
             check_mdbx(mdbx_put(txn, m_dbi, &raw_key, &raw_value,
@@ -88,24 +90,22 @@ namespace sync {
                        "LogicalOutboxStore enqueue failed");
 
             ++metadata.next_sequence;
-            write_metadata(txn, destination, metadata);
+            write_metadata(txn, destination, receiver, metadata);
             return envelope;
         }
 
-        /// \brief Returns envelopes still pending for \p destination.
+        /// \brief Returns envelopes still pending for one \p receiver.
         /// \param limit Maximum number of envelopes, or zero for all pending.
         std::vector<LogicalDeliveryEnvelope> list_pending(
                 MDBX_txn* txn,
                 const DbId& destination,
+                const NodeId& receiver,
                 std::size_t limit = 0,
                 const CodecBounds* bounds = nullptr) const {
             txn = checked_txn(txn, "LogicalOutboxStore::list_pending");
-            if (is_zero_sync_id(destination)) {
-                throw std::invalid_argument(
-                    "LogicalOutboxStore destination is zero");
-            }
+            validate_route(destination, receiver);
             open_existing(txn);
-            const Metadata metadata = read_metadata(txn, destination);
+            const Metadata metadata = read_metadata(txn, destination, receiver);
             std::vector<LogicalDeliveryEnvelope> out;
             if (metadata.acknowledged_through + 1u >=
                 metadata.next_sequence) {
@@ -113,7 +113,7 @@ namespace sync {
             }
 
             const std::vector<std::uint8_t> prefix =
-                make_entry_prefix(destination);
+                make_entry_prefix(destination, receiver);
             std::vector<std::uint8_t> first_key = prefix;
             detail::append_u64_be(first_key,
                                   metadata.acknowledged_through + 1u);
@@ -159,15 +159,13 @@ namespace sync {
         /// \brief Returns the persisted cumulative acknowledgement frontier.
         std::uint64_t acknowledged_through(
                 MDBX_txn* txn,
-                const DbId& destination) const {
+                const DbId& destination,
+                const NodeId& receiver) const {
             txn = checked_txn(txn,
                               "LogicalOutboxStore::acknowledged_through");
-            if (is_zero_sync_id(destination)) {
-                throw std::invalid_argument(
-                    "LogicalOutboxStore destination is zero");
-            }
+            validate_route(destination, receiver);
             open_existing(txn);
-            return read_metadata(txn, destination).acknowledged_through;
+            return read_metadata(txn, destination, receiver).acknowledged_through;
         }
 
         /// \brief Returns the highest sequence durably allocated locally.
@@ -175,14 +173,12 @@ namespace sync {
         /// acknowledgement must never advance beyond it, including after the
         /// sender restarts and redelivers an earlier pending entry.
         std::uint64_t known_tail(MDBX_txn* txn,
-                                 const DbId& destination) const {
+                                 const DbId& destination,
+                                 const NodeId& receiver) const {
             txn = checked_txn(txn, "LogicalOutboxStore::known_tail");
-            if (is_zero_sync_id(destination)) {
-                throw std::invalid_argument(
-                    "LogicalOutboxStore destination is zero");
-            }
+            validate_route(destination, receiver);
             open_existing(txn);
-            const Metadata metadata = read_metadata(txn, destination);
+            const Metadata metadata = read_metadata(txn, destination, receiver);
             return metadata.next_sequence - 1u;
         }
 
@@ -190,15 +186,13 @@ namespace sync {
         /// \return Number of deleted pending entries.
         std::size_t acknowledge_through(MDBX_txn* txn,
                                         const DbId& destination,
+                                        const NodeId& receiver,
                                         std::uint64_t sequence) {
             txn = checked_txn(txn,
                               "LogicalOutboxStore::acknowledge_through");
-            if (is_zero_sync_id(destination)) {
-                throw std::invalid_argument(
-                    "LogicalOutboxStore destination is zero");
-            }
+            validate_route(destination, receiver);
             open_for_write(txn);
-            Metadata metadata = read_metadata(txn, destination);
+            Metadata metadata = read_metadata(txn, destination, receiver);
             if (sequence < metadata.acknowledged_through) {
                 throw std::invalid_argument(
                     "LogicalOutboxStore acknowledgement moved backwards");
@@ -212,7 +206,7 @@ namespace sync {
             }
 
             const std::vector<std::uint8_t> prefix =
-                make_entry_prefix(destination);
+                make_entry_prefix(destination, receiver);
             std::vector<std::uint8_t> first_key = prefix;
             detail::append_u64_be(first_key,
                                   metadata.acknowledged_through + 1u);
@@ -253,7 +247,7 @@ namespace sync {
             }
             mdbx_cursor_close(cursor);
             metadata.acknowledged_through = sequence;
-            write_metadata(txn, destination, metadata);
+            write_metadata(txn, destination, receiver, metadata);
             return removed;
         }
 
@@ -275,19 +269,20 @@ namespace sync {
                 MDBX_val value;
                 int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
                 while (rc == MDBX_SUCCESS) {
-                    const DbId destination = decode_destination(key);
+                    const Route route = decode_route(key);
                     if (is_metadata_key(key)) {
                         (void)decode_metadata(value);
                     } else {
                         const std::uint64_t sequence = decode_entry_sequence(key);
-                        const Metadata metadata = read_metadata(txn, destination);
+                        const Metadata metadata = read_metadata(
+                            txn, route.destination, route.receiver);
                         const LogicalDeliveryEnvelope envelope =
                             decode_value(value, bounds);
                         if (is_zero_sync_id(metadata.origin_node_id) ||
                             sequence <= metadata.acknowledged_through ||
                             sequence >= metadata.next_sequence ||
                             compare_node_id(envelope.destination_db_uuid,
-                                            destination) != 0 ||
+                                            route.destination) != 0 ||
                             compare_node_id(envelope.origin_node_id,
                                             metadata.origin_node_id) != 0 ||
                             envelope.origin_sequence != sequence) {
@@ -342,12 +337,27 @@ namespace sync {
             check_mdbx(rc, "Failed to open LogicalOutboxStore DBI");
         }
 
-        static void validate_identity(const DbId& destination,
-                                      const NodeId& origin) {
+        struct Route {
+            DbId destination;
+            NodeId receiver;
+        };
+
+        static void validate_route(const DbId& destination,
+                                   const NodeId& receiver) {
             if (is_zero_sync_id(destination)) {
                 throw std::invalid_argument(
                     "LogicalOutboxStore destination is zero");
             }
+            if (is_zero_sync_id(receiver)) {
+                throw std::invalid_argument(
+                    "LogicalOutboxStore receiver is zero");
+            }
+        }
+
+        static void validate_identity(const DbId& destination,
+                                      const NodeId& receiver,
+                                      const NodeId& origin) {
+            validate_route(destination, receiver);
             if (is_zero_sync_id(origin)) {
                 throw std::invalid_argument(
                     "LogicalOutboxStore origin is zero");
@@ -359,29 +369,35 @@ namespace sync {
         }
 
         static std::vector<std::uint8_t> make_metadata_key(
-                const DbId& destination) {
+                const DbId& destination,
+                const NodeId& receiver) {
             std::vector<std::uint8_t> out;
-            out.reserve(2u + destination.size());
+            out.reserve(2u + destination.size() + receiver.size());
             out.push_back(key_version());
             out.push_back(metadata_key_kind());
             out.insert(out.end(), destination.begin(), destination.end());
+            out.insert(out.end(), receiver.begin(), receiver.end());
             return out;
         }
 
         static std::vector<std::uint8_t> make_entry_prefix(
-                const DbId& destination) {
+                const DbId& destination,
+                const NodeId& receiver) {
             std::vector<std::uint8_t> out;
-            out.reserve(2u + destination.size());
+            out.reserve(2u + destination.size() + receiver.size());
             out.push_back(key_version());
             out.push_back(entry_key_kind());
             out.insert(out.end(), destination.begin(), destination.end());
+            out.insert(out.end(), receiver.begin(), receiver.end());
             return out;
         }
 
         static std::vector<std::uint8_t> make_entry_key(
                 const DbId& destination,
+                const NodeId& receiver,
                 std::uint64_t sequence) {
-            std::vector<std::uint8_t> out = make_entry_prefix(destination);
+            std::vector<std::uint8_t> out = make_entry_prefix(destination,
+                                                                receiver);
             detail::append_u64_be(out, sequence);
             return out;
         }
@@ -412,7 +428,7 @@ namespace sync {
                    bytes[1] == metadata_key_kind();
         }
 
-        static DbId decode_destination(const MDBX_val& key) {
+        static Route decode_route(const MDBX_val& key) {
             if (key.iov_len != entry_prefix_size() &&
                 key.iov_len != entry_key_size()) {
                 throw std::runtime_error(
@@ -430,13 +446,17 @@ namespace sync {
                 throw std::runtime_error(
                     "LogicalOutboxStore key has invalid prefix");
             }
-            DbId destination;
-            std::memcpy(destination.data(), bytes + 2u, destination.size());
-            if (is_zero_sync_id(destination)) {
-                throw std::runtime_error(
-                    "LogicalOutboxStore destination is zero");
+            Route route;
+            std::memcpy(route.destination.data(), bytes + 2u,
+                        route.destination.size());
+            std::memcpy(route.receiver.data(),
+                        bytes + 2u + route.destination.size(),
+                        route.receiver.size());
+            if (is_zero_sync_id(route.destination) ||
+                is_zero_sync_id(route.receiver)) {
+                throw std::runtime_error("LogicalOutboxStore route is incomplete");
             }
-            return destination;
+            return route;
         }
 
         static std::uint64_t decode_entry_sequence(const MDBX_val& key) {
@@ -492,8 +512,10 @@ namespace sync {
         }
 
         Metadata read_metadata(MDBX_txn* txn,
-                               const DbId& destination) const {
-            const std::vector<std::uint8_t> key = make_metadata_key(destination);
+                               const DbId& destination,
+                               const NodeId& receiver) const {
+            const std::vector<std::uint8_t> key = make_metadata_key(
+                destination, receiver);
             MDBX_val raw_key = make_val(key);
             MDBX_val raw_value;
             const int rc = mdbx_get(txn, m_dbi, &raw_key, &raw_value);
@@ -506,8 +528,10 @@ namespace sync {
 
         void write_metadata(MDBX_txn* txn,
                             const DbId& destination,
+                            const NodeId& receiver,
                             const Metadata& metadata) const {
-            const std::vector<std::uint8_t> key = make_metadata_key(destination);
+            const std::vector<std::uint8_t> key = make_metadata_key(
+                destination, receiver);
             const std::vector<std::uint8_t> value = encode_metadata(metadata);
             MDBX_val raw_key = make_val(key);
             MDBX_val raw_value = make_val(value);
@@ -574,11 +598,13 @@ namespace sync {
             return LogicalDeliveryEnvelopeCodec::decode(encoded, bounds);
         }
 
-        static std::uint8_t key_version() { return 1u; }
+        static std::uint8_t key_version() { return 2u; }
         static std::uint8_t metadata_key_kind() { return 0u; }
         static std::uint8_t entry_key_kind() { return 1u; }
         static std::uint16_t metadata_value_version() { return 2u; }
-        static std::size_t entry_prefix_size() { return 2u + DbId().size(); }
+        static std::size_t entry_prefix_size() {
+            return 2u + DbId().size() + NodeId().size();
+        }
         static std::size_t entry_key_size() { return entry_prefix_size() + 8u; }
         static std::size_t metadata_value_size() {
             return 2u + 8u + 8u + NodeId().size();

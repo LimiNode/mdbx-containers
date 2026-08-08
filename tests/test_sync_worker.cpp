@@ -2912,7 +2912,7 @@ void test_worker_delivers_pending_logical_outbox_after_raw_sync() {
     replica.initialize_local_identity(replica_node, db_id);
 
     sync::LogicalChangeFrame frame;
-    source.enqueue_logical_delivery(db_id, frame);
+    source.enqueue_logical_delivery(db_id, replica_node, frame);
     sync::DirectSyncPeer peer(&replica);
     RecordingWorkerObserver observer;
     sync::SyncWorkerOptions options;
@@ -2923,8 +2923,8 @@ void test_worker_delivers_pending_logical_outbox_after_raw_sync() {
     if (!result.ok || result.pages_pulled != 1u ||
         result.logical_deliveries_delivered != 1u ||
         result.logical_acknowledged_through != 1u ||
-        !source.pending_logical_deliveries(db_id).empty() ||
-        source.logical_delivery_acknowledged_through(db_id) != 1u) {
+        !source.pending_logical_deliveries(db_id, replica_node).empty() ||
+        source.logical_delivery_acknowledged_through(db_id, replica_node) != 1u) {
         throw std::runtime_error(
             "worker did not deliver and acknowledge the logical outbox");
     }
@@ -2963,11 +2963,12 @@ void test_worker_preserves_outbox_after_unavailable_or_retryable_logical_deliver
     cleanup(source_path);
 
     const sync::DbId db_id = make_node(0xDE);
+    const sync::NodeId retryable_node = make_node(0xE1);
     std::shared_ptr<Connection> source_conn = open_env(source_path);
     sync::SyncEngine source(source_conn);
     source.initialize_local_identity(make_node(0xAE), db_id);
     sync::LogicalChangeFrame frame;
-    source.enqueue_logical_delivery(db_id, frame);
+    source.enqueue_logical_delivery(db_id, retryable_node, frame);
 
     sync::SyncWorkerOptions options;
     options.enable_logical_delivery = true;
@@ -2976,7 +2977,7 @@ void test_worker_preserves_outbox_after_unavailable_or_retryable_logical_deliver
     const sync::SyncWorkerRoundResult unavailable =
         unavailable_worker.run_once();
     if (unavailable.ok || unavailable.sync_error_retryable ||
-        source.pending_logical_deliveries(db_id).size() != 1u) {
+        source.pending_logical_deliveries(db_id, retryable_node).size() != 1u) {
         throw std::runtime_error(
             "worker did not preserve outbox for an unsupported logical peer");
     }
@@ -2986,7 +2987,7 @@ void test_worker_preserves_outbox_after_unavailable_or_retryable_logical_deliver
     const sync::SyncWorkerRoundResult retryable = retryable_worker.run_once();
     if (retryable.ok || !retryable.sync_error_retryable ||
         retryable.logical_deliveries_delivered != 0u ||
-        source.pending_logical_deliveries(db_id).size() != 1u) {
+        source.pending_logical_deliveries(db_id, retryable_node).size() != 1u) {
         throw std::runtime_error(
             "worker did not preserve outbox after retryable logical failure");
     }

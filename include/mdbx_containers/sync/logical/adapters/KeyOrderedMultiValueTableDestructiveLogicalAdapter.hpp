@@ -575,6 +575,7 @@ namespace sync {
             LogicalDeliveryEnvelope commit_to_outbox(
                     ILogicalDeliveryOutbox& outbox,
                     const DbId& destination,
+                    const NodeId& receiver,
                     const CodecBounds* bounds = nullptr) {
                 ensure_active();
                 try {
@@ -582,7 +583,7 @@ namespace sync {
                     frame.changes = m_pending;
                     const LogicalDeliveryEnvelope envelope =
                         outbox.enqueue_logical_delivery(
-                            m_txn.handle(), destination, frame, bounds);
+                            m_txn.handle(), destination, receiver, frame, bounds);
                     if (compare_node_id(envelope.origin_node_id, m_origin) != 0) {
                         throw std::runtime_error(
                             "Ordered destructive outbox origin does not match capture origin");

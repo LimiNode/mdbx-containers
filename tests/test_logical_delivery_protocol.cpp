@@ -45,6 +45,16 @@ bool throws_runtime_error(Fn fn) {
     return false;
 }
 
+template <typename Fn>
+bool throws_length_error(Fn fn) {
+    try {
+        fn();
+    } catch (const std::length_error&) {
+        return true;
+    }
+    return false;
+}
+
 class LegacyLogicalDeliveryPeer : public mdbxc::sync::ILogicalDeliveryPeer {
 public:
     explicit LegacyLogicalDeliveryPeer(const mdbxc::sync::LogicalDeliveryHello& hello)
@@ -255,6 +265,59 @@ void test_cumulative_acknowledgement_respects_sender_tail() {
     }));
 }
 
+void test_default_outer_message_bound_includes_protocol_overhead() {
+    mdbxc::sync::CodecBounds defaults;
+    mdbxc::sync::LogicalDeliveryEnvelope exact = make_envelope();
+    const mdbxc::sync::LogicalChange change = exact.frame.changes[0];
+    exact.frame.changes.clear();
+    const std::size_t base_size =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_delivery(exact).size();
+    mdbxc::sync::LogicalDeliveryEnvelope one_empty_change = exact;
+    mdbxc::sync::LogicalChange empty_change = change;
+    empty_change.payload.clear();
+    one_empty_change.frame.changes.push_back(empty_change);
+    const std::size_t change_overhead =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_delivery(
+            one_empty_change).size() - base_size;
+    const std::size_t remaining =
+        defaults.max_transport_message_bytes - base_size;
+    const std::size_t change_count = 1u +
+        (remaining + defaults.max_value_len + change_overhead - 1u) /
+        (defaults.max_value_len + change_overhead);
+    std::size_t payload_left = remaining - change_count * change_overhead;
+    MDBXC_TEST_ASSERT(payload_left <= change_count * defaults.max_value_len);
+    for (std::size_t i = 0u; i < change_count; ++i) {
+        mdbxc::sync::LogicalChange part = change;
+        const std::size_t payload_size = payload_left > defaults.max_value_len
+            ? defaults.max_value_len
+            : payload_left;
+        part.payload.assign(payload_size, 0x5Au);
+        exact.frame.changes.push_back(part);
+        payload_left -= payload_size;
+    }
+    MDBXC_TEST_ASSERT(payload_left == 0u);
+    const std::vector<std::uint8_t> exact_encoded =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_delivery(exact);
+    MDBXC_TEST_ASSERT(exact_encoded.size() ==
+                      defaults.max_transport_message_bytes);
+
+    mdbxc::sync::LogicalDeliveryEnvelope too_large = exact;
+    too_large.frame.changes[too_large.frame.changes.size() - 1u]
+        .payload.push_back(0x5Bu);
+    MDBXC_TEST_ASSERT(throws_length_error([&too_large]() {
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_delivery(too_large);
+    }));
+
+    mdbxc::sync::CodecBounds larger = defaults;
+    ++larger.max_transport_message_bytes;
+    const std::vector<std::uint8_t> oversized =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_delivery(
+            too_large, &larger);
+    MDBXC_TEST_ASSERT(throws_length_error([&oversized]() {
+        mdbxc::sync::LogicalDeliveryProtocolCodec::decode_delivery(oversized);
+    }));
+}
+
 void test_legacy_peer_receives_request_through_default_forwarding() {
     const mdbxc::sync::LogicalDeliveryEnvelope envelope = make_envelope();
     mdbxc::sync::LogicalDeliveryHello hello;
@@ -286,6 +349,7 @@ int main() {
     test_protocol_rejects_invalid_header_and_acknowledgement();
     test_acknowledgement_matches_its_delivery();
     test_cumulative_acknowledgement_respects_sender_tail();
+    test_default_outer_message_bound_includes_protocol_overhead();
     test_legacy_peer_receives_request_through_default_forwarding();
     return 0;
 }

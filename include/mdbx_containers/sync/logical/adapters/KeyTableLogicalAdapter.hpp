@@ -212,9 +212,11 @@ namespace sync {
             LogicalDeliveryEnvelope commit_to_outbox(
                     ILogicalDeliveryOutbox& outbox,
                     const DbId& destination,
+                    const NodeId& receiver,
                     const CodecBounds* bounds = nullptr) {
                 ensure_active();
-                return commit_pending_to_outbox(outbox, destination, bounds);
+                return commit_pending_to_outbox(outbox, destination, receiver,
+                                                bounds);
             }
 
             void rollback() noexcept {

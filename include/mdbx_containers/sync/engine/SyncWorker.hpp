@@ -771,15 +771,27 @@ namespace sync {
                     return;
                 }
 
-                const std::vector<LogicalDeliveryEnvelope> pending =
-                    m_engine.pending_logical_deliveries(destination, 1u);
-                if (pending.empty()) {
-                    return;
-                }
                 if (!m_peer.supports_logical_delivery()) {
                     result.ok = false;
                     result.error =
                         "Sync peer does not support configured logical delivery";
+                    return;
+                }
+
+                LogicalDeliveryHello remote_hello;
+                {
+                    CancellationToken cancel_token;
+                    PeerCallGuard peer_call(*this, cancel_token);
+                    if (!peer_call.active()) {
+                        return;
+                    }
+                    remote_hello =
+                        m_peer.logical_delivery_hello_with_cancel(&cancel_token);
+                }
+                const std::vector<LogicalDeliveryEnvelope> pending =
+                    m_engine.pending_logical_deliveries(
+                        destination, remote_hello.node_id, 1u);
+                if (pending.empty()) {
                     return;
                 }
 
@@ -793,7 +805,8 @@ namespace sync {
                     notify_stage_changed(make_stage_event(
                         SyncWorkerStage::LogicalDeliveryStarted, result));
                     dispatch = m_engine.deliver_pending_logical_deliveries(
-                        m_peer, destination, 1u, nullptr, &cancel_token);
+                        m_peer, destination, remote_hello.node_id, 1u,
+                        nullptr, &cancel_token);
                 }
                 result.logical_deliveries_delivered += dispatch.delivered;
                 result.logical_acknowledged_through =

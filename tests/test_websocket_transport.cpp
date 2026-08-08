@@ -257,13 +257,14 @@ void test_websocket_peer_delivers_ordered_logical_outbox() {
     std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
     std::shared_ptr<mdbxc::Connection> replica = open_db(replica_path);
     const mdbxc::sync::DbId db_id = make_node(0xD6);
+    const mdbxc::sync::NodeId replica_node = make_node(0x62);
     mdbxc::sync::SyncEngine source_engine(source);
     mdbxc::sync::SyncEngine replica_engine(replica);
     source_engine.initialize_local_identity(make_node(0x52), db_id);
-    replica_engine.initialize_local_identity(make_node(0x62), db_id);
+    replica_engine.initialize_local_identity(replica_node, db_id);
 
     mdbxc::sync::LogicalChangeFrame frame;
-    source_engine.enqueue_logical_delivery(db_id, frame);
+    source_engine.enqueue_logical_delivery(db_id, replica_node, frame);
 
     mdbxc::sync::WebSocketSyncServer replica_server(replica_engine);
     LoopbackWebSocketChannel channel(replica_server);
@@ -279,7 +280,8 @@ void test_websocket_peer_delivers_ordered_logical_outbox() {
     require_true(channel.last_token_cancellable(),
                  "WebSocket logical hello did not receive cancellation token");
     const mdbxc::sync::LogicalDeliveryDispatchResult result =
-        source_engine.deliver_pending_logical_deliveries(peer, db_id);
+        source_engine.deliver_pending_logical_deliveries(peer, db_id,
+                                                         replica_node);
     require_true(result.ok, "WebSocket logical delivery failed: " + result.error);
     require_true(result.delivered == 1u,
                  "WebSocket logical delivery count mismatch");
@@ -287,7 +289,7 @@ void test_websocket_peer_delivers_ordered_logical_outbox() {
                  "WebSocket logical acknowledgement mismatch");
     require_true(channel.last_was_logical(),
                  "WebSocket logical delivery used raw protocol magic");
-    require_true(source_engine.pending_logical_deliveries(db_id).empty(),
+    require_true(source_engine.pending_logical_deliveries(db_id, replica_node).empty(),
                  "WebSocket logical delivery did not remove acknowledged outbox entry");
 
     source->disconnect();

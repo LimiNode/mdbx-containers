@@ -290,13 +290,14 @@ void test_http_peer_delivers_ordered_logical_outbox() {
     std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
     std::shared_ptr<mdbxc::Connection> replica = open_db(replica_path);
     const mdbxc::sync::DbId db_id = make_node(0xD5);
+    const mdbxc::sync::NodeId replica_node = make_node(0x61);
     mdbxc::sync::SyncEngine source_engine(source);
     mdbxc::sync::SyncEngine replica_engine(replica);
     source_engine.initialize_local_identity(make_node(0x51), db_id);
-    replica_engine.initialize_local_identity(make_node(0x61), db_id);
+    replica_engine.initialize_local_identity(replica_node, db_id);
 
     mdbxc::sync::LogicalChangeFrame frame;
-    source_engine.enqueue_logical_delivery(db_id, frame);
+    source_engine.enqueue_logical_delivery(db_id, replica_node, frame);
 
     mdbxc::sync::HttpSyncServer replica_server(replica_engine);
     LoopbackHttpClient client(replica_server);
@@ -313,7 +314,8 @@ void test_http_peer_delivers_ordered_logical_outbox() {
     require_true(client.last_token_cancellable(),
                  "HTTP logical hello did not receive cancellation token");
     const mdbxc::sync::LogicalDeliveryDispatchResult result =
-        source_engine.deliver_pending_logical_deliveries(peer, db_id);
+        source_engine.deliver_pending_logical_deliveries(peer, db_id,
+                                                         replica_node);
     require_true(result.ok, "HTTP logical delivery failed: " + result.error);
     require_true(result.delivered == 1u,
                  "HTTP logical delivery count mismatch");
@@ -322,7 +324,7 @@ void test_http_peer_delivers_ordered_logical_outbox() {
     require_true(client.last_target() ==
                      mdbxc::sync::HttpSyncRoutes::logical_delivery_target(),
                  "HTTP logical delivery target mismatch");
-    require_true(source_engine.pending_logical_deliveries(db_id).empty(),
+    require_true(source_engine.pending_logical_deliveries(db_id, replica_node).empty(),
                  "HTTP logical delivery did not remove acknowledged outbox entry");
 
     source->disconnect();

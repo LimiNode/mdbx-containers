@@ -401,7 +401,7 @@ void test_destructive_capture_coalesces_and_commits_to_outbox() {
             throw std::runtime_error("append/erase was not coalesced");
         }
         const mdbxc::sync::LogicalDeliveryEnvelope envelope =
-            session->commit_to_outbox(engine, destination);
+            session->commit_to_outbox(engine, destination, destination);
         if (envelope.origin_sequence != 1u ||
             !envelope.frame.changes.empty()) {
             throw std::runtime_error("empty destructive delivery is incorrect");
@@ -419,7 +419,7 @@ void test_destructive_capture_coalesces_and_commits_to_outbox() {
             throw std::runtime_error("ordered capture id allocation is incorrect");
         }
         const mdbxc::sync::LogicalDeliveryEnvelope envelope =
-            session->commit_to_outbox(engine, destination);
+            session->commit_to_outbox(engine, destination, destination);
         if (envelope.origin_sequence != 2u ||
             envelope.frame.changes.size() != 1u) {
             throw std::runtime_error("destructive outbox delivery is incorrect");
@@ -471,7 +471,7 @@ void test_destructive_capture_rolls_back_injected_native_commit_failure() {
         mdbxc::detail::fail_next_transaction_commit_for_test(MDBX_MAP_FULL);
         bool commit_failed = false;
         try {
-            failed_session->commit_to_outbox(engine, destination);
+            failed_session->commit_to_outbox(engine, destination, destination);
         } catch (const mdbxc::MdbxException&) {
             commit_failed = true;
         }
@@ -490,7 +490,7 @@ void test_destructive_capture_rolls_back_injected_native_commit_failure() {
             reuse_rejected = true;
         }
         if (!reuse_rejected || !table.find(10).empty() ||
-            !engine.pending_logical_deliveries(destination).empty()) {
+            !engine.pending_logical_deliveries(destination, destination).empty()) {
             throw std::runtime_error(
                 "native commit failure leaked destructive capture state");
         }
@@ -501,10 +501,10 @@ void test_destructive_capture_rolls_back_injected_native_commit_failure() {
     const mdbxc::sync::OrderedElementId clean_id =
         clean_session->append(10, "committed");
     const mdbxc::sync::LogicalDeliveryEnvelope envelope =
-        clean_session->commit_to_outbox(engine, destination);
+        clean_session->commit_to_outbox(engine, destination, destination);
     if (clean_id.sequence != 1u || envelope.origin_sequence != 1u ||
         table.find(10).size() != 1u || table.find(10)[0] != "committed" ||
-        engine.pending_logical_deliveries(destination).size() != 1u) {
+        engine.pending_logical_deliveries(destination, destination).size() != 1u) {
         throw std::runtime_error(
             "native commit failure did not roll back table, state, and outbox");
     }
@@ -545,7 +545,7 @@ void test_destructive_capture_resolves_bounded_broad_erasure() {
         session->append(1, "same");
         session->append(1, "same");
         session->append(2, "other");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     const mdbxc::sync::BroadEraseBounds bounds = { 4u, 64u };
@@ -558,7 +558,7 @@ void test_destructive_capture_resolves_bounded_broad_erasure() {
             throw std::runtime_error("bounded broad erasure selection is incorrect");
         }
         const mdbxc::sync::LogicalDeliveryEnvelope envelope =
-            session->commit_to_outbox(engine, destination);
+            session->commit_to_outbox(engine, destination, destination);
         if (envelope.frame.changes.size() != 3u) {
             throw std::runtime_error("broad erasure did not emit exact erase changes");
         }
@@ -620,7 +620,7 @@ void test_destructive_capture_resolves_bounded_broad_erasure() {
         session->append(1, "middle");
         session->append(1, "same");
         session->append(1, "last");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
@@ -629,7 +629,7 @@ void test_destructive_capture_resolves_bounded_broad_erasure() {
             throw std::runtime_error(
                 "broad erasure did not select every repeated value");
         }
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     {
         const std::vector<std::string> values = table.find(1);
@@ -650,7 +650,7 @@ void test_destructive_capture_resolves_bounded_broad_erasure() {
                 "broad erasure did not coalesce a pending append");
         }
         const mdbxc::sync::LogicalDeliveryEnvelope envelope =
-            session->commit_to_outbox(engine, destination);
+            session->commit_to_outbox(engine, destination, destination);
         if (!envelope.frame.changes.empty() || !table.find(3).empty()) {
             throw std::runtime_error(
                 "coalesced broad erasure leaked a physical or logical record");
@@ -690,7 +690,7 @@ void test_destructive_capture_bounds_post_selection_mutation_scans() {
             adapter.begin_capture_session();
         session->append(1, "first");
         session->append(1, "second");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     std::size_t selection_limit = 0u;
@@ -776,7 +776,7 @@ void test_destructive_capture_clears_bounded_tombstone_heavy_table() {
         third = session->append(2, "third");
         session->append(2, "fourth");
         session->append(3, "fifth");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
@@ -784,7 +784,7 @@ void test_destructive_capture_clears_bounded_tombstone_heavy_table() {
         session->erase(first);
         session->erase(second);
         session->erase(third);
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     if (table.count() != 2u || table.find(2).size() != 1u ||
         table.find(3).size() != 1u) {
@@ -814,7 +814,7 @@ void test_destructive_capture_clears_bounded_tombstone_heavy_table() {
             throw std::runtime_error("ordered broad clear selected the wrong ids");
         }
         const mdbxc::sync::LogicalDeliveryEnvelope envelope =
-            session->commit_to_outbox(engine, destination);
+            session->commit_to_outbox(engine, destination, destination);
         if (envelope.frame.changes.size() != 2u) {
             throw std::runtime_error("ordered broad clear emitted the wrong changes");
         }
@@ -834,7 +834,7 @@ void test_destructive_capture_clears_bounded_tombstone_heavy_table() {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
         session->append(4, "survives");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
@@ -942,13 +942,13 @@ void test_destructive_capture_clear_rejects_complete_schema_corruption() {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
         tombstone_id = session->append(8, "tombstone");
-        session->commit_to_outbox(engine, make_node(0xB6u));
+        session->commit_to_outbox(engine, make_node(0xB6u), make_node(0xB6u));
     }
     {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
         session->erase(tombstone_id);
-        session->commit_to_outbox(engine, make_node(0xB6u));
+        session->commit_to_outbox(engine, make_node(0xB6u), make_node(0xB6u));
     }
     insert_raw_index_record(
         connection, by_key, IntKeyCodec::encode(8), tombstone_id);
@@ -999,7 +999,7 @@ void test_destructive_capture_clear_checks_tombstone_only_origin_high_water() {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
         session->append(1, "live");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     mdbxc::sync::OrderedElementId tombstone_id;
@@ -1074,7 +1074,7 @@ void test_destructive_capture_trusted_clear_avoids_repeated_state_scans() {
         for (std::size_t i = 0u; i < 64u; ++i) {
             ids.push_back(session->append(1, "value"));
         }
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
@@ -1082,7 +1082,7 @@ void test_destructive_capture_trusted_clear_avoids_repeated_state_scans() {
         for (std::size_t i = 0u; i + 1u < ids.size(); ++i) {
             session->erase(ids[i]);
         }
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     {
@@ -1092,7 +1092,7 @@ void test_destructive_capture_trusted_clear_avoids_repeated_state_scans() {
         if (session->clear(bounds) != 1u) {
             throw std::runtime_error("trusted ordered clear selected the wrong id");
         }
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     if (!table.empty()) {
         throw std::runtime_error(
@@ -1133,7 +1133,7 @@ void test_destructive_capture_uses_transaction_bound_key_index_proof() {
         session->append(1, "first");
         session->append(1, "second");
         session->append(1, "third");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     {
@@ -1160,7 +1160,7 @@ void test_destructive_capture_uses_transaction_bound_key_index_proof() {
             throw std::runtime_error(
                 "trusted ordered selector removed the wrong number of values");
         }
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     const std::vector<std::string> remaining = table.find(1);
     if (remaining.size() != 2u || remaining[0] != "first" ||
@@ -1223,7 +1223,7 @@ void test_destructive_capture_key_index_proof_rejects_corruption() {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
         session->append(1, "value");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     {
@@ -1308,7 +1308,7 @@ void test_destructive_capture_key_index_proof_rejects_cross_session() {
             adapter.begin_capture_session();
         session->append(1, "first");
         session->append(1, "second");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     mdbxc::sync::OrderedElementKeyIndexProof proof;
@@ -1375,7 +1375,7 @@ void test_destructive_capture_key_index_proof_respects_size_bound() {
             adapter.begin_capture_session();
         session->append(1, "first");
         session->append(1, "second");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     std::unique_ptr<adapter_type::LogicalCaptureSession> session =
@@ -2097,7 +2097,7 @@ void test_destructive_capture_replaces_bounded_live_set() {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
         session->append(1, "old");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     {
         std::vector<table_type::value_type> desired;
@@ -2114,7 +2114,7 @@ void test_destructive_capture_replaces_bounded_live_set() {
             throw std::runtime_error(
                 "bounded destructive replacement produced wrong local state");
         }
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     if (table.find(3).size() != 2u || table.find(3)[0] != "new" ||
         table.find(3)[1] != "new" || table.find(4).size() != 1u ||
@@ -2152,14 +2152,14 @@ void test_destructive_capture_replaces_bounded_live_set() {
             throw std::runtime_error(
                 "empty destructive replacement did not capture exact erases");
         }
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
 
     {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             adapter.begin_capture_session();
         session->append(5, "after-replace");
-        session->commit_to_outbox(engine, destination);
+        session->commit_to_outbox(engine, destination, destination);
     }
     if (table.find(5).size() != 1u || table.find(5)[0] != "after-replace") {
         throw std::runtime_error(
@@ -2220,7 +2220,7 @@ void test_destructive_replacement_round_trips_to_replica() {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             source_adapter.begin_capture_session();
         session->append(1, "old");
-        initial = session->commit_to_outbox(source_engine, replica_db);
+        initial = session->commit_to_outbox(source_engine, replica_db, replica_db);
     }
     const mdbxc::sync::LogicalDeliveryAcknowledgement initial_ack =
         replica_engine.apply_ordered_logical_delivery_envelope(initial);
@@ -2241,7 +2241,7 @@ void test_destructive_replacement_round_trips_to_replica() {
         std::unique_ptr<adapter_type::LogicalCaptureSession> session =
             source_adapter.begin_capture_session();
         session->replace_with(desired, bounds);
-        replacement = session->commit_to_outbox(source_engine, replica_db);
+        replacement = session->commit_to_outbox(source_engine, replica_db, replica_db);
     }
     const mdbxc::sync::LogicalDeliveryAcknowledgement replacement_ack =
         replica_engine.apply_ordered_logical_delivery_envelope(replacement);

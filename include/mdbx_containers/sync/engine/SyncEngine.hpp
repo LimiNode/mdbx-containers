@@ -831,16 +831,18 @@ namespace sync {
         }
 
         /// \brief Persists a locally-originated ordered logical delivery.
-        /// \details Sequences are allocated independently for each destination.
+        /// \details Sequences are allocated independently for each destination
+        /// database and receiver node pair.
         /// This only enqueues the envelope; transport dispatch and receiver
         /// acknowledgements are separate protocol layers.
         LogicalDeliveryEnvelope enqueue_logical_delivery(
                 const DbId& destination,
+                const NodeId& receiver,
                 const LogicalChangeFrame& frame,
                 const CodecBounds* bounds = nullptr) {
             auto txn = m_conn->transaction(TransactionMode::WRITABLE);
             const LogicalDeliveryEnvelope envelope = enqueue_logical_delivery(
-                txn.handle(), destination, frame, bounds);
+                txn.handle(), destination, receiver, frame, bounds);
             txn.commit();
             return envelope;
         }
@@ -852,6 +854,7 @@ namespace sync {
         LogicalDeliveryEnvelope enqueue_logical_delivery(
                 MDBX_txn* txn,
                 const DbId& destination,
+                const NodeId& receiver,
                 const LogicalChangeFrame& frame,
                 const CodecBounds* bounds = nullptr) override {
             txn = checked_external_txn(
@@ -865,48 +868,55 @@ namespace sync {
                 throw std::logic_error(
                     "SyncEngine local node identity is not initialised");
             }
-            return outbox.enqueue(txn, destination, origin, frame, bounds);
+            return outbox.enqueue(txn, destination, receiver, origin, frame,
+                                  bounds);
         }
 
-        /// \brief Lists locally queued ordered deliveries for one destination.
+        /// \brief Lists locally queued ordered deliveries for one receiver.
         std::vector<LogicalDeliveryEnvelope> pending_logical_deliveries(
                 const DbId& destination,
+                const NodeId& receiver,
                 std::size_t limit = 0u,
                 const CodecBounds* bounds = nullptr) const {
             auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
             LogicalOutboxStore outbox(m_conn->env_handle());
-            return outbox.list_pending(txn.handle(), destination, limit, bounds);
+            return outbox.list_pending(txn.handle(), destination, receiver,
+                                       limit, bounds);
         }
 
         /// \brief Persists a cumulative acknowledgement and removes its prefix.
         std::size_t acknowledge_logical_deliveries(
                 const DbId& destination,
+                const NodeId& receiver,
                 std::uint64_t acknowledged_through) {
             auto txn = m_conn->transaction(TransactionMode::WRITABLE);
             initialize_system_stores(txn.handle());
             LogicalOutboxStore outbox(m_conn->env_handle());
             const std::size_t removed = outbox.acknowledge_through(
-                txn.handle(), destination, acknowledged_through);
+                txn.handle(), destination, receiver, acknowledged_through);
             txn.commit();
             return removed;
         }
 
         /// \brief Returns the persisted cumulative acknowledgement frontier.
         std::uint64_t logical_delivery_acknowledged_through(
-                const DbId& destination) const {
+                const DbId& destination,
+                const NodeId& receiver) const {
             auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
             LogicalOutboxStore outbox(m_conn->env_handle());
-            return outbox.acknowledged_through(txn.handle(), destination);
+            return outbox.acknowledged_through(txn.handle(), destination,
+                                               receiver);
         }
 
         /// \brief Returns the highest locally persisted delivery sequence.
         /// \details This durable value bounds any cumulative acknowledgement
         /// accepted from a peer, including after a sender restart.
         std::uint64_t logical_delivery_known_tail(
-                const DbId& destination) const {
+                const DbId& destination,
+                const NodeId& receiver) const {
             auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
             LogicalOutboxStore outbox(m_conn->env_handle());
-            return outbox.known_tail(txn.handle(), destination);
+            return outbox.known_tail(txn.handle(), destination, receiver);
         }
 
         /// \brief Delivers a pending ordered outbox prefix to one capable peer.
@@ -919,6 +929,7 @@ namespace sync {
         LogicalDeliveryDispatchResult deliver_pending_logical_deliveries(
                 ILogicalDeliveryPeer& peer,
                 const DbId& destination,
+                const NodeId& receiver,
                 std::size_t limit = 0u,
                 const CodecBounds* bounds = nullptr,
                 const CancellationToken* cancel_token = nullptr) {
@@ -935,6 +946,10 @@ namespace sync {
                     return LogicalDeliveryDispatchResult::failure(
                         "Logical delivery peer destination db_uuid mismatch");
                 }
+                if (compare_node_id(remote.node_id, receiver) != 0) {
+                    return LogicalDeliveryDispatchResult::failure(
+                        "Logical delivery peer receiver node_id mismatch");
+                }
                 if (!logical_delivery_capability_negotiated(
                         local.capabilities, remote.capabilities,
                         LogicalDeliveryCapability::OrderedDelivery)) {
@@ -948,11 +963,12 @@ namespace sync {
 
                 LogicalDeliveryDispatchResult out;
                 const std::vector<LogicalDeliveryEnvelope> pending =
-                    pending_logical_deliveries(destination, limit, bounds);
+                    pending_logical_deliveries(destination, receiver, limit,
+                                               bounds);
                 out.acknowledged_through =
-                    logical_delivery_acknowledged_through(destination);
+                    logical_delivery_acknowledged_through(destination, receiver);
                 const std::uint64_t known_tail =
-                    logical_delivery_known_tail(destination);
+                    logical_delivery_known_tail(destination, receiver);
                 for (std::size_t i = 0; i < pending.size(); ++i) {
                     if (cancel_token != nullptr &&
                         cancel_token->is_cancellation_requested()) {
@@ -981,6 +997,7 @@ namespace sync {
                         out.acknowledged_through) {
                         acknowledge_logical_deliveries(
                             destination,
+                            receiver,
                             acknowledgement.acknowledged_through);
                         out.acknowledged_through =
                             acknowledgement.acknowledged_through;

@@ -1207,13 +1207,16 @@ or decide whether it is safe to advance one.
 `LogicalOutboxStore` is the sender-side durable foundation for ordered delivery.
 `SyncEngine::enqueue_logical_delivery()` persists an envelope
 in `_mdbxc_logical_outbox` and allocates a monotonic `origin_sequence` per
-destination database, not globally across unrelated destinations. Its MDBX entry
-keys contain the destination and a big-endian sequence suffix, so
-`pending_logical_deliveries()` reads the stream in numeric order. The generated
-frame id is stable for that stored sequence, and allocating a frame, updating the
-next sequence, acknowledging a prefix, and deleting acknowledged entries are all
-transactional. A rollback therefore neither consumes a sequence nor leaves a
-queue entry behind. `_mdbxc_logical_outbox` is created during the normal
+destination database and receiver node pair, not globally across unrelated
+destinations or replicas of one replication set. Its MDBX entry keys contain the
+destination, receiver node id, and a big-endian sequence suffix, so
+`pending_logical_deliveries()` reads one receiver stream in numeric order. The
+generated frame id is stable for that stored sequence, and allocating a frame,
+updating the next sequence, acknowledging a prefix, and deleting acknowledged
+entries are all transactional. A receiver hello must match the selected receiver
+node id before its queue can be dispatched; an acknowledgement can therefore
+advance only that receiver's durable frontier. A rollback neither consumes a
+sequence nor leaves a queue entry behind. `_mdbxc_logical_outbox` is created during the normal
 committed sync-system initialization lifecycle, so deployments need one
 additional named-DBI slot in `Config::max_dbs` compared with a layout that did
 not use the outbox.
@@ -1235,8 +1238,8 @@ each acknowledged outbox prefix before continuing. The older
 `apply_logical_delivery_envelope()` API remains intentionally unordered and is
 not implicitly redirected through this outbox.
 
-`LogicalDeliveryProtocol.hpp` reserves a separate versioned wire boundary for
-that future exchange. Its `Hello` message carries optional capability bits; an
+`LogicalDeliveryProtocol.hpp` defines the separate versioned wire boundary for
+that exchange. Its `Hello` message carries optional capability bits; an
 unknown bit is preserved but does not become negotiated unless both peers expose
 a known capability. `Delivery` wraps a strict `LogicalDeliveryEnvelope`, and
 `Acknowledgement` carries a destination-scoped cumulative lower bound with
@@ -1248,9 +1251,9 @@ against its own durable outbox known tail, then atomically removes the verified
 contiguous local prefix. This supports a sender restart after the receiver
 committed an earlier delivery but before the sender persisted cleanup. Existing
 peers that implement only the envelope-only delivery virtual method remain on
-the conservative contract. No existing HTTP, WebSocket, or raw pull/push
-endpoint advertises or accepts this protocol yet, so current transports remain
-backward-compatible raw-sync-only.
+the conservative contract. Direct, HTTP, and WebSocket peers expose dedicated
+logical routes; the raw pull/push protocol remains unchanged and raw-only peers
+remain source-compatible.
 
 `SyncEngine::apply_ordered_logical_delivery_envelope()` is the receiver-side
 implementation of `OrderedDelivery`. `_mdbxc_logical_delivery_order` stores the
@@ -1271,8 +1274,8 @@ one transaction.
 
 `ILogicalDeliveryPeer` and `DirectLogicalDeliveryPeer` provide the capability-
 gated dispatch boundary. `SyncEngine::deliver_pending_logical_deliveries()`
-checks destination identity and negotiated `OrderedDelivery` before sending its
-outbox prefix. A negotiated cumulative success is bounded by the sender's
+checks destination database, expected receiver node identity, and negotiated
+`OrderedDelivery` before sending its outbox prefix. A negotiated cumulative success is bounded by the sender's
 durable known tail, so it can safely clean a prefix that was delivered before a
 sender restart; entries already removed by that acknowledgement are skipped from
 the in-memory pending snapshot. A retryable negative acknowledgement can still
@@ -1761,9 +1764,9 @@ or equivalent mechanism when polling alone cannot unblock the operation.
 
 `SyncWorkerOptions::enable_logical_delivery` is false by default. When enabled,
 the worker attempts logical dispatch only after its normal raw pull loop has
-drained the current round (`has_more == false`). It first checks whether the
-outbox has an envelope for the worker's replication `DbId`; an empty outbox does
-not require logical peer support. A non-empty outbox requires
+drained the current round (`has_more == false`). It obtains the remote hello,
+then checks the outbox for that replication `DbId` and receiver node pair; an
+empty receiver queue does not require dispatch. A non-empty outbox requires
 `ISyncPeer::supports_logical_delivery()`. The worker dispatches at most one
 envelope in each peer call, reports `LogicalDeliveryStarted` and
 `LogicalDeliveryFinished` stages, and stores delivered and acknowledged counts
