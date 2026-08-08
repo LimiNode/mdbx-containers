@@ -213,13 +213,16 @@ Operational rules:
   timestamp/version-based apply semantics exist. `time_unix_ns` is metadata,
   not a reliable conflict authority. `Custom` is deferred to v0.2.
 - `PullRequest::request_full_snapshot=true` starts an explicit source session
-  only when `SyncEngine` has a non-empty `FullSnapshotExportOptions::manifest`.
-  Otherwise it returns
-  `PullResponse{ok=false, error_code=SnapshotNotConfigured}`. The manual
-  receiver path accepts only bounded `ManifestOnly` chunks into a fresh
-  replica. `SyncWorkerOptions::enable_full_snapshot_fallback` can explicitly
-  drive that recovery after `SnapshotRequired`; persisted resume remains
-  deferred. Code that needs machine classification should inspect
+  when snapshot export is configured. `ManifestOnly` requires a non-empty
+  explicit `FullSnapshotExportOptions::manifest`; without one the source
+  returns `PullResponse{ok=false, error_code=SnapshotNotConfigured}`.
+  `CompleteUserDatabase` requires that configured manifest to be empty, then
+  inventories every named non-reserved user DBI in one stable source read
+  transaction. The bounded importer treats `ManifestOnly` as a manual physical
+  replacement and accepts `CompleteUserDatabase` only for a fresh replica.
+  `SyncWorkerOptions::enable_full_snapshot_fallback` can explicitly drive
+  `CompleteUserDatabase` recovery after `SnapshotRequired`; persisted resume
+  remains deferred. Code that needs machine classification should inspect
   `SyncResponseErrorCode` instead of parsing the human-readable `error` string.
 - Pull from a cursor older than retained changelog history fails as
   `PullResponse{ok=false, error_code=SnapshotRequired}`. The response carries no
