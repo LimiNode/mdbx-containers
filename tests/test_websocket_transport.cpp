@@ -3,6 +3,7 @@
 
 #include <cstdio>
 #include <cstdint>
+#include <cstring>
 #include <memory>
 #include <stdexcept>
 #include <string>
@@ -57,19 +58,27 @@ public:
     explicit LoopbackWebSocketChannel(
             mdbxc::sync::WebSocketSyncServer& server)
         : m_server(server),
-          m_exchange_count(0),
-          m_cancel_count(0),
-          m_last_token_cancellable(false),
-          m_last_type(mdbxc::sync::TransportMessageType::PullRequest) {}
+           m_exchange_count(0),
+           m_cancel_count(0),
+           m_last_token_cancellable(false),
+           m_last_was_logical(false),
+           m_last_type(mdbxc::sync::TransportMessageType::PullRequest) {}
 
     std::vector<std::uint8_t> exchange_binary(
             const std::vector<std::uint8_t>& binary_message,
             const mdbxc::sync::CancellationToken& cancel_token) override {
         ++m_exchange_count;
         m_last_token_cancellable = cancel_token.can_be_cancelled();
-        m_last_type =
-            mdbxc::sync::TransportMessageCodec::peek_message_type(
-                binary_message);
+        m_last_was_logical = binary_message.size() >=
+                mdbxc::sync::LogicalDeliveryProtocolCodec::magic_size() &&
+            std::memcmp(&binary_message[0],
+                        mdbxc::sync::LogicalDeliveryProtocolCodec::magic(),
+                        mdbxc::sync::LogicalDeliveryProtocolCodec::magic_size()) == 0;
+        if (!m_last_was_logical) {
+            m_last_type =
+                mdbxc::sync::TransportMessageCodec::peek_message_type(
+                    binary_message);
+        }
         return m_server.handle_binary_message(binary_message);
     }
 
@@ -89,6 +98,7 @@ public:
     std::size_t exchange_count() const { return m_exchange_count; }
     std::size_t cancel_count() const { return m_cancel_count; }
     bool last_token_cancellable() const { return m_last_token_cancellable; }
+    bool last_was_logical() const { return m_last_was_logical; }
     mdbxc::sync::TransportMessageType last_type() const {
         return m_last_type;
     }
@@ -98,6 +108,7 @@ private:
     std::size_t m_exchange_count;
     std::size_t m_cancel_count;
     bool m_last_token_cancellable;
+    bool m_last_was_logical;
     mdbxc::sync::TransportMessageType m_last_type;
     mdbxc::sync::SyncTransportRetryHint m_last_retry_hint;
 };
@@ -233,6 +244,56 @@ void test_websocket_server_rejects_response_messages() {
 
     db->disconnect();
     cleanup(path);
+}
+
+void test_websocket_peer_delivers_ordered_logical_outbox() {
+    const std::string source_path =
+        "test_websocket_transport_logical_source.mdbx";
+    const std::string replica_path =
+        "test_websocket_transport_logical_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
+    std::shared_ptr<mdbxc::Connection> replica = open_db(replica_path);
+    const mdbxc::sync::DbId db_id = make_node(0xD6);
+    mdbxc::sync::SyncEngine source_engine(source);
+    mdbxc::sync::SyncEngine replica_engine(replica);
+    source_engine.initialize_local_identity(make_node(0x52), db_id);
+    replica_engine.initialize_local_identity(make_node(0x62), db_id);
+
+    mdbxc::sync::LogicalChangeFrame frame;
+    source_engine.enqueue_logical_delivery(db_id, frame);
+
+    mdbxc::sync::WebSocketSyncServer replica_server(replica_engine);
+    LoopbackWebSocketChannel channel(replica_server);
+    mdbxc::sync::WebSocketSyncPeer peer(channel);
+    mdbxc::sync::CancellationSource logical_cancel;
+    const mdbxc::sync::CancellationToken logical_token = logical_cancel.token();
+    const mdbxc::sync::LogicalDeliveryHello hello =
+        peer.logical_delivery_hello_with_cancel(&logical_token);
+    require_true(hello.db_uuid == db_id,
+                 "WebSocket logical hello db uuid mismatch");
+    require_true(channel.last_was_logical(),
+                 "WebSocket logical hello used raw protocol magic");
+    require_true(channel.last_token_cancellable(),
+                 "WebSocket logical hello did not receive cancellation token");
+    const mdbxc::sync::LogicalDeliveryDispatchResult result =
+        source_engine.deliver_pending_logical_deliveries(peer, db_id);
+    require_true(result.ok, "WebSocket logical delivery failed: " + result.error);
+    require_true(result.delivered == 1u,
+                 "WebSocket logical delivery count mismatch");
+    require_true(result.acknowledged_through == 1u,
+                 "WebSocket logical acknowledgement mismatch");
+    require_true(channel.last_was_logical(),
+                 "WebSocket logical delivery used raw protocol magic");
+    require_true(source_engine.pending_logical_deliveries(db_id).empty(),
+                 "WebSocket logical delivery did not remove acknowledged outbox entry");
+
+    source->disconnect();
+    replica->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
 }
 
 void test_websocket_server_rejects_malformed_messages() {
@@ -450,6 +511,7 @@ void test_websocket_server_middleware_preserves_close_code() {
 int main() {
     test_websocket_peer_pull_and_push_roundtrip();
     test_websocket_server_rejects_response_messages();
+    test_websocket_peer_delivers_ordered_logical_outbox();
     test_websocket_server_rejects_malformed_messages();
     test_websocket_authenticated_node_policy();
     test_websocket_authenticated_node_policy_rejects_invalid_body();

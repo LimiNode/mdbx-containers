@@ -263,6 +263,11 @@ void test_http_server_status_mapping() {
     require_true(response.status_code == 400,
                  "malformed body must be rejected");
 
+    request.target = mdbxc::sync::HttpSyncRoutes::logical_delivery_target();
+    response = server.handle(request);
+    require_true(response.status_code == 400,
+                 "malformed logical delivery body must be rejected");
+
     mdbxc::sync::CodecBounds bounds;
     bounds.max_transport_message_bytes = 16;
     mdbxc::sync::HttpSyncServer bounded_server(engine, bounds);
@@ -274,6 +279,56 @@ void test_http_server_status_mapping() {
 
     db->disconnect();
     cleanup(path);
+}
+
+void test_http_peer_delivers_ordered_logical_outbox() {
+    const std::string source_path = "test_http_transport_logical_source.mdbx";
+    const std::string replica_path = "test_http_transport_logical_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
+    std::shared_ptr<mdbxc::Connection> replica = open_db(replica_path);
+    const mdbxc::sync::DbId db_id = make_node(0xD5);
+    mdbxc::sync::SyncEngine source_engine(source);
+    mdbxc::sync::SyncEngine replica_engine(replica);
+    source_engine.initialize_local_identity(make_node(0x51), db_id);
+    replica_engine.initialize_local_identity(make_node(0x61), db_id);
+
+    mdbxc::sync::LogicalChangeFrame frame;
+    source_engine.enqueue_logical_delivery(db_id, frame);
+
+    mdbxc::sync::HttpSyncServer replica_server(replica_engine);
+    LoopbackHttpClient client(replica_server);
+    mdbxc::sync::HttpSyncPeer peer(client);
+    mdbxc::sync::CancellationSource logical_cancel;
+    const mdbxc::sync::CancellationToken logical_token = logical_cancel.token();
+    const mdbxc::sync::LogicalDeliveryHello hello =
+        peer.logical_delivery_hello_with_cancel(&logical_token);
+    require_true(hello.db_uuid == db_id,
+                 "HTTP logical hello db uuid mismatch");
+    require_true(client.last_target() ==
+                     mdbxc::sync::HttpSyncRoutes::logical_hello_target(),
+                 "HTTP logical hello target mismatch");
+    require_true(client.last_token_cancellable(),
+                 "HTTP logical hello did not receive cancellation token");
+    const mdbxc::sync::LogicalDeliveryDispatchResult result =
+        source_engine.deliver_pending_logical_deliveries(peer, db_id);
+    require_true(result.ok, "HTTP logical delivery failed: " + result.error);
+    require_true(result.delivered == 1u,
+                 "HTTP logical delivery count mismatch");
+    require_true(result.acknowledged_through == 1u,
+                 "HTTP logical acknowledgement mismatch");
+    require_true(client.last_target() ==
+                     mdbxc::sync::HttpSyncRoutes::logical_delivery_target(),
+                 "HTTP logical delivery target mismatch");
+    require_true(source_engine.pending_logical_deliveries(db_id).empty(),
+                 "HTTP logical delivery did not remove acknowledged outbox entry");
+
+    source->disconnect();
+    replica->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
 }
 
 void test_http_peer_rejects_transport_error() {
@@ -304,5 +359,6 @@ int main() {
     test_http_peer_pull_and_push_roundtrip();
     test_http_server_status_mapping();
     test_http_peer_rejects_transport_error();
+    test_http_peer_delivers_ordered_logical_outbox();
     return 0;
 }

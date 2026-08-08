@@ -17,8 +17,9 @@ rules, see [Sync table coverage matrix](sync-table-coverage.md).
   `VectorStoreLogicalAdapter` additionally captures and applies add, erase, and
   clear with explicit record ids across the ids, embeddings, text, and metadata
   DBIs. Both modes require one authoritative or externally serialized writer
-  per collection; the logical adapter is not a multi-writer contract and is
-  not connected to the transport pull/push path.
+  per collection; the logical adapter is not a multi-writer contract. Its
+  durable outbox uses the separate capability-gated logical peer protocol, not
+  raw pull/push messages.
 - Standalone writes become standalone sync batches; an explicit transaction
   spanning multiple supported tables becomes one local atomic batch.
 - Reads, scans, vector search, and other non-mutating APIs are not captured.
@@ -110,14 +111,16 @@ delivery. The logical core uses the following contracts:
   after any mutation. The transport `handle_push()` path still applies raw DBI
   operations only.
 - `KeyValueTableLogicalAdapter` and `KeyTableLogicalAdapter` are explicit
-  apply helpers with opt-in typed capture sessions. Neither is connected to
-  the transport pull/push path yet; callers own logical frame delivery.
+  apply helpers with opt-in typed capture sessions. Their `commit_to_outbox()`
+  paths can be dispatched by a worker with `enable_logical_delivery`; direct
+  logical frames remain caller-delivered and never enter raw pull/push messages.
 - `VectorStoreLogicalAdapter` is an explicit schema-v1 apply helper with an
   opt-in typed capture session. It carries explicit record ids and applies
   add, erase, and clear atomically across the four collection DBIs. Erase
   retains the ids marker as allocation high-water, while clear resets every
   DBI; incoming adds validate their embedding dimension before mutation.
-  Callers own logical frame delivery and must serialize conflicting writers.
+  `commit_to_outbox()` can publish its logical frame atomically, and writers
+  must still serialize conflicting updates.
 - `KeyMultiValueTableLogicalAdapter` follows the same explicit logical-frame
   path. Schema v1 provides unordered insert, version-neutral batch `append()`,
   key erase, all-matching-value erase, and clear; schema v2 adds exact-one
@@ -147,9 +150,10 @@ delivery. The logical core uses the following contracts:
   watermark. The watermark DBI is created lazily on the first pruning call, so
   deployments that use pruning must reserve one additional named-DBI slot in
   `Config::max_dbs`; older layouts without it remain readable with a zero
-  watermark. Callers must advance it only from an external delivery/acknowledge
-  protocol that rules out later unseen frames at or below the boundary; the
-  engine does not supply ordering, buffering, or acknowledgements itself.
+  watermark. Callers must advance it only after an external retention policy
+  rules out later unseen frames at or below the boundary. The engine supplies
+  ordered delivery and cumulative acknowledgement, but intentionally does not
+  supply gap buffering or a universal replay-retention horizon.
 
 Until a causal context or another conflict model is implemented, future logical
 table support should document either one authoritative writer for the affected
@@ -165,8 +169,10 @@ tables.
 - Extend logical-frame capability negotiation only when a new adapter requires
   a compatibility distinction beyond the existing schema marker and adapter
   registry fail-closed checks.
-- Integrate `LogicalTableRegistry` with `SyncEngine::handle_push()` only after
-  logical changes can be parsed separately from raw DBI operations.
+- Design logical-aware recovery separately from raw complete snapshots. Raw
+  `CompleteUserDatabase` snapshots intentionally reject persistent logical
+  state; a future baseline protocol must preserve schema, outbox, replay, and
+  order-frontier invariants together.
 - Extend `KeyMultiValueTable` logical capture only after every added bulk or
   reconcile operation has explicit multiset replay semantics and round-trip
   coverage. Raw capture remains disabled.

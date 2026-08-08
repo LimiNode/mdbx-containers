@@ -147,6 +147,51 @@ void test_delivery_and_acknowledgement_round_trip() {
     MDBXC_TEST_ASSERT(decoded_ack.error == acknowledgement.error);
 }
 
+void test_stateless_requests_round_trip() {
+    const std::vector<std::uint8_t> hello_request =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_hello_request();
+    MDBXC_TEST_ASSERT(
+        mdbxc::sync::LogicalDeliveryProtocolCodec::peek_message_type(
+            hello_request) ==
+        mdbxc::sync::LogicalDeliveryProtocolCodec::MessageType::HelloRequest);
+    mdbxc::sync::LogicalDeliveryProtocolCodec::decode_hello_request(
+        hello_request);
+
+    mdbxc::sync::LogicalDeliveryRequest request;
+    request.envelope = make_envelope();
+    request.sender_capabilities.flags = static_cast<std::uint64_t>(
+        mdbxc::sync::LogicalDeliveryCapability::OrderedDelivery) |
+        static_cast<std::uint64_t>(
+            mdbxc::sync::LogicalDeliveryCapability::CumulativeAcknowledgement);
+    const std::vector<std::uint8_t> encoded =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::encode_delivery_request(
+            request);
+    MDBXC_TEST_ASSERT(
+        mdbxc::sync::LogicalDeliveryProtocolCodec::peek_message_type(encoded) ==
+        mdbxc::sync::LogicalDeliveryProtocolCodec::MessageType::DeliveryRequest);
+    const mdbxc::sync::LogicalDeliveryRequest decoded =
+        mdbxc::sync::LogicalDeliveryProtocolCodec::decode_delivery_request(
+            encoded);
+    MDBXC_TEST_ASSERT(decoded.envelope.origin_sequence ==
+                      request.envelope.origin_sequence);
+    MDBXC_TEST_ASSERT(decoded.envelope.frame_id == request.envelope.frame_id);
+    MDBXC_TEST_ASSERT(decoded.sender_capabilities.flags ==
+                      request.sender_capabilities.flags);
+
+    std::vector<std::uint8_t> trailing_hello = hello_request;
+    trailing_hello.push_back(0u);
+    MDBXC_TEST_ASSERT(throws_runtime_error([&trailing_hello]() {
+        mdbxc::sync::LogicalDeliveryProtocolCodec::decode_hello_request(
+            trailing_hello);
+    }));
+    std::vector<std::uint8_t> truncated = encoded;
+    truncated.pop_back();
+    MDBXC_TEST_ASSERT(throws_runtime_error([&truncated]() {
+        mdbxc::sync::LogicalDeliveryProtocolCodec::decode_delivery_request(
+            truncated);
+    }));
+}
+
 void test_protocol_rejects_invalid_header_and_acknowledgement() {
     mdbxc::sync::LogicalDeliveryHello hello;
     hello.node_id = make_node(0x50);
@@ -237,6 +282,7 @@ void test_legacy_peer_receives_request_through_default_forwarding() {
 int main() {
     test_hello_round_trip_and_capability_negotiation();
     test_delivery_and_acknowledgement_round_trip();
+    test_stateless_requests_round_trip();
     test_protocol_rejects_invalid_header_and_acknowledgement();
     test_acknowledgement_matches_its_delivery();
     test_cumulative_acknowledgement_respects_sender_tail();

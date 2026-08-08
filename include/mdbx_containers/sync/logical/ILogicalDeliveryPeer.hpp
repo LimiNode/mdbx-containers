@@ -13,6 +13,8 @@
 namespace mdbxc {
 namespace sync {
 
+    class CancellationToken;
+
     /// \brief Optional transport boundary for ordered logical delivery.
     class ILogicalDeliveryPeer {
     public:
@@ -24,6 +26,27 @@ namespace sync {
                 const LogicalDeliveryEnvelope& envelope,
                 const CodecBounds* bounds = nullptr) = 0;
 
+        /// \brief Retrieves peer capabilities with optional cancellation.
+        /// \details The default preserves existing logical peers that do not
+        /// own an interruptible transport call.
+        virtual LogicalDeliveryHello logical_delivery_hello_with_cancel(
+                const CancellationToken* cancel_token = nullptr) {
+            (void)cancel_token;
+            return logical_delivery_hello();
+        }
+
+        /// \brief Delivers an envelope with optional cancellation.
+        /// \details The default preserves the original envelope-only peer
+        /// contract for existing source implementations.
+        virtual LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_delivery_with_cancel(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) {
+            (void)cancel_token;
+            return deliver_ordered_logical_delivery(envelope, bounds);
+        }
+
         /// \brief Delivers one request with sender feature context.
         /// \details The default preserves existing peers that implemented the
         /// earlier envelope-only virtual method. Such peers remain on the
@@ -32,6 +55,16 @@ namespace sync {
                 const LogicalDeliveryRequest& request,
                 const CodecBounds* bounds = nullptr) {
             return deliver_ordered_logical_delivery(request.envelope, bounds);
+        }
+
+        /// \brief Delivers a request with optional cancellation.
+        virtual LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_request_with_cancel(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) {
+            (void)cancel_token;
+            return deliver_ordered_logical_request(request, bounds);
         }
     };
 

@@ -200,7 +200,9 @@ namespace sync {
         enum class MessageType : std::uint8_t {
             Hello = 1u,
             Delivery = 2u,
-            Acknowledgement = 3u
+            Acknowledgement = 3u,
+            HelloRequest = 4u,
+            DeliveryRequest = 5u
         };
 
         static const std::uint8_t* magic() {
@@ -238,6 +240,24 @@ namespace sync {
             return out;
         }
 
+        /// \brief Encodes a stateless request for the remote hello.
+        static std::vector<std::uint8_t> encode_hello_request(
+                const CodecBounds* bounds = nullptr) {
+            std::vector<std::uint8_t> out =
+                make_header(MessageType::HelloRequest);
+            validate_size(out, bounds);
+            return out;
+        }
+
+        /// \brief Strictly decodes a stateless remote-hello request.
+        static void decode_hello_request(
+                const std::vector<std::uint8_t>& encoded,
+                const CodecBounds* bounds = nullptr) {
+            Cursor cur = make_cursor(encoded, bounds);
+            check_header(cur, MessageType::HelloRequest);
+            check_consumed(cur);
+        }
+
         static std::vector<std::uint8_t> encode_delivery(
                 const LogicalDeliveryEnvelope& envelope,
                 const CodecBounds* bounds = nullptr) {
@@ -266,6 +286,42 @@ namespace sync {
             }
             const LogicalDeliveryEnvelope out =
                 LogicalDeliveryEnvelopeCodec::decode(nested, bounds);
+            check_consumed(cur);
+            return out;
+        }
+
+        /// \brief Encodes an ordered delivery with sender capabilities.
+        static std::vector<std::uint8_t> encode_delivery_request(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr) {
+            const std::vector<std::uint8_t> nested =
+                LogicalDeliveryEnvelopeCodec::encode(request.envelope, bounds);
+            std::vector<std::uint8_t> out =
+                make_header(MessageType::DeliveryRequest);
+            detail::append_u64_le(out, request.sender_capabilities.flags);
+            append_u32_size(out, nested.size(),
+                            "logical delivery envelope exceeds u32");
+            append_bytes(out, nested.empty() ? nullptr : &nested[0],
+                         nested.size(), bounds);
+            validate_size(out, bounds);
+            return out;
+        }
+
+        /// \brief Strictly decodes an ordered delivery with sender capabilities.
+        static LogicalDeliveryRequest decode_delivery_request(
+                const std::vector<std::uint8_t>& encoded,
+                const CodecBounds* bounds = nullptr) {
+            Cursor cur = make_cursor(encoded, bounds);
+            check_header(cur, MessageType::DeliveryRequest);
+            LogicalDeliveryRequest out;
+            out.sender_capabilities.flags = read_u64_le(cur);
+            const std::uint32_t size = read_u32_le(cur);
+            const std::uint8_t* data = read_bytes(cur, size);
+            std::vector<std::uint8_t> nested(size);
+            if (size != 0u) {
+                std::memcpy(&nested[0], data, size);
+            }
+            out.envelope = LogicalDeliveryEnvelopeCodec::decode(nested, bounds);
             check_consumed(cur);
             return out;
         }
@@ -511,6 +567,10 @@ namespace sync {
                     return MessageType::Delivery;
                 case static_cast<std::uint8_t>(MessageType::Acknowledgement):
                     return MessageType::Acknowledgement;
+                case static_cast<std::uint8_t>(MessageType::HelloRequest):
+                    return MessageType::HelloRequest;
+                case static_cast<std::uint8_t>(MessageType::DeliveryRequest):
+                    return MessageType::DeliveryRequest;
                 default:
                     throw std::runtime_error(
                         "Unexpected logical delivery protocol message type");

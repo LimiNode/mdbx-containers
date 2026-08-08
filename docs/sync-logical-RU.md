@@ -19,8 +19,10 @@ raw `PullRequest` / `PushRequest` wire path.
 4. Выполняйте записи source через typed capture session adapter'а. Успешный
    session commit публикует logical changes только после успешной local table
    mutation.
-5. Доставляйте `LogicalChangeFrame` через application protocol либо ordered
-   delivery envelope, когда он нужен adapter'у.
+5. Доставляйте `LogicalChangeFrame` через application protocol либо коммитьте
+   ordered envelope в durable outbox через `commit_to_outbox()`.
+   `SyncWorkerOptions::enable_logical_delivery` отправляет второй вариант через
+   logical-capable peer после полного raw pull round.
 6. Применяйте изменения на destination соответствующим методом `SyncEngine`.
    Marker validation и adapter preflight происходят до mutation adapter'а;
    ошибки откатывают engine-owned transaction.
@@ -29,13 +31,13 @@ raw `PullRequest` / `PushRequest` wire path.
 sequenceDiagram
     participant S as Source adapter session
     participant Schema as _mdbxc_sync_schema
-    participant Wire as Доставка приложения
+    participant Wire as Application delivery или logical peer
     participant E as Receiver SyncEngine
     participant A as Receiver adapter
 
     S->>Schema: проверка registered schema
     S->>S: mutation local table и сбор typed changes
-    S-->>Wire: LogicalChangeFrame или delivery envelope
+    S-->>Wire: LogicalChangeFrame или durable delivery envelope
     Wire->>E: явный apply call
     E->>Schema: проверка persistent marker
     E->>A: preflight каждого change
@@ -74,7 +76,7 @@ origin.
 sequenceDiagram
     participant O as Authoritative origin
     participant Outbox as Durable ordered outbox
-    participant D as Application dispatcher
+    participant D as SyncWorker или application dispatcher
     participant R as Replica SyncEngine
     participant State as Replay marker и frontier
 
@@ -92,6 +94,17 @@ origin отклоняется до table mutation. Sender outbox позволя�
 повторить доставку после process или transport failure, не теряя local ordered
 history, закоммиченную вместе с envelope.
 
+Для `DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer` этот dispatcher может
+предоставить optional logical-delivery pass worker'а. Он запускается только при
+`SyncWorkerOptions::enable_logical_delivery = true`, только после полного raw
+pull round и только для текущего `DbId` worker'а. Peer сначала согласует ordered
+delivery и cumulative acknowledgement. Каждый acknowledged prefix durably
+удаляется из sender outbox; unsupported peer, sequence gap или retryable
+acknowledgement failure сохраняют unacknowledged suffix в очереди.
+`max_logical_deliveries` ограничивает round при необходимости, а ноль отправляет
+весь pending prefix. Этот protocol остаётся отдельным от raw `PullRequest` /
+`PushRequest`.
+
 Смена authoritative origin - application-coordinated cutover. Приложение
 должно остановить старый capture, доставить старый outbox, сохранить replay
 state на свой retry horizon, мигрировать marker на всех участниках и только
@@ -102,10 +115,10 @@ state на свой retry horizon, мигрировать marker на всех �
 
 | Adapter | Реализованный typed contract | Граница |
 | --- | --- | --- |
-| `KeyValueTableLogicalAdapter` | Явный typed capture и apply. | Application владеет frame delivery. |
-| `KeyTableLogicalAdapter` | Явный typed capture и apply. | Application владеет frame delivery. |
-| `VectorStoreLogicalAdapter` | Schema v1 add, erase и clear по DBI ids, embeddings, text и metadata. Explicit IDs проверяются до mutation. | Один authoritative либо externally serialized writer на коллекцию. |
-| `KeyMultiValueTableLogicalAdapter` | v1: insert, version-neutral batch `append()`, key erase, all-matching-value erase, clear. v2 добавляет exact-one erase и `reconcile()`. v3 добавляет bounded typed `erase_range()`, разложенный в точные key erasures. | Unordered multiset semantics; один writer либо causally serialized destructive updates. |
+| `KeyValueTableLogicalAdapter` | Явный typed capture и apply; `commit_to_outbox()` атомарно публикует ordered envelope. | Direct frames остаются manual; ordered outbox delivery требует capable peer. |
+| `KeyTableLogicalAdapter` | Явный typed capture и apply; `commit_to_outbox()` атомарно публикует ordered envelope. | Direct frames остаются manual; ordered outbox delivery требует capable peer. |
+| `VectorStoreLogicalAdapter` | Schema v1 add, erase и clear по DBI ids, embeddings, text и metadata. Explicit IDs проверяются до mutation; `commit_to_outbox()` атомарен. | Один authoritative либо externally serialized writer на коллекцию. |
+| `KeyMultiValueTableLogicalAdapter` | v1: insert, version-neutral batch `append()`, key erase, all-matching-value erase, clear. v2 добавляет exact-one erase и `reconcile()`. v3 добавляет bounded typed `erase_range()`, разложенный в точные key erasures. `commit_to_outbox()` атомарен. | Unordered multiset semantics; один writer либо causally serialized destructive updates. |
 | `KeyOrderedMultiValueTableLogicalAdapter` | v1 append-only ordered delivery. | Один authoritative origin. |
 | `KeyOrderedMultiValueTableDestructiveLogicalAdapter` | v2 exact append/erase по persistent element ID, bounded selector erasure, clear и single-origin `replace_with()`. | Один authoritative origin; baseline import, multi-origin history и tombstone compaction отложены. |
 
