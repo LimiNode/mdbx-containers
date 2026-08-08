@@ -31,6 +31,12 @@ namespace sync {
         NodeId ordered_delivery_origin_node_id = make_zero_node();
     };
 
+    /// \brief One schema marker together with its stable schema id.
+    struct LogicalSchemaRegistryEntry {
+        std::string schema_id;
+        LogicalSchemaRecord record;
+    };
+
     /// \brief Thin wrapper around \c _mdbxc_sync_schema.
     /// \details Key = logical schema id string bytes. Value =
     /// \c LogicalSchemaRecord with length-prefixed UTF-8 strings.
@@ -169,6 +175,42 @@ namespace sync {
                     LogicalSchemaRecord decoded;
                     decode_record(value, schema_id, decoded);
                     out.push_back(schema_id);
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc, "SchemaRegistryStore cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+            return out;
+        }
+
+        /// \brief Lists all schema markers with fully decoded records.
+        std::vector<LogicalSchemaRegistryEntry> list_entries(
+                MDBX_txn* txn) const {
+            txn = checked_txn(txn, "SchemaRegistryStore::list_entries");
+            open_const(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "SchemaRegistryStore cursor open failed");
+            std::vector<LogicalSchemaRegistryEntry> out;
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    if (key.iov_base == nullptr) {
+                        throw std::runtime_error(
+                            "SchemaRegistryStore schema id is null");
+                    }
+                    LogicalSchemaRegistryEntry entry;
+                    const char* data = static_cast<const char*>(key.iov_base);
+                    entry.schema_id.assign(data, data + key.iov_len);
+                    decode_record(value, entry.schema_id, entry.record);
+                    out.push_back(entry);
                     rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
                 }
                 if (rc != MDBX_NOTFOUND) {

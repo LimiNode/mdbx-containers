@@ -2786,6 +2786,147 @@ void test_engine_full_snapshot_import_rejects_invalid_replacement_plan() {
     cleanup(p);
 }
 
+void test_engine_recovers_logical_baseline_atomically() {
+    using namespace mdbxc;
+    typedef sync::KeyValueLogicalStringCodec<std::string> StringCodec;
+    typedef sync::KeyValueTableLogicalAdapter<
+        std::string, std::string, StringCodec, StringCodec> LogicalAdapter;
+
+    const std::string source_path = "test_engine_logical_recovery_source.mdbx";
+    const std::string replica_path = "test_engine_logical_recovery_replica.mdbx";
+    const std::string rejected_path = "test_engine_logical_recovery_rejected.mdbx";
+    const std::string schema_id = "app.logical_recovery.key_value.v1";
+    cleanup(source_path);
+    cleanup(replica_path);
+    cleanup(rejected_path);
+
+    const sync::NodeId source_node = make_node(0x91);
+    const sync::NodeId replica_node = make_node(0xA1);
+    const sync::NodeId rejected_node = make_node(0xB1);
+    const sync::DbId db_id = make_node(0xD1);
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 32u;
+    options.max_materialized_bytes = 8192u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    std::shared_ptr<Connection> rejected_conn = open_env(rejected_path);
+    sync::SyncEngine source(source_conn, sync::ConflictPolicy::Reject, options);
+    sync::SyncEngine replica(replica_conn);
+    sync::SyncEngine rejected(rejected_conn);
+    source.initialize_local_identity(source_node, db_id);
+    replica.initialize_local_identity(replica_node, db_id);
+    rejected.initialize_local_identity(rejected_node, db_id);
+
+    KeyValueTable<std::string, std::string> source_documents(
+        source_conn, "documents");
+    KeyValueTable<std::string, std::string> replica_documents(
+        replica_conn, "documents");
+    KeyValueTable<std::string, std::string> rejected_documents(
+        rejected_conn, "documents");
+    LogicalAdapter source_adapter(source_documents, schema_id);
+    LogicalAdapter replica_adapter(replica_documents, schema_id);
+    LogicalAdapter rejected_adapter(rejected_documents, schema_id);
+    sync::LogicalSchemaRecord record;
+    record.dbi_name = "documents";
+    record.kind = sync::LogicalTableKind::KeyValue;
+    record.schema_version = 1u;
+    record.dbi_names.push_back("documents");
+    source.initialize_logical_adapter_schema(source_adapter, record);
+    source.register_logical_adapter(source_adapter);
+    replica.register_logical_adapter(replica_adapter);
+    rejected.register_logical_adapter(rejected_adapter);
+
+    {
+        std::unique_ptr<LogicalAdapter::LogicalCaptureSession> session =
+            source_adapter.begin_capture_session();
+        session->insert_or_assign("first", "one");
+        const sync::LogicalDeliveryEnvelope envelope =
+            session->commit_to_outbox(source, db_id);
+        if (envelope.origin_sequence != 1u) {
+            throw std::runtime_error("logical recovery source did not enqueue sequence one");
+        }
+    }
+
+    sync::PullRequest raw_request;
+    raw_request.requester = replica_node;
+    raw_request.db_id = db_id;
+    raw_request.request_full_snapshot = true;
+    raw_request.max_bytes = 8192u;
+    raw_request.max_single_batch_bytes = 8192u;
+    const sync::PullResponse raw_rejected = source.handle_pull(raw_request);
+    if (raw_rejected.ok || raw_rejected.error_code !=
+            sync::SyncResponseErrorCode::SnapshotLogicalStateUnsupported) {
+        throw std::runtime_error("logical recovery relaxed the raw snapshot guard");
+    }
+
+    sync::LogicalRecoveryRequest request;
+    request.requester = replica_node;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::LogicalRecoveryResponse response =
+        source.handle_logical_recovery(request);
+    if (!response.ok || response.has_more || !response.has_baseline) {
+        throw std::runtime_error("logical recovery source did not return final baseline");
+    }
+
+    sync::LogicalRecoveryBaseline malformed = response.baseline;
+    malformed.source_db_uuid = make_node(0xE1);
+    bool rejected_baseline = false;
+    try {
+        (void)rejected.apply_logical_recovery_chunk(
+            response.snapshot_chunk, &malformed);
+    } catch (const std::invalid_argument&) {
+        rejected_baseline = true;
+    }
+    if (!rejected_baseline || kv_has(rejected_conn, rejected_documents,
+                                     std::string("first"))) {
+        throw std::runtime_error(
+            "malformed logical recovery baseline mutated destination state");
+    }
+
+    if (!replica.apply_logical_recovery_chunk(
+            response.snapshot_chunk, &response.baseline).completed ||
+        kv_or_throw(replica_conn, replica_documents, std::string("first"),
+                    "logical recovery first value") != "one") {
+        throw std::runtime_error("logical recovery did not import physical state");
+    }
+    {
+        auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
+        sync::SchemaRegistryStore schemas(replica_conn->env_handle());
+        sync::LogicalDeliveryOrderStore order(replica_conn->env_handle());
+        if (!schemas.has_entries(txn.handle()) ||
+            order.last_applied(txn.handle(), source_node) != 1u) {
+            throw std::runtime_error(
+                "logical recovery did not restore schema or outbox frontier");
+        }
+    }
+
+    {
+        std::unique_ptr<LogicalAdapter::LogicalCaptureSession> session =
+            source_adapter.begin_capture_session();
+        session->insert_or_assign("second", "two");
+        (void)session->commit_to_outbox(source, db_id);
+    }
+    sync::DirectSyncPeer peer(&replica);
+    const sync::LogicalDeliveryDispatchResult dispatched =
+        source.deliver_pending_logical_deliveries(peer, db_id);
+    if (!dispatched.ok || !source.pending_logical_deliveries(db_id).empty() ||
+        kv_or_throw(replica_conn, replica_documents, std::string("second"),
+                    "logical recovery continued delivery") != "two") {
+        throw std::runtime_error(
+            "logical recovery did not continue ordered delivery after baseline");
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    rejected_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+    cleanup(rejected_path);
+}
+
 void test_engine_changelog_page_rejects_full_snapshot_request() {
     using namespace mdbxc;
     const std::string p = "test_engine_changelog_full_snapshot_request.mdbx";
@@ -3438,6 +3579,8 @@ int main() {
           &test_engine_full_snapshot_import_bounds_fail_closed },
         { "test_engine_full_snapshot_import_rejects_invalid_replacement_plan",
           &test_engine_full_snapshot_import_rejects_invalid_replacement_plan },
+        { "test_engine_recovers_logical_baseline_atomically",
+          &test_engine_recovers_logical_baseline_atomically },
         { "test_engine_changelog_page_rejects_full_snapshot_request",
           &test_engine_changelog_page_rejects_full_snapshot_request },
         { "test_engine_pull_reports_snapshot_required_after_prune",
