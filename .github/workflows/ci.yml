@@ -424,6 +424,10 @@ jobs:
           ctest --test-dir build --output-on-failure -C Release \
           2>&1 | tee build/ctest.log
 
+      - name: Collect MDBX failure diagnostics
+        if: failure()
+        run: bash .github/scripts/collect-windows-mdbx-diagnostics.sh build
+
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -535,6 +539,10 @@ jobs:
           grep -q "OK: sync_17_websocket_simple_web_server" \
             build-ws-fallback/example.log
 
+      - name: Collect MDBX failure diagnostics
+        if: failure()
+        run: bash .github/scripts/collect-windows-mdbx-diagnostics.sh build-ws-fallback
+
       - name: Upload logs
         if: failure()
         uses: actions/upload-artifact@v4
@@ -644,6 +652,10 @@ jobs:
           2>&1 | tee build-kurlyk-fallback/example.log
           grep -q "OK: sync_19_kurlyk_http_client" \
             build-kurlyk-fallback/example.log
+
+      - name: Collect MDBX failure diagnostics
+        if: failure()
+        run: bash .github/scripts/collect-windows-mdbx-diagnostics.sh build-kurlyk-fallback
 
       - name: Upload logs
         if: failure()
