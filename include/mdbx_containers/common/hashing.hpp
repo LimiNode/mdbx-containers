@@ -3,7 +3,7 @@
 #define MDBX_CONTAINERS_HEADER_COMMON_HASHING_HPP_INCLUDED
 
 /// \file common/hashing.hpp
-/// \brief Public byte-view and hasher utilities for hashed containers.
+/// \brief Shared byte-view and hasher utilities for hashed containers.
 
 #include <cstddef>
 #include <cstdint>

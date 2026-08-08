@@ -40,7 +40,6 @@ Primary entry points:
 - User API: `include/mdbx_containers.hpp`,
   `include/mdbx_containers/KeyValueTable.hpp`,
   `include/mdbx_containers/HashedKeyValueStore.hpp`,
-  `include/mdbx_containers/common/hashing.hpp`,
   `include/mdbx_containers/ValueTable.hpp`,
   `include/mdbx_containers/AnyValueTable.hpp`,
   `include/mdbx_containers/KeyTable.hpp`,
@@ -97,8 +96,11 @@ Dependency rules:
 
 - Public table headers may depend on `common.hpp` and through it on
   `Connection`, `BaseTable`, and serialization helpers.
-- Domain helper headers such as `common/hashing.hpp` may be included directly
-  by users. Keep them C++11-compatible unless guarded.
+- `common/hashing.hpp` is an internal `common` leaf. Its types are exported by
+  `common.hpp` and, for table users, by `tables.hpp`; users should include an
+  owning umbrella rather than this leaf directly. `common/backup.hpp` remains
+  an explicitly supported direct utility include. Keep exported types
+  C++11-compatible unless guarded.
 - `common/Connection.*` may depend on `detail/path_utils.hpp`, `Transaction`,
   `Config`, and `check_mdbx`.
 - `detail/utils.hpp` should remain low-level: serialization, MDBX error

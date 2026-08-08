@@ -27,6 +27,22 @@ Key features:
 - Read-only configuration for inspecting existing DBIs without creating tables.
 - Shared `Connection` with thread-bound transactions.
 
+\section sync_sec Sync Replication
+
+The optional sync subsystem has separate raw replication, explicit logical
+delivery, and raw snapshot recovery paths. Start with the user guides rather
+than the wire-format design record:
+
+- [Sync Replication](sync.md) / [Sync-репликация](sync-RU.md): choose a mode,
+  configure the normal raw path, and find runnable examples.
+- [Logical And Ordered Sync](sync-logical.md) /
+  [Логическая и упорядоченная синхронизация](sync-logical-RU.md): schema
+  markers, typed adapter capture, ordered outbox delivery, and concurrency
+  limits.
+- [Sync Recovery And Full Snapshots](sync-recovery.md) /
+  [Восстановление синхронизации и полные снимки](sync-recovery-RU.md): changelog
+  retention, snapshot scopes, and fresh-replica recovery.
+
 \section transaction_sec Transactions
 Every modifying operation runs inside a transaction. There are two ways to manage them:
 - **RAII transactions** created via `Connection::transaction()`. A transaction object commits on `commit()` or rolls back on destruction. Convenient for scoped writes.

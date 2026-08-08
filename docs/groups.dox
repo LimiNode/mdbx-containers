@@ -11,8 +11,9 @@ STL-like containers backed by MDBX: \c KeyValueTable, \c HashedKeyValueStore,
 /*! \defgroup mdbxc_utils Utility Functions
 Helper traits and serialization routines used throughout the library.
 
-Public utility headers such as \c common/hashing.hpp live in their owning
-domain and may be included directly by users. Headers under
+The hashing utility types are exported through the owning \c common.hpp and
+\c tables.hpp umbrellas. The explicitly supported direct utility header is
+\c common/backup.hpp. Other headers under \c common/ and all headers under
 \c include/mdbx_containers/detail are private implementation details, including
 vendored dependencies and internal traits used by public table headers.
 

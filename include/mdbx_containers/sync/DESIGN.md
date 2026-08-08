@@ -13,14 +13,19 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 
 ## Already implemented (merged into main)
 
-- Public types in `include/mdbx_containers/sync/`:
-  `Common`, `ChangeAccumulator`, `ChangeBatch`, `ChangeOp`, `Cancellation`,
-  `CodecBounds`, `CodecFlags`, `ConflictPolicy`, `DirectSyncPeer`,
-  `IdentityProvider`, `ISyncCaptureSink`, `ISyncPeer`, `Protocol`,
-  `SyncCaptureScope`, `SyncCursor`, `SyncEngine`, `SyncWorker`.
-- Five system stores under `include/mdbx_containers/sync/stores/`:
-  `MetaStore`, `ChangeLogStore`, `OriginIndexStore`, `AppliedStore`,
-  `IdentityIndexStore`.
+- Public sync modules are grouped behind `sync/core.hpp`, `sync/protocol.hpp`,
+  `sync/storage.hpp`, `sync/capture.hpp`, `sync/logical.hpp`,
+  `sync/adapters.hpp`, `sync/engine.hpp`, and `sync/transport.hpp`.
+  Their leaves contain `ChangeAccumulator`, `ChangeBatch`, `ChangeOp`,
+  `CancellationToken`, `CodecBounds`, `CodecFlags`, `ConflictPolicy`,
+  `DirectSyncPeer`, `IdentityProvider`, `ISyncCaptureSink`, `ISyncPeer`,
+  `SyncCaptureScope`, `SyncCursor`, `SyncEngine`, and `SyncWorker`.
+- Five raw system stores under `include/mdbx_containers/sync/stores/`:
+  `MetaStore`, `ChangeLogStore`, `OriginIndexStore`, `AppliedStore`, and
+  `IdentityIndexStore`. Durable logical state is separate under
+  `include/mdbx_containers/sync/logical/stores/`: `SchemaRegistryStore`,
+  `LogicalDeliveryStore`, `LogicalDeliveryOrderStore`, and
+  `LogicalOutboxStore`.
 - `ChangeBatchCodec` strict versioned wire format (magic, codec version,
   batch version, batch flags, then payload); rejects unknown mandatory
   flags and version mismatches at both encode and decode.

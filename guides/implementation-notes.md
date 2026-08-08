@@ -278,11 +278,12 @@ Operational rules:
   full public surface), the per-domain aggregators `common.hpp`, `tables.hpp`,
   `vector.hpp`, `sync.hpp`, and `sync/transport.hpp`, the root table headers
   such as `KeyValueTable.hpp` and `ValueTable.hpp`, and the public utility
-  headers `common/backup.hpp` and `common/hashing.hpp`. Explicitly documented
-  concrete transport-backend headers under `sync/transports/...` are also
-  public integration entry points. Other subdomain headers are internal leaves
-  (`common/...`, `detail/...`, `sync/...`, `vector/...`); consumers include
-  them through the aggregator that owns their prerequisite order.
+  header `common/backup.hpp`. Explicitly documented concrete transport-backend
+  headers under `sync/transports/...` are also public integration entry points.
+  Other subdomain headers are internal leaves (`common/...`, `detail/...`,
+  `sync/...`, `vector/...`); consumers include them through the aggregator
+  that owns their prerequisite order. For example, `common/hashing.hpp` is
+  exported through `common.hpp`, not as a supported direct include.
 - Header self-sufficiency is required only for supported public entry points,
   not for every internal leaf. A leaf may rely on prerequisites supplied by
   its owning domain umbrella and is not a supported standalone include.
