@@ -1204,8 +1204,8 @@ the numeric `origin_sequence`: it does not decide whether an envelope is an
 exact duplicate delivery identity, persist a watermark, buffer missing frames,
 or decide whether it is safe to advance one.
 
-`LogicalOutboxStore` is the sender-side durable foundation for a future ordered
-delivery protocol. `SyncEngine::enqueue_logical_delivery()` persists an envelope
+`LogicalOutboxStore` is the sender-side durable foundation for ordered delivery.
+`SyncEngine::enqueue_logical_delivery()` persists an envelope
 in `_mdbxc_logical_outbox` and allocates a monotonic `origin_sequence` per
 destination database, not globally across unrelated destinations. Its MDBX entry
 keys contain the destination and a big-endian sequence suffix, so
@@ -1218,11 +1218,22 @@ committed sync-system initialization lifecycle, so deployments need one
 additional named-DBI slot in `Config::max_dbs` compared with a layout that did
 not use the outbox.
 
-`acknowledge_logical_deliveries()` currently exposes only a local cumulative
-frontier and deletes its acknowledged outbox prefix. It does not establish a
-wire acknowledgement, receiver-side ordering, capability negotiation, or retry
-scheduling. The older `apply_logical_delivery_envelope()` API remains intentionally
-unordered and is not implicitly redirected through this outbox.
+`LogicalDeliveryProtocolCodec` defines a separate logical wire protocol with its
+own magic and version. It carries `Hello`, stateless `HelloRequest`, legacy
+envelope-only `Delivery`, capability-bearing `DeliveryRequest`, and cumulative
+`Acknowledgement` messages. It does not change `TransportMessageCodec` or the
+raw `ChangeBatchCodec` version. HTTP maps the request messages to dedicated
+logical routes, while WebSocket chooses the protocol by its magic before raw
+transport decoding.
+
+`ISyncPeer` is also an `ILogicalDeliveryPeer`. Its default logical methods keep
+raw-only peers source-compatible: they report no support and never acknowledge a
+logical envelope. `DirectSyncPeer`, `HttpSyncPeer`, and `WebSocketSyncPeer`
+implement hello plus capability-bearing delivery. `SyncEngine::deliver_pending_logical_deliveries()` negotiates ordered delivery and cumulative acknowledgement,
+validates every acknowledgement against the durable sender tail, and commits
+each acknowledged outbox prefix before continuing. The older
+`apply_logical_delivery_envelope()` API remains intentionally unordered and is
+not implicitly redirected through this outbox.
 
 `LogicalDeliveryProtocol.hpp` reserves a separate versioned wire boundary for
 that future exchange. Its `Hello` message carries optional capability bits; an
@@ -1328,9 +1339,9 @@ helpers. They translate typed table operations into adapter-owned logical
 payloads and apply them through
 `SyncEngine::apply_logical_changes()` or
 `LogicalTableRegistry::preflight_then_apply()` inside a caller-owned write
-transaction. These helpers prove the adapter contract and payload shape for
-simple tables, but they are not yet connected to the automatic pull/push wire
-pipeline.
+transaction. Their `commit_to_outbox()` paths atomically commit local table
+mutations and a durable ordered envelope. The envelope uses the separate logical
+peer protocol rather than the automatic raw pull/push wire pipeline.
 `KeyValueTableLogicalAdapter` supports upsert/delete/clear,
 `KeyTableLogicalAdapter` supports insert/delete/clear, and
 `VectorStoreLogicalAdapter` supports add/erase/clear over its four owned DBIs.
@@ -1704,15 +1715,16 @@ Stopped -> Starting -> Idle -> Pulling -> Applying -> Idle
 
 Worker invariants:
 
-- no local MDBX transaction is held while waiting in `ISyncPeer::pull()`;
+- no local MDBX transaction is held while waiting in a peer pull or logical
+  delivery call;
 - no local MDBX transaction is held during idle or backoff sleeps;
 - pulled pages are applied through `SyncEngine::handle_push()`, so each page
   uses one short local write transaction;
-- stop requests cancel the active `PullRequest::cancel_token` and call
+- stop requests cancel the active raw request token and call
   `ISyncPeer::request_cancel()` at most once for each observed in-flight
-  peer pull call, and a page returned after stop was requested is not applied;
-- a stop request recorded before peer-call activation prevents the next pull
-  call from starting;
+  peer call. A page returned after stop was requested is not applied, and a
+  stop request recorded between logical envelopes prevents the next logical
+  delivery from starting;
 - `stop()`, `join()`, and destruction may wait for an in-flight peer call to
   return when the concrete transport does not support cancellation;
 - `SyncWorkerGuard` may own a single background run session for an existing
@@ -1725,8 +1737,9 @@ Worker invariants:
   while `request_stop`, `state`, `last_error`, `last_observer_error`, and
   `wait_until_state` are thread-safe;
 - optional `ISyncWorkerObserver` callbacks report coarse sync stages
-  (`round`, `pull`, `apply`, `backoff`), page application, round completion,
-  and backoff entry synchronously on the thread that runs the sync round;
+  (`round`, `pull`, `apply`, `logical delivery`, `backoff`), page application,
+  round completion, and backoff entry synchronously on the thread that runs the
+  sync round;
   observer implementations must outlive the worker, return quickly, and avoid
   caller-serialized lifecycle calls from worker-thread callbacks;
 - worker stage and round events include a best-effort progress estimate derived
@@ -1745,6 +1758,18 @@ peers remain separate adapters over `ISyncPeer`. Transport adapters that can
 interrupt blocking I/O should poll the request `cancel_token` where possible
 and implement `request_cancel()` by using their own timeout, socket shutdown,
 or equivalent mechanism when polling alone cannot unblock the operation.
+
+`SyncWorkerOptions::enable_logical_delivery` is false by default. When enabled,
+the worker attempts logical dispatch only after its normal raw pull loop has
+drained the current round (`has_more == false`). It first checks whether the
+outbox has an envelope for the worker's replication `DbId`; an empty outbox does
+not require logical peer support. A non-empty outbox requires
+`ISyncPeer::supports_logical_delivery()`. The worker dispatches at most one
+envelope in each peer call, reports `LogicalDeliveryStarted` and
+`LogicalDeliveryFinished` stages, and stores delivered and acknowledged counts
+in its round result. `max_logical_deliveries == 0` drains the pending prefix;
+any positive value bounds one round. Unsupported peers and failed
+acknowledgements leave the unacknowledged outbox suffix durable for retry.
 
 Cancellation intentionally stays minimal in the core API: operation-scoped
 tokens plus the existing best-effort peer hook. Do not add callback

@@ -12,6 +12,7 @@
 /// fragmentation/reassembly, backpressure, retries, and socket cancellation.
 
 #include <cstdint>
+#include <cstring>
 #include <stdexcept>
 #include <vector>
 
@@ -117,6 +118,9 @@ namespace sync {
         /// those failures to their close/error policy.
         std::vector<std::uint8_t> handle_binary_message(
                 const std::vector<std::uint8_t>& binary_message) const {
+            if (is_logical_delivery_message(binary_message)) {
+                return handle_logical_delivery(binary_message);
+            }
             const TransportMessageType type =
                 TransportMessageCodec::peek_message_type(
                     binary_message, &m_bounds);
@@ -134,6 +138,15 @@ namespace sync {
         }
 
     private:
+        static bool is_logical_delivery_message(
+                const std::vector<std::uint8_t>& binary_message) {
+            return binary_message.size() >=
+                       LogicalDeliveryProtocolCodec::magic_size() &&
+                   std::memcmp(&binary_message[0],
+                               LogicalDeliveryProtocolCodec::magic(),
+                               LogicalDeliveryProtocolCodec::magic_size()) == 0;
+        }
+
         std::vector<std::uint8_t> handle_pull(
                 const std::vector<std::uint8_t>& binary_message) const {
             const PullRequest request =
@@ -152,6 +165,42 @@ namespace sync {
             const PushResponse response = m_engine.handle_push(request);
             return TransportMessageCodec::encode_push_response(
                 response, &m_bounds);
+        }
+
+        std::vector<std::uint8_t> handle_logical_delivery(
+                const std::vector<std::uint8_t>& binary_message) const {
+            const LogicalDeliveryProtocolCodec::MessageType type =
+                LogicalDeliveryProtocolCodec::peek_message_type(
+                    binary_message, &m_bounds);
+            switch (type) {
+                case LogicalDeliveryProtocolCodec::MessageType::HelloRequest:
+                    LogicalDeliveryProtocolCodec::decode_hello_request(
+                        binary_message, &m_bounds);
+                    return LogicalDeliveryProtocolCodec::encode_hello(
+                        m_engine.logical_delivery_hello(), &m_bounds);
+                case LogicalDeliveryProtocolCodec::MessageType::Delivery:
+                    return LogicalDeliveryProtocolCodec::encode_acknowledgement(
+                        m_engine.apply_ordered_logical_delivery_envelope(
+                            LogicalDeliveryProtocolCodec::decode_delivery(
+                                binary_message, &m_bounds),
+                            &m_bounds),
+                        &m_bounds);
+                case LogicalDeliveryProtocolCodec::MessageType::DeliveryRequest: {
+                    const LogicalDeliveryRequest request =
+                        LogicalDeliveryProtocolCodec::decode_delivery_request(
+                            binary_message, &m_bounds);
+                    return LogicalDeliveryProtocolCodec::encode_acknowledgement(
+                        m_engine.apply_ordered_logical_delivery_envelope(
+                            request.envelope, &request.sender_capabilities,
+                            &m_bounds),
+                        &m_bounds);
+                }
+                case LogicalDeliveryProtocolCodec::MessageType::Hello:
+                case LogicalDeliveryProtocolCodec::MessageType::Acknowledgement:
+                    throw std::runtime_error(
+                        "WebSocket sync server received logical response message");
+            }
+            throw std::runtime_error("Unexpected logical delivery message type");
         }
 
         SyncEngine& m_engine;
@@ -188,6 +237,63 @@ namespace sync {
                 response_message, &m_bounds);
         }
 
+        bool supports_logical_delivery() const override {
+            return true;
+        }
+
+        LogicalDeliveryHello logical_delivery_hello() override {
+            return logical_delivery_hello_with_cancel(nullptr);
+        }
+
+        LogicalDeliveryHello logical_delivery_hello_with_cancel(
+                const CancellationToken* cancel_token = nullptr) override {
+            const CancellationToken token = cancel_token != nullptr
+                ? *cancel_token
+                : CancellationToken();
+            return LogicalDeliveryProtocolCodec::decode_hello(
+                m_channel.exchange_binary(
+                    LogicalDeliveryProtocolCodec::encode_hello_request(
+                        &m_bounds),
+                    token),
+                &m_bounds);
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) override {
+            return deliver_ordered_logical_delivery_with_cancel(
+                envelope, bounds, nullptr);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_delivery_with_cancel(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            return deliver_logical_message(
+                LogicalDeliveryProtocolCodec::encode_delivery(
+                    envelope, effective_logical_bounds(bounds)),
+                cancel_token);
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr) override {
+            return deliver_ordered_logical_request_with_cancel(
+                request, bounds, nullptr);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_request_with_cancel(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            return deliver_logical_message(
+                LogicalDeliveryProtocolCodec::encode_delivery_request(
+                    request, effective_logical_bounds(bounds)),
+                cancel_token);
+        }
+
         void request_cancel() override {
             m_channel.request_cancel();
         }
@@ -197,6 +303,22 @@ namespace sync {
         }
 
     private:
+        const CodecBounds* effective_logical_bounds(
+                const CodecBounds* bounds) const {
+            return bounds != nullptr ? bounds : &m_bounds;
+        }
+
+        LogicalDeliveryAcknowledgement deliver_logical_message(
+                const std::vector<std::uint8_t>& request_message,
+                const CancellationToken* cancel_token) {
+            const CancellationToken token = cancel_token != nullptr
+                ? *cancel_token
+                : CancellationToken();
+            return LogicalDeliveryProtocolCodec::decode_acknowledgement(
+                m_channel.exchange_binary(request_message, token),
+                &m_bounds);
+        }
+
         IWebSocketSyncChannel& m_channel;
         CodecBounds m_bounds;
     };

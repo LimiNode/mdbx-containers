@@ -18,13 +18,15 @@ English version: [sync.md](sync.md).
 | --- | --- | --- |
 | Реплицировать обычные записи таблиц между копиями БД | Raw-репликация | `ThreadLocalChangeAccumulator`, `SyncCaptureScope`, `SyncWorker`, `ISyncPeer` |
 | Реплицировать таблицу через явную типизированную схему приложения | Logical frames | Logical adapter таблицы, `LogicalChangeFrameCodec`, `SyncEngine::apply_logical_frame_bytes()` |
-| Сохранить одну авторитетную упорядоченную историю и безопасно повторять её доставку | Ordered logical delivery | Logical adapter `KeyOrderedMultiValueTable`, durable outbox, `SyncEngine::apply_ordered_logical_delivery_envelope()` |
+| Сохранить одну авторитетную упорядоченную историю и безопасно повторять её доставку | Ordered logical delivery | Durable outbox, logical-capable `ISyncPeer`, `SyncWorkerOptions::enable_logical_delivery` |
 | Восстановить свежую raw-реплику после удаления нужной истории из changelog | Full snapshot recovery | `SyncWorkerOptions::enable_full_snapshot_fallback`, `CompleteUserDatabase` |
 
 Эти режимы намеренно разделены. Обычный pull/push transport protocol несёт
-только raw DBI operations. Logical frames и ordered delivery доставляются
-приложением; они не преобразуются молча в raw операции и не попадают в обычный
-`ChangeBatch`.
+только raw DBI operations. Ordered logical delivery использует отдельный
+capability-negotiated protocol и явно включается в `SyncWorker`; он не
+преобразуется молча в raw операции и не попадает в обычный `ChangeBatch`.
+Direct logical frames остаются application-delivered, когда routing, порядок и
+retry policy принадлежат самому приложению.
 
 ## Основные понятия
 
@@ -50,7 +52,7 @@ flowchart LR
     Capture --> RawLog[_mdbxc_changelog]
     Capture --> Outbox[Ordered logical outbox]
     RawLog --> Peer[ISyncPeer или transport binding]
-    Outbox --> LogicalTransport[Протокол доставки приложения]
+    Outbox --> LogicalTransport[Logical-capable peer]
     Peer --> EngineB[SyncEngine на B]
     LogicalTransport --> EngineB
     EngineB --> UserDb[Пользовательские DBI]
@@ -58,9 +60,10 @@ flowchart LR
 ```
 
 Две стрелки в `EngineB` означают разные admission paths. Raw-страница идёт
-через `handle_push()`. Logical frame использует явный logical apply method; у
-ordered envelope дополнительно проверяются destination, порядок origin, replay
-state и persistent schema marker.
+через `handle_push()`. Direct logical frame использует явный logical apply
+method. Ordered envelope проходит через logical peer protocol; дополнительно
+проверяются destination, порядок origin, replay state и persistent schema
+marker.
 
 ## Raw-репликация
 
@@ -122,6 +125,24 @@ last-writer-wins policy для конкурентных изменений пр�
 `DirectSyncPeer` - in-process peer для вводных примеров. Framework-neutral
 HTTP- и WebSocket-seams используют `TransportMessageCodec`; опциональные
 Simple-Web и Kurlyk bindings дают concrete transport, не меняя core messages.
+
+### Упорядоченная логическая доставка
+
+`ISyncPeer` также имеет optional logical-delivery capability. Его реализуют
+`DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer`. HTTP использует
+отдельные logical hello и delivery routes; WebSocket определяет logical
+protocol по собственному magic. Ни `TransportMessageCodec`, ни raw pull/push
+wire layout при этом не меняются.
+
+Установите `SyncWorkerOptions::enable_logical_delivery = true`, чтобы worker
+после полного raw pull round отправлял durable outbox local engine. В качестве
+logical destination используется текущий replication `DbId`; worker
+согласует ordered delivery и cumulative acknowledgements и удаляет только
+acknowledged outbox prefix. `max_logical_deliveries` при необходимости
+ограничивает один round; ноль означает отправить весь pending prefix. Raw-only
+peer допускается, пока outbox пуст, но при pending delivery round завершается
+ошибкой без удаления queued frames. Retryable acknowledgement failure также
+сохраняет unacknowledged suffix для следующего round.
 
 Transport authentication, TLS, remote-address policy, rate limiting, request
 id и HTTP/WebSocket status mapping остаются на стороне adapter. Они намеренно

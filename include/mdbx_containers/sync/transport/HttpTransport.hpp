@@ -267,6 +267,14 @@ namespace sync {
         static const char* push_target() {
             return "/mdbxc/sync/v1/push";
         }
+
+        static const char* logical_hello_target() {
+            return "/mdbxc/sync/v1/logical/hello";
+        }
+
+        static const char* logical_delivery_target() {
+            return "/mdbxc/sync/v1/logical/delivery";
+        }
     };
 
     /// \brief Server-side dispatcher from HTTP-shaped requests to SyncEngine.
@@ -290,6 +298,12 @@ namespace sync {
                 response = handle_pull(request.body);
             } else if (request.target == HttpSyncRoutes::push_target()) {
                 response = handle_push(request.body);
+            } else if (request.target ==
+                       HttpSyncRoutes::logical_hello_target()) {
+                response = handle_logical_hello(request.body);
+            } else if (request.target ==
+                       HttpSyncRoutes::logical_delivery_target()) {
+                response = handle_logical_delivery(request.body);
             } else {
                 response = make_error(404, "unknown sync route");
             }
@@ -340,6 +354,57 @@ namespace sync {
                         response, &m_bounds));
             } catch (const std::exception& e) {
                 return make_error(500, e.what());
+            }
+        }
+
+        HttpSyncResponse handle_logical_hello(
+                const std::vector<std::uint8_t>& body) const {
+            try {
+                LogicalDeliveryProtocolCodec::decode_hello_request(
+                    body, &m_bounds);
+                return make_binary(
+                    LogicalDeliveryProtocolCodec::encode_hello(
+                        m_engine.logical_delivery_hello(), &m_bounds));
+            } catch (const std::length_error& e) {
+                return make_error(413, e.what());
+            } catch (const std::exception& e) {
+                return make_error(400, e.what());
+            }
+        }
+
+        HttpSyncResponse handle_logical_delivery(
+                const std::vector<std::uint8_t>& body) const {
+            try {
+                const LogicalDeliveryProtocolCodec::MessageType type =
+                    LogicalDeliveryProtocolCodec::peek_message_type(
+                        body, &m_bounds);
+                LogicalDeliveryAcknowledgement acknowledgement;
+                if (type == LogicalDeliveryProtocolCodec::MessageType::Delivery) {
+                    acknowledgement =
+                        m_engine.apply_ordered_logical_delivery_envelope(
+                            LogicalDeliveryProtocolCodec::decode_delivery(
+                                body, &m_bounds),
+                            &m_bounds);
+                } else if (type ==
+                           LogicalDeliveryProtocolCodec::MessageType::DeliveryRequest) {
+                    const LogicalDeliveryRequest request =
+                        LogicalDeliveryProtocolCodec::decode_delivery_request(
+                            body, &m_bounds);
+                    acknowledgement =
+                        m_engine.apply_ordered_logical_delivery_envelope(
+                            request.envelope, &request.sender_capabilities,
+                            &m_bounds);
+                } else {
+                    return make_error(
+                        400, "unexpected logical delivery message type");
+                }
+                return make_binary(
+                    LogicalDeliveryProtocolCodec::encode_acknowledgement(
+                        acknowledgement, &m_bounds));
+            } catch (const std::length_error& e) {
+                return make_error(413, e.what());
+            } catch (const std::exception& e) {
+                return make_error(400, e.what());
             }
         }
 
@@ -403,6 +468,66 @@ namespace sync {
                 response.body, &m_bounds);
         }
 
+        bool supports_logical_delivery() const override {
+            return true;
+        }
+
+        LogicalDeliveryHello logical_delivery_hello() override {
+            return logical_delivery_hello_with_cancel(nullptr);
+        }
+
+        LogicalDeliveryHello logical_delivery_hello_with_cancel(
+                const CancellationToken* cancel_token = nullptr) override {
+            clear_last_retry_hint();
+            const CancellationToken token = cancel_token != nullptr
+                ? *cancel_token
+                : CancellationToken();
+            const HttpSyncResponse response = m_client.post(
+                HttpSyncRoutes::logical_hello_target(),
+                HttpSyncRoutes::content_type(),
+                LogicalDeliveryProtocolCodec::encode_hello_request(&m_bounds),
+                token);
+            require_ok_response(response, "logical hello");
+            return LogicalDeliveryProtocolCodec::decode_hello(
+                response.body, &m_bounds);
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) override {
+            return deliver_ordered_logical_delivery_with_cancel(
+                envelope, bounds, nullptr);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_delivery_with_cancel(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            return deliver_logical_message(
+                LogicalDeliveryProtocolCodec::encode_delivery(envelope,
+                                                              effective_logical_bounds(bounds)),
+                cancel_token);
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr) override {
+            return deliver_ordered_logical_request_with_cancel(
+                request, bounds, nullptr);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_request_with_cancel(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            return deliver_logical_message(
+                LogicalDeliveryProtocolCodec::encode_delivery_request(
+                    request, effective_logical_bounds(bounds)),
+                cancel_token);
+        }
+
         void request_cancel() override {
             m_client.request_cancel();
         }
@@ -413,6 +538,26 @@ namespace sync {
         }
 
     private:
+        const CodecBounds* effective_logical_bounds(
+                const CodecBounds* bounds) const {
+            return bounds != nullptr ? bounds : &m_bounds;
+        }
+
+        LogicalDeliveryAcknowledgement deliver_logical_message(
+                const std::vector<std::uint8_t>& body,
+                const CancellationToken* cancel_token) {
+            clear_last_retry_hint();
+            const CancellationToken token = cancel_token != nullptr
+                ? *cancel_token
+                : CancellationToken();
+            const HttpSyncResponse response = m_client.post(
+                HttpSyncRoutes::logical_delivery_target(),
+                HttpSyncRoutes::content_type(), body, token);
+            require_ok_response(response, "logical delivery");
+            return LogicalDeliveryProtocolCodec::decode_acknowledgement(
+                response.body, &m_bounds);
+        }
+
         void require_ok_response(const HttpSyncResponse& response,
                                  const char* operation) const {
             if (response.status_code != 200) {

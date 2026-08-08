@@ -920,10 +920,17 @@ namespace sync {
                 ILogicalDeliveryPeer& peer,
                 const DbId& destination,
                 std::size_t limit = 0u,
-                const CodecBounds* bounds = nullptr) {
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) {
             try {
+                if (cancel_token != nullptr &&
+                    cancel_token->is_cancellation_requested()) {
+                    return LogicalDeliveryDispatchResult::failure(
+                        "Logical delivery dispatch cancelled", true);
+                }
                 const LogicalDeliveryHello local = logical_delivery_hello();
-                const LogicalDeliveryHello remote = peer.logical_delivery_hello();
+                const LogicalDeliveryHello remote =
+                    peer.logical_delivery_hello_with_cancel(cancel_token);
                 if (compare_node_id(remote.db_uuid, destination) != 0) {
                     return LogicalDeliveryDispatchResult::failure(
                         "Logical delivery peer destination db_uuid mismatch");
@@ -947,6 +954,11 @@ namespace sync {
                 const std::uint64_t known_tail =
                     logical_delivery_known_tail(destination);
                 for (std::size_t i = 0; i < pending.size(); ++i) {
+                    if (cancel_token != nullptr &&
+                        cancel_token->is_cancellation_requested()) {
+                        return LogicalDeliveryDispatchResult::failure(
+                            "Logical delivery dispatch cancelled", true);
+                    }
                     if (pending[i].origin_sequence <=
                         out.acknowledged_through) {
                         continue;
@@ -955,7 +967,8 @@ namespace sync {
                     request.envelope = pending[i];
                     request.sender_capabilities = local.capabilities;
                     const LogicalDeliveryAcknowledgement acknowledgement =
-                        peer.deliver_ordered_logical_request(request, bounds);
+                        peer.deliver_ordered_logical_request_with_cancel(
+                            request, bounds, cancel_token);
                     try {
                         validate_logical_delivery_acknowledgement_for_sender(
                             acknowledgement, pending[i], known_tail,

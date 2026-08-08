@@ -17,13 +17,15 @@ Russian version: [sync-RU.md](sync-RU.md).
 | --- | --- | --- |
 | Replicate ordinary table writes between database copies | Raw replication | `ThreadLocalChangeAccumulator`, `SyncCaptureScope`, `SyncWorker`, `ISyncPeer` |
 | Replicate a table through an explicit typed application schema | Logical frames | A table logical adapter, `LogicalChangeFrameCodec`, `SyncEngine::apply_logical_frame_bytes()` |
-| Preserve one authoritative ordered history and retry its delivery safely | Ordered logical delivery | `KeyOrderedMultiValueTable` logical adapter, durable outbox, `SyncEngine::apply_ordered_logical_delivery_envelope()` |
+| Preserve one authoritative ordered history and retry its delivery safely | Ordered logical delivery | Durable outbox, logical-capable `ISyncPeer`, `SyncWorkerOptions::enable_logical_delivery` |
 | Rebuild a fresh raw replica after changelog retention removed needed history | Full snapshot recovery | `SyncWorkerOptions::enable_full_snapshot_fallback`, `CompleteUserDatabase` |
 
 These modes are deliberately separate. The normal pull/push transport protocol
-carries raw DBI operations only. Logical frames and ordered delivery are
-application-delivered protocols; they are not silently converted to raw
-operations or inserted into a normal `ChangeBatch`.
+carries raw DBI operations only. Ordered logical delivery uses a separate
+capability-negotiated protocol and is enabled explicitly on `SyncWorker`; it is
+not silently converted to raw operations or inserted into a normal
+`ChangeBatch`. Direct logical frames remain application-delivered when the
+application owns routing, ordering, and retries itself.
 
 ## Concepts
 
@@ -46,7 +48,7 @@ flowchart LR
     Capture --> RawLog[_mdbxc_changelog]
     Capture --> Outbox[Ordered logical outbox]
     RawLog --> Peer[ISyncPeer or transport binding]
-    Outbox --> LogicalTransport[Application delivery protocol]
+    Outbox --> LogicalTransport[Logical-capable peer]
     Peer --> EngineB[SyncEngine on B]
     LogicalTransport --> EngineB
     EngineB --> UserDb[User DBIs]
@@ -54,9 +56,10 @@ flowchart LR
 ```
 
 The two arrows into `EngineB` represent different admission paths. A raw page
-uses `handle_push()`. A logical frame uses an explicit logical apply method;
-an ordered envelope additionally checks destination, origin order, replay
-state, and its persistent schema marker.
+uses `handle_push()`. A direct logical frame uses an explicit logical apply
+method. An ordered envelope travels through the logical peer protocol and
+additionally checks destination, origin order, replay state, and its persistent
+schema marker.
 
 ## Raw Replication
 
@@ -118,6 +121,24 @@ writes to the same logical data.
 Framework-neutral HTTP and WebSocket seams use `TransportMessageCodec`; the
 optional Simple-Web and Kurlyk bindings supply concrete transports without
 changing core messages.
+
+### Ordered Logical Delivery
+
+`ISyncPeer` also exposes an optional logical-delivery capability. `DirectSyncPeer`,
+`HttpSyncPeer`, and `WebSocketSyncPeer` implement it. HTTP uses dedicated
+logical hello and delivery routes; WebSocket distinguishes the logical protocol
+by its own magic. Neither transport changes `TransportMessageCodec` or the raw
+pull/push wire layout.
+
+Set `SyncWorkerOptions::enable_logical_delivery = true` to dispatch the local
+engine's durable outbox after a round has drained raw pull pages. The worker
+uses the current replication `DbId` as the logical destination, negotiates
+ordered delivery and cumulative acknowledgements, and removes only the
+acknowledged outbox prefix. `max_logical_deliveries` optionally bounds one
+round; zero drains the pending prefix. A raw-only peer is accepted while the
+outbox is empty, but produces a failed round without deleting queued frames
+when delivery is pending. Retryable acknowledgement failures likewise retain
+the unacknowledged suffix for the next round.
 
 Transport authentication, TLS, remote-address policy, rate limiting, request
 ids, and HTTP/WebSocket status mapping are adapter-local. They are intentionally
