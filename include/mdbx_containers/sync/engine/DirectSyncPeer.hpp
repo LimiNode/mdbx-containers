@@ -43,8 +43,14 @@ namespace sync {
 
         LogicalRecoveryResponse logical_recovery(
                 const LogicalRecoveryRequest& request) override {
+            return logical_recovery_with_cancel(request, nullptr);
+        }
+
+        LogicalRecoveryResponse logical_recovery_with_cancel(
+                const LogicalRecoveryRequest& request,
+                const CancellationToken* cancel_token = nullptr) override {
             assert(m_remote != nullptr);
-            return m_remote->handle_logical_recovery(request);
+            return m_remote->handle_logical_recovery(request, cancel_token);
         }
 
         LogicalDeliveryHello logical_delivery_hello() override {

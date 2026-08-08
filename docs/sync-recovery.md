@@ -87,7 +87,12 @@ The source captures one stable read baseline consisting of:
 - logical schema markers;
 - replay markers and pruning watermarks;
 - ordered-delivery receiver frontiers;
-- the source outbox tail and still-pending envelopes for this database.
+- the source outbox tail and still-pending envelopes for this requesting
+  receiver node.
+
+The pending source suffix is contiguous and ends at that receiver's known tail.
+It is not shared with another replica that happens to use the same database
+identity.
 
 The receiver requires a matching in-memory adapter for every baseline schema.
 It stages all physical pages in memory. On the final page it verifies the
@@ -100,6 +105,13 @@ This last rule makes a subsequent redelivery of an old pending source envelope
 a replay acknowledgement rather than a second mutation; the next source
 sequence then applies normally. A malformed baseline, missing adapter, or
 non-fresh logical receiver state aborts the final transaction.
+
+The source's materialization bounds cover both physical snapshot operations and
+logical baseline records. The receiver applies the same combined bound to its
+staged physical pages and final baseline before opening the destination write
+transaction. `LogicalRecoveryPeer` accepts cooperative cancellation for a
+recovery call; cancellation produces a retryable response and discards the
+unpublished source session. `DirectSyncPeer` implements this contract.
 
 ## Operator Procedure
 

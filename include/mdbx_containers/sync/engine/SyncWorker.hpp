@@ -880,7 +880,8 @@ namespace sync {
                     }
                     notify_stage_changed(make_stage_event(
                         SyncWorkerStage::PullStarted, result));
-                    response = m_peer.logical_recovery(request);
+                    response = m_peer.logical_recovery_with_cancel(
+                        request, &cancel_token);
                 }
                 {
                     SyncWorkerStageEvent event = make_stage_event(

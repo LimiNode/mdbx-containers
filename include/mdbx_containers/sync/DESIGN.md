@@ -1623,14 +1623,20 @@ not claim to repair or bootstrap logical replication.
 logical-aware fresh-replica path. It reuses bounded physical snapshot pages but
 delivers their final page with an immutable baseline containing schema markers,
 replay markers and watermarks, ordered receiver frontiers, and the source
-outbox tail plus pending envelopes. The importer creates replay markers for
-those pending source envelopes, restores the source frontier, and never copies
-the source outbox as receiver-local work. The final physical replacement, raw
-cursor bootstrap, and logical metadata restoration share one MDBX transaction.
-Missing matching destination adapters, corrupt baseline metadata, or existing
-logical receiver state abort that transaction. This capability is currently
-implemented by `DirectSyncPeer`; raw transports remain incapable until they
-implement the distinct logical-recovery wire contract.
+outbox tail plus pending envelopes for the requesting receiver node. The
+pending suffix must be contiguous and end at that receiver's known tail. The
+importer creates replay markers for those pending source envelopes, restores
+the source frontier, and never copies the source outbox as receiver-local work.
+The final physical replacement, raw cursor bootstrap, and logical metadata
+restoration share one MDBX transaction. Missing matching destination adapters,
+corrupt baseline metadata, or existing logical receiver state abort that
+transaction. Source materialization and receiver staging use one shared budget
+for physical operations and logical baseline records; source enumeration spends
+that budget before retaining each logical record. `LogicalRecoveryPeer` also
+accepts a cooperative cancellation token: a cancelled materialization returns a
+retryable failure and publishes no snapshot session. This capability is
+currently implemented by `DirectSyncPeer`; raw transports remain incapable
+until they implement the distinct logical-recovery wire contract.
 
 `SyncEngine::apply_full_snapshot_chunk()` stages all pages in bounded process
 memory and validates immutable page-zero metadata on every continuation. Only

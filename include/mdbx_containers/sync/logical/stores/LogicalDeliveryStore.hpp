@@ -168,29 +168,31 @@ namespace sync {
             return found;
         }
 
-        /// \brief Lists persisted logical delivery marker identities.
-        /// \param limit Maximum number of markers to return, or zero for all.
-        std::vector<LogicalDeliveryMarkerInfo> list_markers(
-                MDBX_txn* txn,
-                std::size_t limit = 0) const {
-            txn = checked_txn(txn, "LogicalDeliveryStore::list_markers");
+        /// \brief Visits persisted logical delivery marker identities.
+        /// \details The visitor runs while the MDBX cursor is open and may
+        /// throw to stop enumeration without retaining later markers.
+        template <typename Visitor>
+        void for_each_marker(MDBX_txn* txn, Visitor visitor,
+                             std::size_t limit = 0u) const {
+            txn = checked_txn(txn, "LogicalDeliveryStore::for_each_marker");
             open_const(txn);
             MDBX_cursor* cursor = nullptr;
             check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
                        "LogicalDeliveryStore cursor open failed");
-            std::vector<LogicalDeliveryMarkerInfo> out;
+            std::size_t visited = 0u;
             try {
                 MDBX_val key;
                 MDBX_val value;
                 int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
                 while (rc == MDBX_SUCCESS) {
-                    out.push_back(decode_and_validate_marker(key, value));
-                    if (limit != 0 && out.size() >= limit) {
+                    visitor(decode_and_validate_marker(key, value));
+                    ++visited;
+                    if (limit != 0u && visited >= limit) {
                         break;
                     }
                     rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
                 }
-                if (rc != MDBX_NOTFOUND && (limit == 0 || out.size() < limit)) {
+                if (rc != MDBX_NOTFOUND && (limit == 0u || visited < limit)) {
                     check_mdbx(rc, "LogicalDeliveryStore cursor read failed");
                 }
             } catch (...) {
@@ -198,21 +200,31 @@ namespace sync {
                 throw;
             }
             mdbx_cursor_close(cursor);
+        }
+
+        /// \brief Lists persisted logical delivery marker identities.
+        /// \param limit Maximum number of markers to return, or zero for all.
+        std::vector<LogicalDeliveryMarkerInfo> list_markers(
+                MDBX_txn* txn,
+                std::size_t limit = 0) const {
+            std::vector<LogicalDeliveryMarkerInfo> out;
+            for_each_marker(txn,
+                [&out](const LogicalDeliveryMarkerInfo& marker) {
+                    out.push_back(marker);
+                }, limit);
             return out;
         }
 
-        /// \brief Lists every persisted replay-pruning watermark.
+        /// \brief Visits every persisted replay-pruning watermark.
         /// \details The optional watermark DBI remains absent when no marker
-        /// has ever been pruned. Recovery preserves that absence as an empty
-        /// result instead of creating it while reading.
-        std::vector<LogicalDeliveryWatermarkInfo> list_watermarks(
-                MDBX_txn* txn) const {
+        /// has ever been pruned. The visitor is not called when it is absent.
+        template <typename Visitor>
+        void for_each_watermark(MDBX_txn* txn, Visitor visitor) const {
             txn = checked_txn(txn,
-                              "LogicalDeliveryStore::list_watermarks");
+                              "LogicalDeliveryStore::for_each_watermark");
             open_const(txn);
-            std::vector<LogicalDeliveryWatermarkInfo> out;
             if (!open_watermark_if_exists(txn)) {
-                return out;
+                return;
             }
             MDBX_cursor* cursor = nullptr;
             check_mdbx(mdbx_cursor_open(txn, m_watermark_dbi, &cursor),
@@ -225,7 +237,7 @@ namespace sync {
                     LogicalDeliveryWatermarkInfo info;
                     info.origin_node_id = decode_watermark_origin(key);
                     info.sequence = decode_watermark(value);
-                    out.push_back(info);
+                    visitor(info);
                     rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
                 }
                 if (rc != MDBX_NOTFOUND) {
@@ -237,6 +249,19 @@ namespace sync {
                 throw;
             }
             mdbx_cursor_close(cursor);
+        }
+
+        /// \brief Lists every persisted replay-pruning watermark.
+        /// \details The optional watermark DBI remains absent when no marker
+        /// has ever been pruned. Recovery preserves that absence as an empty
+        /// result instead of creating it while reading.
+        std::vector<LogicalDeliveryWatermarkInfo> list_watermarks(
+                MDBX_txn* txn) const {
+            std::vector<LogicalDeliveryWatermarkInfo> out;
+            for_each_watermark(txn,
+                [&out](const LogicalDeliveryWatermarkInfo& watermark) {
+                    out.push_back(watermark);
+                });
             return out;
         }
 

@@ -115,19 +115,17 @@ namespace sync {
             return found;
         }
 
-        /// \brief Lists every persisted ordered-delivery frontier.
-        /// \details All entries are decoded before returning. This is used by
-        /// the logical recovery baseline, which transfers receiver ordering
-        /// state as data rather than treating it as an implicit local cache.
-        std::vector<LogicalDeliveryOrderEntry> list_entries(
-                MDBX_txn* txn) const {
+        /// \brief Visits every persisted ordered-delivery frontier.
+        /// \details The visitor runs while the MDBX cursor is open and may
+        /// stop enumeration by throwing.
+        template <typename Visitor>
+        void for_each_entry(MDBX_txn* txn, Visitor visitor) const {
             txn = checked_txn(txn,
-                              "LogicalDeliveryOrderStore::list_entries");
+                              "LogicalDeliveryOrderStore::for_each_entry");
             open_existing(txn);
             MDBX_cursor* cursor = nullptr;
             check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
                        "LogicalDeliveryOrderStore cursor open failed");
-            std::vector<LogicalDeliveryOrderEntry> out;
             try {
                 MDBX_val key;
                 MDBX_val value;
@@ -136,7 +134,7 @@ namespace sync {
                     LogicalDeliveryOrderEntry entry;
                     entry.origin_node_id = decode_origin(key);
                     entry.acknowledged_through = decode_value(value);
-                    out.push_back(entry);
+                    visitor(entry);
                     rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
                 }
                 if (rc != MDBX_NOTFOUND) {
@@ -148,6 +146,18 @@ namespace sync {
                 throw;
             }
             mdbx_cursor_close(cursor);
+        }
+
+        /// \brief Lists every persisted ordered-delivery frontier.
+        /// \details All entries are decoded before returning. This is used by
+        /// the logical recovery baseline, which transfers receiver ordering
+        /// state as data rather than treating it as an implicit local cache.
+        std::vector<LogicalDeliveryOrderEntry> list_entries(
+                MDBX_txn* txn) const {
+            std::vector<LogicalDeliveryOrderEntry> out;
+            for_each_entry(txn, [&out](const LogicalDeliveryOrderEntry& entry) {
+                out.push_back(entry);
+            });
             return out;
         }
 

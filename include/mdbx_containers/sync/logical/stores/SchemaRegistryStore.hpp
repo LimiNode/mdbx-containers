@@ -188,15 +188,16 @@ namespace sync {
             return out;
         }
 
-        /// \brief Lists all schema markers with fully decoded records.
-        std::vector<LogicalSchemaRegistryEntry> list_entries(
-                MDBX_txn* txn) const {
-            txn = checked_txn(txn, "SchemaRegistryStore::list_entries");
+        /// \brief Visits all schema markers with fully decoded records.
+        /// \details The visitor runs while the MDBX cursor is open. It may
+        /// throw to stop enumeration without accumulating the remaining state.
+        template <typename Visitor>
+        void for_each_entry(MDBX_txn* txn, Visitor visitor) const {
+            txn = checked_txn(txn, "SchemaRegistryStore::for_each_entry");
             open_const(txn);
             MDBX_cursor* cursor = nullptr;
             check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
                        "SchemaRegistryStore cursor open failed");
-            std::vector<LogicalSchemaRegistryEntry> out;
             try {
                 MDBX_val key;
                 MDBX_val value;
@@ -210,7 +211,7 @@ namespace sync {
                     const char* data = static_cast<const char*>(key.iov_base);
                     entry.schema_id.assign(data, data + key.iov_len);
                     decode_record(value, entry.schema_id, entry.record);
-                    out.push_back(entry);
+                    visitor(entry);
                     rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
                 }
                 if (rc != MDBX_NOTFOUND) {
@@ -221,6 +222,15 @@ namespace sync {
                 throw;
             }
             mdbx_cursor_close(cursor);
+        }
+
+        /// \brief Lists all schema markers with fully decoded records.
+        std::vector<LogicalSchemaRegistryEntry> list_entries(
+                MDBX_txn* txn) const {
+            std::vector<LogicalSchemaRegistryEntry> out;
+            for_each_entry(txn, [&out](const LogicalSchemaRegistryEntry& entry) {
+                out.push_back(entry);
+            });
             return out;
         }
 

@@ -87,7 +87,11 @@ HTTP- и WebSocket-binding не считаются capable для logical recove
 - logical schema markers;
 - replay markers и pruning watermarks;
 - ordered-delivery receiver frontiers;
-- source outbox tail и ещё не подтверждённые envelopes для этой БД.
+- source outbox tail и ещё не подтверждённые envelopes для конкретного
+  requesting receiver node.
+
+Pending source suffix непрерывен и заканчивается на known tail этого receiver.
+Он не общий с другой репликой, даже если у неё тот же database identity.
 
 Получатель требует совместимый in-memory adapter для каждой schema из
 baseline. Физические страницы staging'уются в памяти. На final page он
@@ -100,6 +104,13 @@ transaction. Source outbox не копируется как local outbox пол�
 replay acknowledgement, а не второе изменение; следующий source sequence
 применяется обычно. Повреждённый baseline, отсутствующий adapter или не fresh
 logical state получателя откатывают final transaction.
+
+Source materialization bounds покрывают и physical snapshot operations, и
+logical baseline records. Receiver применяет тот же combined bound к staged
+physical pages и final baseline до открытия destination write transaction.
+`LogicalRecoveryPeer` принимает cooperative cancellation token для recovery
+call; cancellation даёт retryable response и отбрасывает неопубликованную
+source session. Этот контракт поддерживает `DirectSyncPeer`.
 
 ## Процедура оператора
 

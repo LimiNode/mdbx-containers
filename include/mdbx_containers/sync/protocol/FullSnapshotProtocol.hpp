@@ -59,9 +59,11 @@ namespace sync {
     };
 
     /// \brief Receiver-side bounds for one staged full snapshot import.
-    /// \details The initial importer keeps pages only in process memory until
-    /// the final page. These bounds prevent a peer from accumulating an
-    /// unbounded replacement plan before the one atomic destination commit.
+    /// \details The importer keeps pages only in process memory until the
+    /// final page. These bounds prevent a peer from accumulating an unbounded
+    /// replacement plan before the one atomic destination commit. Logical-aware
+    /// recovery spends the same budget on its final logical baseline, including
+    /// schema, replay, ordering, and pending-delivery records.
     struct FullSnapshotImportOptions {
         std::uint64_t max_staged_operations = 1000000u;
         std::uint64_t max_staged_bytes =

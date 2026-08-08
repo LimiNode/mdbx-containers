@@ -2843,7 +2843,7 @@ void test_engine_recovers_logical_baseline_atomically() {
             source_adapter.begin_capture_session();
         session->insert_or_assign("first", "one");
         const sync::LogicalDeliveryEnvelope envelope =
-            session->commit_to_outbox(source, db_id);
+            session->commit_to_outbox(source, db_id, replica_node);
         if (envelope.origin_sequence != 1u) {
             throw std::runtime_error("logical recovery source did not enqueue sequence one");
         }
@@ -2871,6 +2871,28 @@ void test_engine_recovers_logical_baseline_atomically() {
         throw std::runtime_error("logical recovery source did not return final baseline");
     }
 
+    sync::FullSnapshotExportOptions exact_budget = options;
+    exact_budget.max_materialized_operations = 4u;
+    source.set_full_snapshot_export_options(exact_budget);
+    const sync::LogicalRecoveryResponse exact_budget_response =
+        source.handle_logical_recovery(request);
+    if (!exact_budget_response.ok || !exact_budget_response.has_baseline) {
+        throw std::runtime_error(
+            "logical recovery exact combined materialization budget was rejected");
+    }
+    sync::FullSnapshotExportOptions insufficient_budget = exact_budget;
+    insufficient_budget.max_materialized_operations = 3u;
+    source.set_full_snapshot_export_options(insufficient_budget);
+    const sync::LogicalRecoveryResponse insufficient_budget_response =
+        source.handle_logical_recovery(request);
+    if (insufficient_budget_response.ok ||
+        insufficient_budget_response.error_code !=
+            sync::SyncResponseErrorCode::BatchTooLarge) {
+        throw std::runtime_error(
+            "logical recovery accepted an insufficient combined materialization budget");
+    }
+    source.set_full_snapshot_export_options(options);
+
     sync::LogicalRecoveryBaseline malformed = response.baseline;
     malformed.source_db_uuid = make_node(0xE1);
     bool rejected_baseline = false;
@@ -2884,6 +2906,38 @@ void test_engine_recovers_logical_baseline_atomically() {
                                      std::string("first"))) {
         throw std::runtime_error(
             "malformed logical recovery baseline mutated destination state");
+    }
+
+    sync::LogicalRecoveryBaseline truncated = response.baseline;
+    truncated.source_outbox_known_tail = 2u;
+    bool rejected_truncated_suffix = false;
+    try {
+        (void)rejected.apply_logical_recovery_chunk(
+            response.snapshot_chunk, &truncated);
+    } catch (const std::invalid_argument&) {
+        rejected_truncated_suffix = true;
+    }
+    if (!rejected_truncated_suffix || kv_has(rejected_conn, rejected_documents,
+                                              std::string("first"))) {
+        throw std::runtime_error(
+            "truncated logical recovery suffix mutated destination state");
+    }
+
+    sync::FullSnapshotImportOptions import_limits;
+    import_limits.max_staged_operations = 2u;
+    import_limits.max_staged_bytes = 8192u;
+    rejected.set_full_snapshot_import_options(import_limits);
+    bool rejected_import_budget = false;
+    try {
+        (void)rejected.apply_logical_recovery_chunk(
+            response.snapshot_chunk, &response.baseline);
+    } catch (const std::length_error&) {
+        rejected_import_budget = true;
+    }
+    if (!rejected_import_budget || kv_has(rejected_conn, rejected_documents,
+                                          std::string("first"))) {
+        throw std::runtime_error(
+            "logical recovery baseline exceeded import budget after mutation");
     }
 
     if (!replica.apply_logical_recovery_chunk(
@@ -2907,12 +2961,13 @@ void test_engine_recovers_logical_baseline_atomically() {
         std::unique_ptr<LogicalAdapter::LogicalCaptureSession> session =
             source_adapter.begin_capture_session();
         session->insert_or_assign("second", "two");
-        (void)session->commit_to_outbox(source, db_id);
+        (void)session->commit_to_outbox(source, db_id, replica_node);
     }
     sync::DirectSyncPeer peer(&replica);
     const sync::LogicalDeliveryDispatchResult dispatched =
-        source.deliver_pending_logical_deliveries(peer, db_id);
-    if (!dispatched.ok || !source.pending_logical_deliveries(db_id).empty() ||
+        source.deliver_pending_logical_deliveries(peer, db_id, replica_node);
+    if (!dispatched.ok || !source.pending_logical_deliveries(
+            db_id, replica_node).empty() ||
         kv_or_throw(replica_conn, replica_documents, std::string("second"),
                     "logical recovery continued delivery") != "two") {
         throw std::runtime_error(
@@ -2925,6 +2980,58 @@ void test_engine_recovers_logical_baseline_atomically() {
     cleanup(source_path);
     cleanup(replica_path);
     cleanup(rejected_path);
+}
+
+void test_engine_cancels_direct_logical_recovery_materialization() {
+    using namespace mdbxc;
+    const std::string source_path =
+        "test_engine_cancel_direct_logical_recovery_source.mdbx";
+    cleanup(source_path);
+
+    const sync::NodeId source_node = make_node(0x92);
+    const sync::NodeId replica_node = make_node(0xA2);
+    const sync::DbId db_id = make_node(0xD2);
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 15000u;
+    options.max_materialized_bytes = 128ULL * 1024ULL * 1024ULL;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(source_conn, sync::ConflictPolicy::Reject, options);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<int, std::string> documents(source_conn, "documents");
+    const std::string payload(4096u, 'x');
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        for (int i = 0; i < 10000; ++i) {
+            documents.insert_or_assign(i, payload, txn.handle());
+        }
+        txn.commit();
+    }
+
+    sync::DirectSyncPeer peer(&source);
+    sync::LogicalRecoveryRequest request;
+    request.requester = replica_node;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    sync::CancellationSource cancellation;
+    const sync::CancellationToken cancellation_token = cancellation.token();
+    sync::LogicalRecoveryResponse response;
+    std::thread recovery([&peer, &request, &cancellation_token, &response]() {
+        response = peer.logical_recovery_with_cancel(
+            request, &cancellation_token);
+    });
+    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    cancellation.request_cancel();
+    recovery.join();
+    if (response.ok || !response.error_retryable ||
+        response.error.find("cancelled") == std::string::npos) {
+        throw std::runtime_error(
+            "direct logical recovery did not stop materialization after cancellation");
+    }
+
+    source_conn->disconnect();
+    cleanup(source_path);
 }
 
 void test_engine_changelog_page_rejects_full_snapshot_request() {
@@ -3581,6 +3688,8 @@ int main() {
           &test_engine_full_snapshot_import_rejects_invalid_replacement_plan },
         { "test_engine_recovers_logical_baseline_atomically",
           &test_engine_recovers_logical_baseline_atomically },
+        { "test_engine_cancels_direct_logical_recovery_materialization",
+          &test_engine_cancels_direct_logical_recovery_materialization },
         { "test_engine_changelog_page_rejects_full_snapshot_request",
           &test_engine_changelog_page_rejects_full_snapshot_request },
         { "test_engine_pull_reports_snapshot_required_after_prune",

@@ -3103,7 +3103,7 @@ void test_worker_recovers_logical_fresh_replica() {
         std::unique_ptr<LogicalAdapter::LogicalCaptureSession> session =
             source_adapter.begin_capture_session();
         session->insert_or_assign("recovered", "value");
-        (void)session->commit_to_outbox(source, db_id);
+        (void)session->commit_to_outbox(source, db_id, replica_node);
     }
 
     SnapshotRequiredLogicalRecoveryPeer peer(source);

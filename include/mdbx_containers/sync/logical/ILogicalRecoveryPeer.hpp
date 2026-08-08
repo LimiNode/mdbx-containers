@@ -12,6 +12,8 @@
 namespace mdbxc {
 namespace sync {
 
+    class CancellationToken;
+
     /// \brief Capability-gated peer for the separate logical recovery route.
     class ILogicalRecoveryPeer {
     public:
@@ -23,6 +25,16 @@ namespace sync {
                 const LogicalRecoveryRequest&) {
             throw std::logic_error(
                 "Sync peer does not support logical recovery");
+        }
+
+        /// \brief Performs logical recovery with optional cancellation.
+        /// \details The default preserves existing peers that do not own an
+        /// interruptible recovery transport operation.
+        virtual LogicalRecoveryResponse logical_recovery_with_cancel(
+                const LogicalRecoveryRequest& request,
+                const CancellationToken* cancel_token = nullptr) {
+            (void)cancel_token;
+            return logical_recovery(request);
         }
     };
 
