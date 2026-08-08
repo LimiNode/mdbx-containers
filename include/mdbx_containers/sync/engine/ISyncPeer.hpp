@@ -35,7 +35,8 @@ namespace sync {
     /// must allow \c request_cancel() to be called concurrently with
     /// \c pull() / \c push() and tolerate calls that race with operation
     /// startup or completion.
-    class ISyncPeer : public ILogicalDeliveryPeer {
+    class ISyncPeer : public ILogicalDeliveryPeer,
+                      public ILogicalRecoveryPeer {
     public:
         virtual ~ISyncPeer() {}
 
