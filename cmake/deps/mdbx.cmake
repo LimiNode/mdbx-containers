@@ -208,6 +208,11 @@ function(_mdbx_try_submodule out_ok)
 
         # Upstream usually exposes mdbx-static (or mdbx)
         if(TARGET mdbx-static)
+            if(MINGW AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+                # Keep the PE TLS directory required by libmdbx's callback.
+                target_link_options(mdbx-static INTERFACE
+                    "-Wl,--undefined=_tls_used")
+            endif()
             _mdbx_make_aliases("" "mdbx-static")
             if(NOT TARGET mdbx::mdbx)
                 # canonical shared alias points to static in bundled builds
@@ -245,6 +250,11 @@ function(_mdbx_try_fetchcontent out_ok)
     FetchContent_MakeAvailable(libmdbx)
 
     if(TARGET mdbx-static)
+        if(MINGW AND CMAKE_SIZEOF_VOID_P EQUAL 8)
+            # Keep the PE TLS directory required by libmdbx's callback.
+            target_link_options(mdbx-static INTERFACE
+                "-Wl,--undefined=_tls_used")
+        endif()
         _mdbx_make_aliases("" "mdbx-static")
         if(NOT TARGET mdbx::mdbx)
             add_library(mdbx::mdbx ALIAS mdbx-static)
