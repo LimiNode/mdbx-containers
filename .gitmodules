@@ -1,6 +1,6 @@
 [submodule "external/libmdbx"]
 	path = external/libmdbx
-	url = https://github.com/erthink/libmdbx.git
+	url = https://github.com/LimiNode/libmdbx.git
 [submodule ".github/doxygen-awesome-css"]
 	path = .github/doxygen-awesome-css
 	url = https://github.com/jothepro/doxygen-awesome-css.git
