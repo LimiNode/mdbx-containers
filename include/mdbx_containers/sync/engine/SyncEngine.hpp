@@ -1741,7 +1741,9 @@ namespace sync {
             session.logical_recovery_baseline.source_db_uuid =
                 session.source_db_uuid;
             session.logical_recovery_baseline.snapshot_id = session.snapshot_id;
-            budget.consume(0u, session.snapshot_id.size(),
+            budget.consume(0u,
+                logical_recovery_baseline_header_bytes(
+                    session.logical_recovery_baseline),
                 "logical recovery baseline exceeds materialization budget");
             schemas.for_each_entry(txn,
                 [&session, &budget, cancel_token](
@@ -1763,7 +1765,7 @@ namespace sync {
                 [&session, &budget, cancel_token](
                         const LogicalDeliveryWatermarkInfo& watermark) {
                     throw_if_cancelled(cancel_token);
-                    budget.consume(1u, 0u,
+                    budget.consume(1u, logical_recovery_watermark_bytes(watermark),
                         "logical recovery baseline exceeds materialization budget");
                     session.logical_recovery_baseline.delivery_watermarks.push_back(
                         watermark);
@@ -1772,7 +1774,7 @@ namespace sync {
                 [&session, &budget, cancel_token](
                         const LogicalDeliveryOrderEntry& entry) {
                     throw_if_cancelled(cancel_token);
-                    budget.consume(1u, 0u,
+                    budget.consume(1u, logical_recovery_order_bytes(entry),
                         "logical recovery baseline exceeds materialization budget");
                     session.logical_recovery_baseline.delivery_order.push_back(entry);
                 });
@@ -1807,6 +1809,8 @@ namespace sync {
         static std::uint64_t logical_recovery_schema_bytes(
                 const LogicalSchemaRegistryEntry& entry) {
             std::uint64_t bytes = 0u;
+            add_logical_recovery_baseline_bytes(bytes,
+                                                sizeof(LogicalSchemaRegistryEntry));
             add_logical_recovery_baseline_bytes(bytes, entry.schema_id.size());
             add_logical_recovery_baseline_bytes(bytes,
                                                 entry.record.dbi_name.size());
@@ -1820,6 +1824,8 @@ namespace sync {
         static std::uint64_t logical_recovery_marker_bytes(
                 const LogicalDeliveryMarkerInfo& marker) {
             std::uint64_t bytes = 0u;
+            add_logical_recovery_baseline_bytes(bytes,
+                                                sizeof(LogicalDeliveryMarkerInfo));
             add_logical_recovery_baseline_bytes(bytes, marker.frame_id.size());
             add_logical_recovery_baseline_bytes(bytes,
                                                 marker.encoded_frame.size());
@@ -1830,10 +1836,30 @@ namespace sync {
                 const LogicalDeliveryEnvelope& envelope) {
             const std::vector<std::uint8_t> encoded =
                 LogicalDeliveryEnvelopeCodec::encode(envelope);
-            if (encoded.size() > (std::numeric_limits<std::uint64_t>::max)()) {
-                throw std::length_error("logical recovery baseline size overflow");
-            }
-            return static_cast<std::uint64_t>(encoded.size());
+            std::uint64_t bytes = 0u;
+            add_logical_recovery_baseline_bytes(bytes,
+                                                sizeof(LogicalDeliveryEnvelope));
+            add_logical_recovery_baseline_bytes(bytes, encoded.size());
+            return bytes;
+        }
+
+        static std::uint64_t logical_recovery_watermark_bytes(
+                const LogicalDeliveryWatermarkInfo&) {
+            return sizeof(LogicalDeliveryWatermarkInfo);
+        }
+
+        static std::uint64_t logical_recovery_order_bytes(
+                const LogicalDeliveryOrderEntry&) {
+            return sizeof(LogicalDeliveryOrderEntry);
+        }
+
+        static std::uint64_t logical_recovery_baseline_header_bytes(
+                const LogicalRecoveryBaseline& baseline) {
+            std::uint64_t bytes = 0u;
+            add_logical_recovery_baseline_bytes(bytes,
+                                                sizeof(LogicalRecoveryBaseline));
+            add_logical_recovery_baseline_bytes(bytes, baseline.snapshot_id.size());
+            return bytes;
         }
 
         static std::uint64_t logical_recovery_baseline_entry_count(
@@ -1860,8 +1886,7 @@ namespace sync {
 
         static std::uint64_t logical_recovery_baseline_bytes(
                 const LogicalRecoveryBaseline& baseline) {
-            std::uint64_t bytes = 0u;
-            add_logical_recovery_baseline_bytes(bytes, baseline.snapshot_id.size());
+            std::uint64_t bytes = logical_recovery_baseline_header_bytes(baseline);
             for (std::size_t i = 0u; i < baseline.schemas.size(); ++i) {
                 const std::uint64_t entry_bytes =
                     logical_recovery_schema_bytes(baseline.schemas[i]);
@@ -1874,6 +1899,25 @@ namespace sync {
             for (std::size_t i = 0u; i < baseline.delivery_markers.size(); ++i) {
                 const std::uint64_t entry_bytes =
                     logical_recovery_marker_bytes(baseline.delivery_markers[i]);
+                if (bytes > (std::numeric_limits<std::uint64_t>::max)() -
+                        entry_bytes) {
+                    throw std::length_error("logical recovery baseline size overflow");
+                }
+                bytes += entry_bytes;
+            }
+            for (std::size_t i = 0u;
+                 i < baseline.delivery_watermarks.size(); ++i) {
+                const std::uint64_t entry_bytes = logical_recovery_watermark_bytes(
+                    baseline.delivery_watermarks[i]);
+                if (bytes > (std::numeric_limits<std::uint64_t>::max)() -
+                        entry_bytes) {
+                    throw std::length_error("logical recovery baseline size overflow");
+                }
+                bytes += entry_bytes;
+            }
+            for (std::size_t i = 0u; i < baseline.delivery_order.size(); ++i) {
+                const std::uint64_t entry_bytes = logical_recovery_order_bytes(
+                    baseline.delivery_order[i]);
                 if (bytes > (std::numeric_limits<std::uint64_t>::max)() -
                         entry_bytes) {
                     throw std::length_error("logical recovery baseline size overflow");

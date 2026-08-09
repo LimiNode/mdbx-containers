@@ -2185,3 +2185,13 @@ When HLC or similar lands in v0.2, it goes in as opaque bytes inside
 - Public sync API stability after the first external transport adapter.
 - `PeerRegistry` for multi-peer fan-out — single peer per sync invocation
   in v0.1.
+
+In v0.1 one capture/session commit atomically publishes an ordered envelope for
+exactly one receiver; atomic multi-recipient fan-out is deferred. Moving that
+single receiver to another replica requires logical-aware recovery first: the
+new receiver must import the origin frontier before it can accept the next
+globally sequenced event. Sending a new route to a fresh receiver fails closed
+with an ordered-delivery gap.
+
+Before the first external sync release, logical-store layouts and logical wire
+codec versions do not carry a persistent compatibility or migration guarantee.

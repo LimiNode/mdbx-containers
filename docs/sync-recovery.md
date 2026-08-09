@@ -94,6 +94,15 @@ The pending source suffix is contiguous and ends at that receiver's known tail.
 It is not shared with another replica that happens to use the same database
 identity.
 
+An ordered logical event has one global identity per database and origin:
+`(DbId, origin_node_id, origin_sequence)`. The source does not allocate a new
+`origin_sequence` when its v0.1 single receiver route moves. Pending outbox
+entries and acknowledgements remain receiver-specific. Therefore, move a route
+from receiver B to a fresh receiver C only by first performing logical-aware
+recovery from B to C. That imports B's ordered frontiers, so C can accept the
+next global event from the source. Sending a later event directly to an
+unrecovered C fails closed as an ordered sequence gap.
+
 The receiver requires a matching in-memory adapter for every baseline schema.
 It stages all physical pages in memory. On the final page it verifies the
 baseline, replaces user DBIs, bootstraps the raw cursor, restores logical
@@ -107,11 +116,12 @@ sequence then applies normally. A malformed baseline, missing adapter, or
 non-fresh logical receiver state aborts the final transaction.
 
 The source's materialization bounds cover both physical snapshot operations and
-logical baseline records. The receiver applies the same combined bound to its
-staged physical pages and final baseline before opening the destination write
-transaction. `LogicalRecoveryPeer` accepts cooperative cancellation for a
-recovery call; cancellation produces a retryable response and discards the
-unpublished source session. `DirectSyncPeer` implements this contract.
+the fixed and variable footprint of logical baseline records. The receiver
+applies the same combined bound to its staged physical pages and final baseline
+before opening the destination write transaction. `LogicalRecoveryPeer` accepts
+cooperative cancellation for a recovery call; cancellation produces a retryable
+response and discards the unpublished source session. `DirectSyncPeer`
+implements this contract.
 
 ## Operator Procedure
 

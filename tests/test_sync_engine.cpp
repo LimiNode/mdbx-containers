@@ -2982,6 +2982,184 @@ void test_engine_recovers_logical_baseline_atomically() {
     cleanup(rejected_path);
 }
 
+void test_engine_recovery_preserves_global_origin_sequence_across_receiver_cutover() {
+    using namespace mdbxc;
+    const std::string source_path = "test_engine_global_sequence_source.mdbx";
+    const std::string receiver_path = "test_engine_global_sequence_receiver.mdbx";
+    const std::string recovered_path = "test_engine_global_sequence_recovered.mdbx";
+    cleanup(source_path);
+    cleanup(receiver_path);
+    cleanup(recovered_path);
+
+    const sync::NodeId source_node = make_node(0x93);
+    const sync::NodeId receiver_node = make_node(0xA3);
+    const sync::NodeId recovered_node = make_node(0xB3);
+    const sync::DbId db_id = make_node(0xD3);
+    sync::FullSnapshotExportOptions recovery_options;
+    recovery_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
+    recovery_options.max_materialized_operations = 32u;
+    recovery_options.max_materialized_bytes = 8192u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    std::shared_ptr<Connection> receiver_conn = open_env(receiver_path);
+    std::shared_ptr<Connection> recovered_conn = open_env(recovered_path);
+    sync::SyncEngine source(source_conn);
+    sync::SyncEngine receiver(
+        receiver_conn, sync::ConflictPolicy::Reject, recovery_options);
+    sync::SyncEngine recovered(recovered_conn);
+    source.initialize_local_identity(source_node, db_id);
+    receiver.initialize_local_identity(receiver_node, db_id);
+    recovered.initialize_local_identity(recovered_node, db_id);
+    KeyValueTable<std::string, std::string> receiver_documents(
+        receiver_conn, "documents");
+    receiver_documents.insert_or_assign("baseline", "value");
+
+    const sync::LogicalChangeFrame frame;
+    const sync::LogicalDeliveryEnvelope first = source.enqueue_logical_delivery(
+        db_id, receiver_node, frame);
+    const sync::LogicalDeliveryEnvelope second = source.enqueue_logical_delivery(
+        db_id, receiver_node, frame);
+    if (first.origin_sequence != 1u || second.origin_sequence != 2u) {
+        throw std::runtime_error("source did not allocate global initial sequence");
+    }
+    sync::DirectLogicalDeliveryPeer receiver_peer(receiver);
+    const sync::LogicalDeliveryDispatchResult delivered_to_receiver =
+        source.deliver_pending_logical_deliveries(
+            receiver_peer, db_id, receiver_node);
+    if (!delivered_to_receiver.ok || delivered_to_receiver.delivered != 2u) {
+        throw std::runtime_error("source did not establish receiver frontier");
+    }
+
+    sync::LogicalRecoveryRequest request;
+    request.requester = recovered_node;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::LogicalRecoveryResponse response =
+        receiver.handle_logical_recovery(request);
+    if (!response.ok || response.has_more || !response.has_baseline ||
+        !recovered.apply_logical_recovery_chunk(
+            response.snapshot_chunk, &response.baseline).completed) {
+        throw std::runtime_error("logical recovery did not import receiver frontier");
+    }
+    {
+        auto txn = recovered_conn->transaction(TransactionMode::READ_ONLY);
+        sync::LogicalDeliveryOrderStore order(recovered_conn->env_handle());
+        if (order.last_applied(txn.handle(), source_node) != 2u) {
+            throw std::runtime_error("recovery did not preserve source frontier");
+        }
+    }
+
+    const sync::LogicalDeliveryEnvelope after_cutover =
+        source.enqueue_logical_delivery(db_id, recovered_node, frame);
+    if (after_cutover.origin_sequence != 3u) {
+        throw std::runtime_error(
+            "receiver cutover reallocated the origin event sequence");
+    }
+    sync::DirectLogicalDeliveryPeer recovered_peer(recovered);
+    const sync::LogicalDeliveryDispatchResult delivered_to_recovered =
+        source.deliver_pending_logical_deliveries(
+            recovered_peer, db_id, recovered_node);
+    if (!delivered_to_recovered.ok || delivered_to_recovered.delivered != 1u ||
+        !source.pending_logical_deliveries(db_id, recovered_node).empty()) {
+        throw std::runtime_error(
+            "recovered receiver rejected the next global origin event");
+    }
+    {
+        auto txn = recovered_conn->transaction(TransactionMode::READ_ONLY);
+        sync::LogicalDeliveryOrderStore order(recovered_conn->env_handle());
+        if (order.last_applied(txn.handle(), source_node) != 3u) {
+            throw std::runtime_error("recovered receiver did not advance frontier");
+        }
+    }
+
+    source_conn->disconnect();
+    receiver_conn->disconnect();
+    recovered_conn->disconnect();
+    cleanup(source_path);
+    cleanup(receiver_path);
+    cleanup(recovered_path);
+}
+
+void test_engine_recovery_counts_fixed_logical_baseline_records_in_byte_budget() {
+    using namespace mdbxc;
+    const std::string source_path =
+        "test_engine_logical_recovery_fixed_record_budget.mdbx";
+    const std::string receiver_path =
+        "test_engine_logical_recovery_fixed_record_budget_receiver.mdbx";
+    cleanup(source_path);
+    cleanup(receiver_path);
+
+    const sync::NodeId source_node = make_node(0x94);
+    const sync::NodeId requester_node = make_node(0xA4);
+    const sync::NodeId receiver_node = make_node(0xB4);
+    const sync::DbId db_id = make_node(0xD4);
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 64u;
+    options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    std::shared_ptr<Connection> receiver_conn = open_env(receiver_path);
+    sync::SyncEngine source(source_conn, sync::ConflictPolicy::Reject, options);
+    sync::SyncEngine receiver(receiver_conn);
+    source.initialize_local_identity(source_node, db_id);
+    receiver.initialize_local_identity(receiver_node, db_id);
+    KeyValueTable<std::string, std::string> documents(source_conn, "documents");
+    documents.insert_or_assign("document", "value");
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        sync::LogicalDeliveryOrderStore order(source_conn->env_handle());
+        for (std::uint8_t i = 0u; i < 32u; ++i) {
+            order.advance(txn.handle(),
+                          make_node(static_cast<std::uint8_t>(0x40u + i)), 1u);
+        }
+        txn.commit();
+    }
+
+    sync::LogicalRecoveryRequest request;
+    request.requester = requester_node;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::LogicalRecoveryResponse response =
+        source.handle_logical_recovery(request);
+    if (!response.ok || !response.has_baseline) {
+        throw std::runtime_error(
+            "logical recovery did not materialize frontier-only baseline");
+    }
+
+    sync::FullSnapshotImportOptions import_options;
+    import_options.max_staged_operations = 64u;
+    import_options.max_staged_bytes = 512u;
+    receiver.set_full_snapshot_import_options(import_options);
+    bool rejected_receiver_import = false;
+    try {
+        (void)receiver.apply_logical_recovery_chunk(
+            response.snapshot_chunk, &response.baseline);
+    } catch (const std::length_error&) {
+        rejected_receiver_import = true;
+    }
+    if (!rejected_receiver_import) {
+        throw std::runtime_error(
+            "logical recovery receiver omitted fixed frontier records from byte budget");
+    }
+
+    options.max_materialized_bytes = 512u;
+    source.set_full_snapshot_export_options(options);
+    const sync::LogicalRecoveryResponse bounded_response =
+        source.handle_logical_recovery(request);
+    if (bounded_response.ok || bounded_response.error_code !=
+            sync::SyncResponseErrorCode::BatchTooLarge) {
+        throw std::runtime_error(
+            "logical recovery omitted fixed frontier records from byte budget");
+    }
+
+    source_conn->disconnect();
+    receiver_conn->disconnect();
+    cleanup(source_path);
+    cleanup(receiver_path);
+}
+
 void test_engine_cancels_direct_logical_recovery_materialization() {
     using namespace mdbxc;
     const std::string source_path =
@@ -3688,6 +3866,10 @@ int main() {
           &test_engine_full_snapshot_import_rejects_invalid_replacement_plan },
         { "test_engine_recovers_logical_baseline_atomically",
           &test_engine_recovers_logical_baseline_atomically },
+        { "test_engine_recovery_preserves_global_origin_sequence_across_receiver_cutover",
+          &test_engine_recovery_preserves_global_origin_sequence_across_receiver_cutover },
+        { "test_engine_recovery_counts_fixed_logical_baseline_records_in_byte_budget",
+          &test_engine_recovery_counts_fixed_logical_baseline_records_in_byte_budget },
         { "test_engine_cancels_direct_logical_recovery_materialization",
           &test_engine_cancels_direct_logical_recovery_materialization },
         { "test_engine_changelog_page_rejects_full_snapshot_request",

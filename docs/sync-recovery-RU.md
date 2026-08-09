@@ -93,6 +93,15 @@ HTTP- и WebSocket-binding не считаются capable для logical recove
 Pending source suffix непрерывен и заканчивается на known tail этого receiver.
 Он не общий с другой репликой, даже если у неё тот же database identity.
 
+У упорядоченного logical event одна глобальная identity на database и origin:
+`(DbId, origin_node_id, origin_sequence)`. Source не выделяет новый
+`origin_sequence`, когда в v0.1 переносится единственный receiver route. Pending
+outbox entries и acknowledgements остаются receiver-specific. Поэтому route с
+receiver B на fresh receiver C переносится только через logical-aware recovery
+из B в C. Он импортирует ordered frontiers B, после чего C принимает следующий
+global event от source. Отправка более позднего event сразу на не
+восстановленный C fail-closed отклоняется как ordered sequence gap.
+
 Получатель требует совместимый in-memory adapter для каждой schema из
 baseline. Физические страницы staging'уются в памяти. На final page он
 проверяет baseline, заменяет user DBI, bootstrap'ит raw cursor,
@@ -106,11 +115,11 @@ replay acknowledgement, а не второе изменение; следующ�
 logical state получателя откатывают final transaction.
 
 Source materialization bounds покрывают и physical snapshot operations, и
-logical baseline records. Receiver применяет тот же combined bound к staged
-physical pages и final baseline до открытия destination write transaction.
-`LogicalRecoveryPeer` принимает cooperative cancellation token для recovery
-call; cancellation даёт retryable response и отбрасывает неопубликованную
-source session. Этот контракт поддерживает `DirectSyncPeer`.
+fixed/variable footprint logical baseline records. Receiver применяет тот же
+combined bound к staged physical pages и final baseline до открытия destination
+write transaction. `LogicalRecoveryPeer` принимает cooperative cancellation
+token для recovery call; cancellation даёт retryable response и отбрасывает
+неопубликованную source session. Этот контракт поддерживает `DirectSyncPeer`.
 
 ## Процедура оператора
 
