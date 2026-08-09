@@ -98,7 +98,7 @@ namespace sync {
         /// When enabled, the worker sends only the outbox prefix addressed to
         /// this worker's remote database and only after it has drained raw pull
         /// pages for the round. The peer must explicitly support logical
-        /// delivery whenever that prefix is non-empty.
+        /// delivery whenever the destination has pending logical entries.
         bool enable_logical_delivery = false;
 
         /// \brief Maximum logical envelopes delivered in one round.
