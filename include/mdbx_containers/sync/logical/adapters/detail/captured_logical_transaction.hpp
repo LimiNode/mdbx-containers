@@ -39,6 +39,7 @@ namespace detail {
         LogicalDeliveryEnvelope commit_pending_to_outbox(
                 ILogicalDeliveryOutbox& outbox,
                 const DbId& destination,
+                const NodeId& receiver,
                 const CodecBounds* bounds = nullptr) {
             ensure_active("Logical capture session is not active");
             LogicalChangeFrame frame;
@@ -46,7 +47,7 @@ namespace detail {
             try {
                 const LogicalDeliveryEnvelope envelope =
                     outbox.enqueue_logical_delivery(
-                        m_txn.handle(), destination, frame, bounds);
+                        m_txn.handle(), destination, receiver, frame, bounds);
                 m_txn.commit();
                 m_pending.clear();
                 m_active = false;

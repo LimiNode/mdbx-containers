@@ -33,6 +33,57 @@ namespace sync {
             return m_remote->handle_push(request);
         }
 
+        bool supports_logical_delivery() const override {
+            return true;
+        }
+
+        LogicalDeliveryHello logical_delivery_hello() override {
+            return logical_delivery_hello_with_cancel(nullptr);
+        }
+
+        LogicalDeliveryHello logical_delivery_hello_with_cancel(
+                const CancellationToken* cancel_token = nullptr) override {
+            (void)cancel_token;
+            assert(m_remote != nullptr);
+            return m_remote->logical_delivery_hello();
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) override {
+            return deliver_ordered_logical_delivery_with_cancel(
+                envelope, bounds, nullptr);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_delivery_with_cancel(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            (void)cancel_token;
+            assert(m_remote != nullptr);
+            return m_remote->apply_ordered_logical_delivery_envelope(
+                envelope, bounds);
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr) override {
+            return deliver_ordered_logical_request_with_cancel(
+                request, bounds, nullptr);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_request_with_cancel(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            (void)cancel_token;
+            assert(m_remote != nullptr);
+            return m_remote->apply_ordered_logical_delivery_request(
+                request, bounds);
+        }
+
     private:
         SyncEngine* m_remote;
     };

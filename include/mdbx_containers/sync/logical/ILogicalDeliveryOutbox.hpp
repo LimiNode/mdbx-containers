@@ -23,6 +23,7 @@ namespace sync {
         virtual LogicalDeliveryEnvelope enqueue_logical_delivery(
                 MDBX_txn* txn,
                 const DbId& destination,
+                const NodeId& receiver,
                 const LogicalChangeFrame& frame,
                 const CodecBounds* bounds = nullptr) = 0;
     };

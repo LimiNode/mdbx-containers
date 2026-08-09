@@ -215,6 +215,57 @@ private:
     mdbxc::sync::PullResponse m_response;
 };
 
+class RetryableLogicalPeer : public mdbxc::sync::ISyncPeer {
+public:
+    explicit RetryableLogicalPeer(const mdbxc::sync::DbId& db_id)
+        : m_db_id(db_id) {}
+
+    mdbxc::sync::PullResponse pull(
+            const mdbxc::sync::PullRequest& request) override {
+        (void)request;
+        return mdbxc::sync::PullResponse();
+    }
+
+    mdbxc::sync::PushResponse push(
+            const mdbxc::sync::PushRequest& request) override {
+        (void)request;
+        return mdbxc::sync::PushResponse();
+    }
+
+    bool supports_logical_delivery() const override {
+        return true;
+    }
+
+    mdbxc::sync::LogicalDeliveryHello logical_delivery_hello() override {
+        mdbxc::sync::LogicalDeliveryHello hello;
+        hello.node_id = make_node(0xE1);
+        hello.db_uuid = m_db_id;
+        hello.capabilities.flags = static_cast<std::uint64_t>(
+            mdbxc::sync::LogicalDeliveryCapability::OrderedDelivery) |
+            static_cast<std::uint64_t>(
+                mdbxc::sync::LogicalDeliveryCapability::CumulativeAcknowledgement);
+        return hello;
+    }
+
+    mdbxc::sync::LogicalDeliveryAcknowledgement
+    deliver_ordered_logical_request(
+            const mdbxc::sync::LogicalDeliveryRequest& request,
+            const mdbxc::sync::CodecBounds* bounds = nullptr) override {
+        (void)bounds;
+        mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
+        acknowledgement.destination_db_uuid = request.envelope.destination_db_uuid;
+        acknowledgement.receiver_node_id = request.receiver_node_id;
+        acknowledgement.origin_node_id = request.envelope.origin_node_id;
+        acknowledgement.ok = false;
+        acknowledgement.retryable = true;
+        acknowledgement.error = "retryable logical delivery failure";
+        return acknowledgement;
+    }
+
+private:
+    mdbxc::sync::DbId m_db_id;
+};
+
 class BlockingPeer : public mdbxc::sync::ISyncPeer {
 public:
     explicit BlockingPeer(const mdbxc::sync::PullResponse& response)
@@ -2844,6 +2895,133 @@ void test_worker_rejects_manifest_only_snapshot_fallback() {
     cleanup(replica_path);
 }
 
+void test_worker_delivers_pending_logical_outbox_after_raw_sync() {
+    using namespace mdbxc;
+    const std::string source_path = "test_worker_logical_delivery_source.mdbx";
+    const std::string replica_path = "test_worker_logical_delivery_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xAD);
+    const sync::NodeId replica_node = make_node(0xBD);
+    const sync::DbId db_id = make_node(0xDD);
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine source(source_conn);
+    sync::SyncEngine replica(replica_conn);
+    source.initialize_local_identity(source_node, db_id);
+    replica.initialize_local_identity(replica_node, db_id);
+
+    sync::LogicalChangeFrame frame;
+    source.enqueue_logical_delivery(db_id, replica_node, frame);
+    sync::DirectSyncPeer peer(&replica);
+    RecordingWorkerObserver observer;
+    sync::SyncWorkerOptions options;
+    options.enable_logical_delivery = true;
+    options.observer = &observer;
+    sync::SyncWorker worker(source, peer, options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (!result.ok || result.pages_pulled != 1u ||
+        result.logical_deliveries_delivered != 1u ||
+        result.logical_acknowledged_through != 1u ||
+        !source.pending_logical_deliveries(db_id, replica_node).empty() ||
+        source.logical_delivery_acknowledged_through(db_id, replica_node) != 1u) {
+        throw std::runtime_error(
+            "worker did not deliver and acknowledge the logical outbox");
+    }
+    {
+        auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
+        sync::LogicalDeliveryOrderStore order(replica_conn->env_handle());
+        if (order.last_applied(txn.handle(), source_node) != 1u) {
+            throw std::runtime_error(
+                "worker logical delivery did not advance receiver order frontier");
+        }
+    }
+    const std::vector<sync::SyncWorkerStageEvent> stages = observer.stages();
+    bool started = false;
+    bool finished = false;
+    for (std::size_t i = 0u; i < stages.size(); ++i) {
+        started = started || stages[i].stage ==
+            sync::SyncWorkerStage::LogicalDeliveryStarted;
+        finished = finished || stages[i].stage ==
+            sync::SyncWorkerStage::LogicalDeliveryFinished;
+    }
+    if (!started || !finished) {
+        throw std::runtime_error(
+            "worker did not report logical delivery stages");
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
+void test_worker_allows_raw_only_peer_when_logical_outbox_is_empty() {
+    using namespace mdbxc;
+    const std::string path = "test_worker_empty_logical_outbox.mdbx";
+    cleanup(path);
+
+    const sync::DbId db_id = make_node(0xDF);
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0xAF), db_id);
+
+    EmptyPeer peer;
+    sync::SyncWorkerOptions options;
+    options.enable_logical_delivery = true;
+    sync::SyncWorker worker(engine, peer, options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (!result.ok || result.pages_pulled != 1u ||
+        result.logical_deliveries_delivered != 0u) {
+        throw std::runtime_error(
+            "raw-only peer failed with an empty logical outbox");
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_worker_preserves_outbox_after_unavailable_or_retryable_logical_delivery() {
+    using namespace mdbxc;
+    const std::string source_path =
+        "test_worker_logical_delivery_failure_source.mdbx";
+    cleanup(source_path);
+
+    const sync::DbId db_id = make_node(0xDE);
+    const sync::NodeId retryable_node = make_node(0xE1);
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(source_conn);
+    source.initialize_local_identity(make_node(0xAE), db_id);
+    sync::LogicalChangeFrame frame;
+    source.enqueue_logical_delivery(db_id, retryable_node, frame);
+
+    sync::SyncWorkerOptions options;
+    options.enable_logical_delivery = true;
+    EmptyPeer unavailable_peer;
+    sync::SyncWorker unavailable_worker(source, unavailable_peer, options);
+    const sync::SyncWorkerRoundResult unavailable =
+        unavailable_worker.run_once();
+    if (unavailable.ok || unavailable.sync_error_retryable ||
+        source.pending_logical_deliveries(db_id, retryable_node).size() != 1u) {
+        throw std::runtime_error(
+            "worker did not preserve outbox for an unsupported logical peer");
+    }
+
+    RetryableLogicalPeer retryable_peer(db_id);
+    sync::SyncWorker retryable_worker(source, retryable_peer, options);
+    const sync::SyncWorkerRoundResult retryable = retryable_worker.run_once();
+    if (retryable.ok || !retryable.sync_error_retryable ||
+        retryable.logical_deliveries_delivered != 0u ||
+        source.pending_logical_deliveries(db_id, retryable_node).size() != 1u) {
+        throw std::runtime_error(
+            "worker did not preserve outbox after retryable logical failure");
+    }
+
+    source_conn->disconnect();
+    cleanup(source_path);
+}
+
 void test_worker_rejects_logical_complete_snapshot_fallback() {
     using namespace mdbxc;
     const std::string source_path = "test_worker_logical_snapshot_source.mdbx";
@@ -2934,6 +3112,12 @@ int main() {
           &test_worker_snapshot_recovery_preserves_remote_origin_cursor },
         { "test_worker_rejects_manifest_only_snapshot_fallback",
           &test_worker_rejects_manifest_only_snapshot_fallback },
+        { "test_worker_delivers_pending_logical_outbox_after_raw_sync",
+          &test_worker_delivers_pending_logical_outbox_after_raw_sync },
+        { "test_worker_allows_raw_only_peer_when_logical_outbox_is_empty",
+          &test_worker_allows_raw_only_peer_when_logical_outbox_is_empty },
+        { "test_worker_preserves_outbox_after_unavailable_or_retryable_logical_delivery",
+          &test_worker_preserves_outbox_after_unavailable_or_retryable_logical_delivery },
         { "test_worker_rejects_logical_complete_snapshot_fallback",
           &test_worker_rejects_logical_complete_snapshot_fallback },
         { "test_worker_run_once_drains_paginated_pull",

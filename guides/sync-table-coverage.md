@@ -3,14 +3,15 @@
 This document is the source-of-truth matrix for sync v0.1 table coverage. It
 describes which public table wrappers emit `ChangeOp` records when a
 `ThreadLocalChangeAccumulator` is attached to the writing `Connection`, and
-which wrappers intentionally stay outside sync until their wire format and
-round-trip semantics are defined.
+which wrappers intentionally stay outside raw capture until their wire format
+and round-trip semantics are defined.
 
 The Sync v0.1 transport path replicates raw physical DBI operations. It does
 not deserialize table values during transport, and remote apply replays the
 captured physical `storage_key` / `value` bytes through
-`SyncEngine::handle_push()`. Explicit logical adapters are caller-delivered
-apply paths and are documented separately below.
+`SyncEngine::handle_push()`. Explicit logical adapters have their own ordered
+delivery protocol and durable outbox; `SyncWorkerOptions::enable_logical_delivery`
+can dispatch that outbox through a logical-capable peer after a raw round drains.
 
 ## Matrix
 
@@ -20,7 +21,7 @@ apply paths and are documented separately below.
 | `KeyTable<K>` | Supported | `Put`, `Delete`, `ClearTable`; insert, erase, range erase, and clear paths are implemented. | Raw key bytes are replayed with empty values. | `test_sync_capture`, `test_sync_engine`, `test_sync_replication` |
 | `ValueTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; set, insert, update, erase, and clear paths are implemented. | The singleton physical key and serialized value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
 | `SequenceTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; append, `insert_or_assign`, erase, and clear paths are implemented. | Stable `uint64_t` sequence keys and value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
-| `VectorStore` | Raw plus limited logical adapter | Raw capture flows through its internal `SequenceTable` and `KeyValueTable` members. The schema-v1 `VectorStoreLogicalAdapter` explicitly captures and applies add, erase, and clear across ids, embeddings, text, and metadata with explicit record ids. Erase retains the ids marker as allocation high-water; clear resets all four DBIs. | Raw apply replays physical member-table operations; logical apply validates the adapter marker, record state, and embedding dimension before mutation. Both paths require one authoritative or externally serialized writer per collection. The logical adapter is opt-in and caller-delivered, not a generic multi-DBI primitive or distributed conflict resolver. | `test_sync_capture`, `test_sync_replication`, `test_vector_store_logical_adapter` |
+| `VectorStore` | Raw plus limited logical adapter | Raw capture flows through its internal `SequenceTable` and `KeyValueTable` members. The schema-v1 `VectorStoreLogicalAdapter` explicitly captures and applies add, erase, and clear across ids, embeddings, text, and metadata with explicit record ids. Erase retains the ids marker as allocation high-water; clear resets all four DBIs. | Raw apply replays physical member-table operations; logical apply validates the adapter marker, record state, and embedding dimension before mutation. `commit_to_outbox()` can publish the logical frame atomically and the worker can deliver it through a capable peer. Both paths require one authoritative or externally serialized writer per collection. The logical adapter is opt-in, not a generic multi-DBI primitive or distributed conflict resolver. | `test_sync_capture`, `test_sync_replication`, `test_vector_store_logical_adapter` |
 | `AnyValueTable<K>` | Deferred | No `ChangeOp` in v0.1. | Not applied by sync as a typed heterogeneous table. | `test_sync_capture` negative coverage |
 | `KeyMultiValueTable<K, V>` | Limited logical adapter | No raw `ChangeOp` in v0.1. | Schema v1 explicitly captures unordered insert, key erase, all-matching-value erase, and clear. Schema v2 additionally captures exact-one erase and typed `reconcile()`. Schema v3 adds bounded typed range erasure, expanded before mutation into canonical `EraseKey` changes; raw calls and general multi-writer destructive convergence remain deferred. | `test_key_value_logical_adapter`, `test_sync_capture` negative coverage |
 | `KeyOrderedMultiValueTable<K, V>` | Limited ordered logical adapters | No raw `ChangeOp` in v0.1. Schema v1 captures append-only changes; schema v2 captures `AppendElement` and exact `EraseElement` by persistent id. | Both schemas require one authoritative ordered origin and fail closed for direct logical frames or unordered delivery. Schema v2 persists element identity and tombstones, and its typed capture atomically commits local mutations plus an ordered outbox envelope. Bounded `erase_at`, key/value erase, and clear resolve selectors to exact ids before mutation; `replace_with()` is also implemented for single-origin schema-v2 capture. The default resolver performs full reverse validation, while an opt-in transaction-bound proof uses a non-reusable session token, bounds its complete materialized ID set, and can reuse that validated set for trusted selector calls with a separate budget. Baseline import, multi-origin histories, and tombstone pruning/compaction remain separately deferred. | `test_key_value_logical_adapter`, `test_key_ordered_multi_value_destructive_state`, `test_key_ordered_multi_value_destructive_adapter` |
@@ -54,8 +55,10 @@ has three separate pieces that must not be treated as support by themselves:
 
 `KeyValueTableLogicalAdapter`, `KeyTableLogicalAdapter`, and
 `VectorStoreLogicalAdapter` are explicit logical apply helpers with opt-in
-typed capture sessions. They are not connected to the transport pull/push
-path; callers own logical frame delivery.
+typed capture sessions. Their `commit_to_outbox()` paths atomically publish a
+logical envelope; a worker with `enable_logical_delivery` sends that envelope
+through the separate capability-gated logical peer protocol. Direct logical
+frames remain caller-delivered and are not placed in raw pull/push messages.
 
 Until a wrapper has a codec extension, a registered adapter, capture tests, and
 round-trip tests, it must remain in the deferred rows below and must not emit
@@ -73,7 +76,7 @@ ids, embeddings, text, and metadata. The opt-in schema-v1
 and clear, with explicit ids and a four-DBI preflight. Both paths support a
 leader/follower topology or an application that serializes writers externally.
 Neither provides a distributed id allocator or cross-node conflict resolution;
-the logical adapter is an application-owned recipe rather than a generic
+the logical adapter is an application-owned schema rather than a generic
 multi-DBI primitive.
 
 For a collection with an existing logical schema marker, reopen through

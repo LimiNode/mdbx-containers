@@ -2004,7 +2004,7 @@ void test_engine_rejects_complete_snapshot_with_logical_outbox_state() {
     engine.initialize_local_identity(source_node, db_id);
     KeyValueTable<std::string, std::string> documents(conn, "documents");
     documents.insert_or_assign("document", "raw-value");
-    engine.enqueue_logical_delivery(destination, sync::LogicalChangeFrame());
+    engine.enqueue_logical_delivery(destination, destination, sync::LogicalChangeFrame());
     {
         auto txn = conn->transaction(TransactionMode::READ_ONLY);
         sync::SchemaRegistryStore schemas(conn->env_handle());
@@ -2302,7 +2302,7 @@ void test_engine_rejects_complete_snapshot_with_malformed_outbox_envelope() {
     engine.initialize_local_identity(source_node, db_id);
     KeyValueTable<std::string, std::string> documents(conn, "documents");
     documents.insert_or_assign("document", "raw-value");
-    engine.enqueue_logical_delivery(destination, sync::LogicalChangeFrame());
+    engine.enqueue_logical_delivery(destination, destination, sync::LogicalChangeFrame());
     {
         auto txn = conn->transaction(TransactionMode::WRITABLE);
         sync::LogicalOutboxStore outbox(conn->env_handle());

@@ -19,8 +19,10 @@ Read [Sync Replication](sync.md) first. Russian version:
 4. Perform source writes through the adapter's typed capture session. A
    successful session commit publishes logical changes only after the local
    table mutation succeeds.
-5. Deliver either a `LogicalChangeFrame` through an application protocol or an
-   ordered delivery envelope when the adapter requires it.
+5. Deliver a `LogicalChangeFrame` through an application protocol, or commit an
+   ordered envelope to the durable outbox with `commit_to_outbox()`.
+   `SyncWorkerOptions::enable_logical_delivery` dispatches the latter through a
+   logical-capable peer after raw pull pages are drained.
 6. Apply on the destination through the matching `SyncEngine` method. Marker
    validation and adapter preflight happen before adapter mutation; failures
    roll back the engine-owned transaction.
@@ -29,13 +31,13 @@ Read [Sync Replication](sync.md) first. Russian version:
 sequenceDiagram
     participant S as Source adapter session
     participant Schema as _mdbxc_sync_schema
-    participant Wire as Application delivery
+    participant Wire as Application delivery or logical peer
     participant E as Receiver SyncEngine
     participant A as Receiver adapter
 
     S->>Schema: verify registered schema
     S->>S: mutate local table and collect typed changes
-    S-->>Wire: LogicalChangeFrame or delivery envelope
+    S-->>Wire: LogicalChangeFrame or durable delivery envelope
     Wire->>E: explicit apply call
     E->>Schema: verify persistent marker
     E->>A: preflight every change
@@ -74,7 +76,7 @@ rejected. The schema marker names one non-zero authoritative origin.
 sequenceDiagram
     participant O as Authoritative origin
     participant Outbox as Durable ordered outbox
-    participant D as Application dispatcher
+    participant D as SyncWorker or application dispatcher
     participant R as Replica SyncEngine
     participant State as Replay marker and frontier
 
@@ -92,6 +94,34 @@ mismatched origin is rejected before table mutation. The sender outbox lets an
 application retry delivery after process or transport failure without losing
 the local ordered history that was committed with the envelope.
 
+Each ordered dispatch targets exactly one receiver node. The wire
+`DeliveryRequest` binds that receiver id to the envelope, and the receiver
+checks it before replay, frontier, or adapter work; its acknowledgement repeats
+the actual receiver id. HTTP and WebSocket accept only this receiver-bound
+request for ordered delivery. The legacy envelope-only `Delivery` message is
+not an ordered network-delivery route.
+
+In v0.1, one capture/session commit atomically publishes an envelope for one
+receiver. Atomic fan-out to several receivers and a peer registry are deferred.
+Outbox entries always fit the library-default codec bounds, so a later worker
+can decode them without inheriting caller-specific bounds.
+
+`origin_sequence` identifies one logical event for its origin and database; it
+is not reallocated for another receiver. Pending delivery and acknowledgement
+state remain receiver-specific. Before moving the v0.1 receiver route, recover
+the new replica from the current receiver so it imports the origin frontier.
+Otherwise its first new delivery is rejected as a sequence gap.
+
+For `DirectSyncPeer`, `HttpSyncPeer`, and `WebSocketSyncPeer`, the optional
+worker logical-delivery pass supplies this dispatcher. It runs only when
+`SyncWorkerOptions::enable_logical_delivery` is true, only after raw pull pages
+are drained, and only for the worker's current `DbId`. The peer first negotiates
+ordered delivery and cumulative acknowledgement. Each acknowledged prefix is
+removed durably from the sender outbox; an unsupported peer, sequence gap, or
+retryable acknowledgement failure leaves the unacknowledged suffix queued.
+`max_logical_deliveries` can bound a round, while zero drains the pending
+prefix. This remains a separate protocol from raw `PullRequest` / `PushRequest`.
+
 Changing the authoritative origin is an application-coordinated cutover. The
 application must quiesce old capture, drain the old outbox, retain replay state
 through its retry horizon, migrate the marker on every participant, and only
@@ -102,10 +132,10 @@ two origins concurrently valid for one ordered dataset.
 
 | Adapter | Implemented typed contract | Boundary |
 | --- | --- | --- |
-| `KeyValueTableLogicalAdapter` | Explicit typed capture and apply. | Application owns frame delivery. |
-| `KeyTableLogicalAdapter` | Explicit typed capture and apply. | Application owns frame delivery. |
-| `VectorStoreLogicalAdapter` | Schema v1 add, erase, and clear across ids, embeddings, text, and metadata DBIs. Explicit IDs are validated before mutation. | One authoritative or externally serialized writer per collection. |
-| `KeyMultiValueTableLogicalAdapter` | v1: insert, version-neutral batch `append()`, key erase, all-matching-value erase, clear. v2 adds exact-one erase and `reconcile()`. v3 adds bounded typed `erase_range()` expanded into exact key erasures. | Unordered multiset semantics; one writer or causally serialized destructive updates. |
+| `KeyValueTableLogicalAdapter` | Explicit typed capture and apply; `commit_to_outbox()` atomically publishes its ordered envelope. | Direct frames remain manual; ordered outbox delivery needs a capable peer. |
+| `KeyTableLogicalAdapter` | Explicit typed capture and apply; `commit_to_outbox()` atomically publishes its ordered envelope. | Direct frames remain manual; ordered outbox delivery needs a capable peer. |
+| `VectorStoreLogicalAdapter` | Schema v1 add, erase, and clear across ids, embeddings, text, and metadata DBIs. Explicit IDs are validated before mutation; `commit_to_outbox()` is atomic. | One authoritative or externally serialized writer per collection. |
+| `KeyMultiValueTableLogicalAdapter` | v1: insert, version-neutral batch `append()`, key erase, all-matching-value erase, clear. v2 adds exact-one erase and `reconcile()`. v3 adds bounded typed `erase_range()` expanded into exact key erasures. `commit_to_outbox()` is atomic. | Unordered multiset semantics; one writer or causally serialized destructive updates. |
 | `KeyOrderedMultiValueTableLogicalAdapter` | v1 append-only ordered delivery. | One authoritative origin. |
 | `KeyOrderedMultiValueTableDestructiveLogicalAdapter` | v2 exact append/erase by persistent element ID, bounded selector erasure, clear, and single-origin `replace_with()`. | One authoritative origin; baseline import, multi-origin history, and tombstone compaction are deferred. |
 

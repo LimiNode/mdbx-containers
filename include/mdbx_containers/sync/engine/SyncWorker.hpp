@@ -27,7 +27,7 @@ namespace sync {
         Stopped,  ///< No worker thread is running.
         Starting, ///< Worker thread has been created but has not entered the loop.
         Idle,     ///< Worker is sleeping between sync rounds.
-        Pulling,  ///< Worker is waiting for \c ISyncPeer::pull().
+        Pulling,  ///< Worker is waiting for a remote peer call.
         Applying, ///< Worker is applying a pulled page locally.
         Backoff,  ///< Last round failed; worker is waiting before retry.
         Stopping, ///< Stop has been requested; current operation is draining.
@@ -41,6 +41,8 @@ namespace sync {
         PullFinished,   ///< A pull page request returned.
         ApplyStarted,   ///< A non-empty pulled page is about to be applied.
         ApplyFinished,  ///< A non-empty pulled page finished applying.
+        LogicalDeliveryStarted,  ///< A queued logical delivery is about to be sent.
+        LogicalDeliveryFinished, ///< A queued logical delivery returned an acknowledgement.
         RoundCompleted, ///< The round finished with a final result.
         BackoffStarted, ///< Background worker entered retry backoff.
     };
@@ -91,6 +93,20 @@ namespace sync {
         /// partially replicated database.
         bool enable_full_snapshot_fallback = false;
 
+        /// \brief Sends this engine's queued logical deliveries after raw sync.
+        /// \details Disabled by default, preserving the raw-only worker contract.
+        /// When enabled, the worker sends only the outbox prefix addressed to
+        /// this worker's remote database and only after it has drained raw pull
+        /// pages for the round. The peer must explicitly support logical
+        /// delivery whenever the destination has pending logical entries.
+        bool enable_logical_delivery = false;
+
+        /// \brief Maximum logical envelopes delivered in one round.
+        /// \details Zero drains the pending prefix. Deliveries are dispatched
+        /// one at a time so a stop request can prevent the next envelope from
+        /// starting after the current peer call returns.
+        std::size_t max_logical_deliveries = 0u;
+
         /// \brief How the background worker handles permanent transport hints.
         /// \details The default keeps v0.1 retry hints advisory. Set to
         /// \c StopWorker when a classified permanent transport failure should
@@ -126,6 +142,8 @@ namespace sync {
         bool        ok = true; ///< Whether the round completed without error.
         std::size_t pages_pulled = 0; ///< Number of successful pull pages.
         std::size_t batches_applied = 0; ///< Number of batches applied locally.
+        std::size_t logical_deliveries_delivered = 0; ///< Logical envelopes ACKed this round.
+        std::uint64_t logical_acknowledged_through = 0; ///< Latest logical ACK frontier.
         bool        has_more = false; ///< Whether the peer reported more pages.
         SyncWorkerProgressEstimate progress; ///< Last known progress.
         std::string error; ///< Failure detail when \c ok is false.
@@ -147,6 +165,8 @@ namespace sync {
         std::size_t pages_pulled = 0; ///< Pages pulled so far in the round.
         std::size_t batches_in_page = 0; ///< Batches in the current page.
         std::size_t batches_applied = 0; ///< Batches applied so far.
+        std::size_t logical_deliveries_delivered = 0; ///< Logical envelopes ACKed so far.
+        std::uint64_t logical_acknowledged_through = 0; ///< Latest logical ACK frontier.
         bool        has_more = false; ///< Latest peer pagination flag.
         bool        ok = true; ///< Whether the current stage succeeded.
         SyncWorkerProgressEstimate progress; ///< Last known progress.
@@ -255,7 +275,7 @@ namespace sync {
     /// thread that executes the sync round.
     ///
     /// The implementation never keeps a local MDBX transaction open while
-    /// waiting in \c ISyncPeer::pull(), idle sleep, or backoff sleep. Pulled
+        /// waiting in a remote peer call, idle sleep, or backoff sleep. Pulled
     /// batches are applied through \c SyncEngine::handle_push(), which opens
     /// and commits a short local write transaction for each pulled page. With
     /// opt-in full snapshot fallback, the worker accepts only a
@@ -286,7 +306,7 @@ namespace sync {
         }
 
         /// \brief Requests stop and waits for the background worker to finish.
-        /// \details May block until an in-flight \c ISyncPeer::pull() returns.
+        /// \details May block until an in-flight remote peer call returns.
         /// The worker object must not be destroyed from its own worker thread.
         ~SyncWorker() {
             request_stop();
@@ -333,7 +353,7 @@ namespace sync {
         }
 
         /// \brief Requests background worker shutdown.
-        /// \details Cancels the active \c PullRequest token and calls
+        /// \details Cancels the active raw request token and calls
         /// \c ISyncPeer::request_cancel() outside the worker mutex at most
         /// once for each observed in-flight peer call.
         /// Cancellation is best-effort; the worker exits before applying a
@@ -721,6 +741,11 @@ namespace sync {
                     }
                     result.has_more = has_more;
                 } while (has_more && m_options.drain_pages);
+
+                if (!has_more && m_options.enable_logical_delivery &&
+                    !stop_requested()) {
+                    deliver_pending_logical_deliveries(result);
+                }
             } catch (const std::exception& e) {
                 result.ok = false;
                 result.error = e.what();
@@ -731,6 +756,87 @@ namespace sync {
                 result.retry_hint = m_peer.last_retry_hint();
             }
             return result;
+        }
+
+        void deliver_pending_logical_deliveries(
+                SyncWorkerRoundResult& result) {
+            const DbId destination = m_engine.db_uuid();
+            std::size_t remaining = m_options.max_logical_deliveries;
+            for (;;) {
+                if (stop_requested()) {
+                    return;
+                }
+                if (m_options.max_logical_deliveries != 0u &&
+                    remaining == 0u) {
+                    return;
+                }
+
+                if (!m_peer.supports_logical_delivery()) {
+                    if (!m_engine.has_pending_logical_deliveries(destination)) {
+                        return;
+                    }
+                    result.ok = false;
+                    result.error =
+                        "Sync peer does not support configured logical delivery";
+                    return;
+                }
+
+                LogicalDeliveryHello remote_hello;
+                {
+                    CancellationToken cancel_token;
+                    PeerCallGuard peer_call(*this, cancel_token);
+                    if (!peer_call.active()) {
+                        return;
+                    }
+                    remote_hello =
+                        m_peer.logical_delivery_hello_with_cancel(&cancel_token);
+                }
+                const std::vector<LogicalDeliveryEnvelope> pending =
+                    m_engine.pending_logical_deliveries(
+                        destination, remote_hello.node_id, 1u);
+                if (pending.empty()) {
+                    return;
+                }
+
+                LogicalDeliveryDispatchResult dispatch;
+                {
+                    CancellationToken cancel_token;
+                    PeerCallGuard peer_call(*this, cancel_token);
+                    if (!peer_call.active()) {
+                        return;
+                    }
+                    notify_stage_changed(make_stage_event(
+                        SyncWorkerStage::LogicalDeliveryStarted, result));
+                    dispatch = m_engine.deliver_pending_logical_deliveries(
+                        m_peer, destination, remote_hello.node_id, 1u,
+                        nullptr, &cancel_token);
+                }
+                result.logical_deliveries_delivered += dispatch.delivered;
+                result.logical_acknowledged_through =
+                    dispatch.acknowledged_through;
+                {
+                    SyncWorkerStageEvent event = make_stage_event(
+                        SyncWorkerStage::LogicalDeliveryFinished, result);
+                    event.ok = dispatch.ok;
+                    event.error = dispatch.error;
+                    event.sync_error_retryable = dispatch.retryable;
+                    notify_stage_changed(event);
+                }
+                if (!dispatch.ok) {
+                    result.ok = false;
+                    result.error = dispatch.error.empty()
+                        ? "logical delivery failed"
+                        : dispatch.error;
+                    result.sync_error_retryable = dispatch.retryable;
+                    return;
+                }
+                if (dispatch.delivered == 0u) {
+                    return;
+                }
+                if (remaining != 0u) {
+                    --remaining;
+                }
+            }
         }
 
         SyncWorkerRoundResult run_full_snapshot_fallback(
@@ -868,7 +974,11 @@ namespace sync {
             event.stage = stage;
             event.state = state();
             event.pages_pulled = result.pages_pulled;
-                event.batches_applied = result.batches_applied;
+            event.batches_applied = result.batches_applied;
+            event.logical_deliveries_delivered =
+                result.logical_deliveries_delivered;
+            event.logical_acknowledged_through =
+                result.logical_acknowledged_through;
             event.has_more = result.has_more;
             event.ok = result.ok;
             event.progress = result.progress;

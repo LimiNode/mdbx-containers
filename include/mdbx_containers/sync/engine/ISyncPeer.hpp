@@ -6,6 +6,7 @@
 /// \brief Abstract peer used by \c SyncWorker and \c SyncEngine clients.
 
 #include <cstdint>
+#include <stdexcept>
 
 namespace mdbxc {
 namespace sync {
@@ -34,7 +35,7 @@ namespace sync {
     /// must allow \c request_cancel() to be called concurrently with
     /// \c pull() / \c push() and tolerate calls that race with operation
     /// startup or completion.
-    class ISyncPeer {
+    class ISyncPeer : public ILogicalDeliveryPeer {
     public:
         virtual ~ISyncPeer() {}
 
@@ -59,6 +60,32 @@ namespace sync {
         /// \return Retry hint for the last observed transport failure.
         virtual SyncTransportRetryHint last_retry_hint() const {
             return SyncTransportRetryHint();
+        }
+
+        /// \brief Returns whether this peer can exchange ordered logical frames.
+        /// \details Raw-only peers preserve the v0.1 contract by returning
+        /// \c false. Callers must opt in before treating logical outbox state
+        /// as a transport responsibility.
+        virtual bool supports_logical_delivery() const {
+            return false;
+        }
+
+        LogicalDeliveryHello logical_delivery_hello() override {
+            throw std::logic_error(
+                "Sync peer does not support logical delivery");
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) override {
+            (void)bounds;
+            LogicalDeliveryAcknowledgement acknowledgement;
+            acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+            acknowledgement.origin_node_id = envelope.origin_node_id;
+            acknowledgement.ok = false;
+            acknowledgement.error =
+                "Sync peer does not support logical delivery";
+            return acknowledgement;
         }
     };
 

@@ -16,12 +16,28 @@ namespace sync {
             : m_remote(remote) {}
 
         LogicalDeliveryHello logical_delivery_hello() override {
+            return logical_delivery_hello_with_cancel(nullptr);
+        }
+
+        LogicalDeliveryHello logical_delivery_hello_with_cancel(
+                const CancellationToken* cancel_token = nullptr) override {
+            (void)cancel_token;
             return m_remote.logical_delivery_hello();
         }
 
         LogicalDeliveryAcknowledgement deliver_ordered_logical_delivery(
                 const LogicalDeliveryEnvelope& envelope,
                 const CodecBounds* bounds = nullptr) override {
+            return deliver_ordered_logical_delivery_with_cancel(
+                envelope, bounds, nullptr);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_delivery_with_cancel(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            (void)cancel_token;
             return m_remote.apply_ordered_logical_delivery_envelope(
                 envelope, bounds);
         }
@@ -29,8 +45,18 @@ namespace sync {
         LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
                 const LogicalDeliveryRequest& request,
                 const CodecBounds* bounds = nullptr) override {
-            return m_remote.apply_ordered_logical_delivery_envelope(
-                request.envelope, &request.sender_capabilities, bounds);
+            return deliver_ordered_logical_request_with_cancel(
+                request, bounds, nullptr);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_request_with_cancel(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            (void)cancel_token;
+            return m_remote.apply_ordered_logical_delivery_request(
+                request, bounds);
         }
 
     private:
