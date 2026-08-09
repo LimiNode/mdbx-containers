@@ -94,6 +94,24 @@ origin отклоняется до table mutation. Sender outbox позволя�
 повторить доставку после process или transport failure, не теряя local ordered
 history, закоммиченную вместе с envelope.
 
+Каждая упорядоченная отправка адресуется ровно одному узлу-получателю. Wire
+`DeliveryRequest` связывает этот receiver id с envelope, а получатель проверяет
+его до replay, frontier и работы adapter'а; acknowledgement повторяет
+фактический receiver id. HTTP и WebSocket принимают для упорядоченной доставки
+только такой receiver-bound request. Устаревшее envelope-only сообщение
+`Delivery` не является сетевым маршрутом упорядоченной доставки.
+
+В v0.1 один capture/session commit атомарно публикует envelope для одного
+получателя. Atomic fan-out на несколько получателей и peer registry отложены.
+Outbox entries всегда укладываются в library-default codec bounds, поэтому
+поздний worker декодирует их без caller-specific bounds.
+
+`origin_sequence` идентифицирует одно logical event для его origin и database;
+он не выделяется заново для другого receiver. Pending delivery и
+acknowledgement state остаются receiver-specific. Перед переносом v0.1 route
+на новую replica восстановите её из текущего receiver, чтобы она импортировала
+origin frontier. Иначе первая новая доставка будет отклонена как sequence gap.
+
 Для `DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer` этот dispatcher может
 предоставить optional logical-delivery pass worker'а. Он запускается только при
 `SyncWorkerOptions::enable_logical_delivery = true`, только после полного raw

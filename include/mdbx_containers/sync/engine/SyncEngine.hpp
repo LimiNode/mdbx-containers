@@ -611,7 +611,8 @@ namespace sync {
         LogicalDeliveryAcknowledgement apply_ordered_logical_delivery_envelope(
                 const LogicalDeliveryEnvelope& envelope,
                 const LogicalDeliveryCapabilities* sender_capabilities,
-                const CodecBounds* bounds = nullptr) {
+                const CodecBounds* bounds = nullptr,
+                const NodeId* receiver = nullptr) {
             LogicalDeliveryAcknowledgement acknowledgement;
             acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
             acknowledgement.origin_node_id = envelope.origin_node_id;
@@ -647,11 +648,21 @@ namespace sync {
                 const DbId local_db_uuid = meta.get_db_uuid(txn.handle());
                 const NodeId local_node_id = meta.get_node_id(txn.handle());
                 acknowledgement.destination_db_uuid = local_db_uuid;
+                acknowledgement.receiver_node_id = local_node_id;
                 if (compare_node_id(local_db_uuid,
                                     envelope.destination_db_uuid) != 0) {
                     set_logical_delivery_acknowledgement_failure(
                         acknowledgement,
                         "Logical ordered delivery destination db_uuid mismatch",
+                        false, bounds);
+                    txn.rollback();
+                    return acknowledgement;
+                }
+                if (receiver != nullptr &&
+                    compare_node_id(local_node_id, *receiver) != 0) {
+                    set_logical_delivery_acknowledgement_failure(
+                        acknowledgement,
+                        "Logical ordered delivery receiver node_id mismatch",
                         false, bounds);
                     txn.rollback();
                     return acknowledgement;
@@ -777,6 +788,15 @@ namespace sync {
             return acknowledgement;
         }
 
+        /// \brief Applies a receiver-bound ordered delivery request.
+        LogicalDeliveryAcknowledgement apply_ordered_logical_delivery_request(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr) {
+            return apply_ordered_logical_delivery_envelope(
+                request.envelope, &request.sender_capabilities, bounds,
+                &request.receiver_node_id);
+        }
+
         /// \brief Decodes and applies a logical delivery envelope.
         LogicalApplyResult apply_logical_delivery_envelope_bytes(
                 const std::vector<std::uint8_t>& encoded,
@@ -831,8 +851,8 @@ namespace sync {
         }
 
         /// \brief Persists a locally-originated ordered logical delivery.
-        /// \details Sequences are allocated independently for each destination
-        /// database and receiver node pair.
+        /// \details Sequences are allocated per destination database and
+        /// origin; receiver routes retain their own pending state.
         /// This only enqueues the envelope; transport dispatch and receiver
         /// acknowledgements are separate protocol layers.
         LogicalDeliveryEnvelope enqueue_logical_delivery(
@@ -980,6 +1000,7 @@ namespace sync {
                         continue;
                     }
                     LogicalDeliveryRequest request;
+                    request.receiver_node_id = receiver;
                     request.envelope = pending[i];
                     request.sender_capabilities = local.capabilities;
                     const LogicalDeliveryAcknowledgement acknowledgement =
@@ -987,7 +1008,7 @@ namespace sync {
                             request, bounds, cancel_token);
                     try {
                         validate_logical_delivery_acknowledgement_for_sender(
-                            acknowledgement, pending[i], known_tail,
+                            acknowledgement, pending[i], receiver, known_tail,
                             cumulative_acknowledgement_negotiated, bounds);
                     } catch (const std::exception& e) {
                         return LogicalDeliveryDispatchResult::failure(

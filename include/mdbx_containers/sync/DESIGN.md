@@ -1207,19 +1207,27 @@ or decide whether it is safe to advance one.
 `LogicalOutboxStore` is the sender-side durable foundation for ordered delivery.
 `SyncEngine::enqueue_logical_delivery()` persists an envelope
 in `_mdbxc_logical_outbox` and allocates a monotonic `origin_sequence` per
-destination database and receiver node pair, not globally across unrelated
-destinations or replicas of one replication set. Its MDBX entry keys contain the
-destination, receiver node id, and a big-endian sequence suffix, so
-`pending_logical_deliveries()` reads one receiver stream in numeric order. The
-generated frame id is stable for that stored sequence, and allocating a frame,
-updating the next sequence, acknowledging a prefix, and deleting acknowledged
-entries are all transactional. A receiver hello must match the selected receiver
-node id before its queue can be dispatched; an acknowledgement can therefore
-advance only that receiver's durable frontier. A rollback neither consumes a
-sequence nor leaves a queue entry behind. `_mdbxc_logical_outbox` is created during the normal
+destination database and origin, independent of the selected receiver. This is
+the stable logical-event identity carried by replay markers and ordered
+frontiers. Receiver routes retain only their own pending entries,
+`acknowledged_through`, and known tail. Its MDBX entry keys contain the
+destination, receiver node id, and a big-endian event-sequence suffix, so
+`pending_logical_deliveries()` reads one receiver route in numeric order. The
+generated frame id is stable for the origin event sequence, and allocating a
+frame, updating the global allocator, acknowledging a route prefix, and
+deleting acknowledged route entries are all transactional. A receiver hello
+must match the selected receiver node id before its queue can be dispatched; an
+acknowledgement can therefore advance only that receiver's durable frontier. A
+rollback neither consumes a sequence nor leaves a queue entry behind.
+`_mdbxc_logical_outbox` is created during the normal
 committed sync-system initialization lifecycle, so deployments need one
 additional named-DBI slot in `Config::max_dbs` compared with a layout that did
 not use the outbox.
+
+Persisted outbox entries always satisfy the library-default `CodecBounds`, so a
+later worker can decode them without carrying a caller-specific bounds object.
+A non-default bound passed to enqueue is an additional validation constraint; it
+cannot widen the durable outbox format.
 
 `LogicalDeliveryProtocolCodec` defines a separate logical wire protocol with its
 own magic and version. It carries `Hello`, stateless `HelloRequest`, legacy
@@ -1227,7 +1235,12 @@ envelope-only `Delivery`, capability-bearing `DeliveryRequest`, and cumulative
 `Acknowledgement` messages. It does not change `TransportMessageCodec` or the
 raw `ChangeBatchCodec` version. HTTP maps the request messages to dedicated
 logical routes, while WebSocket chooses the protocol by its magic before raw
-transport decoding.
+transport decoding. `DeliveryRequest` carries the selected receiver node id;
+the acknowledgement repeats the actual receiver node id. The receiver verifies
+that binding before ordered replay, frontier, or adapter work. HTTP and
+WebSocket reject the legacy envelope-only `Delivery` message for ordered
+delivery, so a routed request cannot be applied by another node with the same
+database id.
 
 `ISyncPeer` is also an `ILogicalDeliveryPeer`. Its default logical methods keep
 raw-only peers source-compatible: they report no support and never acknowledge a
@@ -1250,10 +1263,10 @@ persisted contiguous frontier for a duplicate. The sender validates that value
 against its own durable outbox known tail, then atomically removes the verified
 contiguous local prefix. This supports a sender restart after the receiver
 committed an earlier delivery but before the sender persisted cleanup. Existing
-peers that implement only the envelope-only delivery virtual method remain on
-the conservative contract. Direct, HTTP, and WebSocket peers expose dedicated
-logical routes; the raw pull/push protocol remains unchanged and raw-only peers
-remain source-compatible.
+peers that implement only the envelope-only delivery virtual method cannot
+receive ordered `DeliveryRequest` messages. Direct, HTTP, and WebSocket peers
+expose receiver-bound logical routes; the raw pull/push protocol remains
+unchanged and raw-only peers remain source-compatible.
 
 `SyncEngine::apply_ordered_logical_delivery_envelope()` is the receiver-side
 implementation of `OrderedDelivery`. `_mdbxc_logical_delivery_order` stores the
@@ -1275,7 +1288,9 @@ one transaction.
 `ILogicalDeliveryPeer` and `DirectLogicalDeliveryPeer` provide the capability-
 gated dispatch boundary. `SyncEngine::deliver_pending_logical_deliveries()`
 checks destination database, expected receiver node identity, and negotiated
-`OrderedDelivery` before sending its outbox prefix. A negotiated cumulative success is bounded by the sender's
+`OrderedDelivery` before sending its outbox prefix. The receiver independently
+checks the receiver id carried by the request before it advances ordered state.
+A negotiated cumulative success is bounded by the sender's
 durable known tail, so it can safely clean a prefix that was delivered before a
 sender restart; entries already removed by that acknowledgement are skipped from
 the in-memory pending snapshot. A retryable negative acknowledgement can still

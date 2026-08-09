@@ -179,20 +179,15 @@ namespace sync {
                     return LogicalDeliveryProtocolCodec::encode_hello(
                         m_engine.logical_delivery_hello(), &m_bounds);
                 case LogicalDeliveryProtocolCodec::MessageType::Delivery:
-                    return LogicalDeliveryProtocolCodec::encode_acknowledgement(
-                        m_engine.apply_ordered_logical_delivery_envelope(
-                            LogicalDeliveryProtocolCodec::decode_delivery(
-                                binary_message, &m_bounds),
-                            &m_bounds),
-                        &m_bounds);
+                    throw std::runtime_error(
+                        "receiver-bound logical delivery request required");
                 case LogicalDeliveryProtocolCodec::MessageType::DeliveryRequest: {
                     const LogicalDeliveryRequest request =
                         LogicalDeliveryProtocolCodec::decode_delivery_request(
                             binary_message, &m_bounds);
                     return LogicalDeliveryProtocolCodec::encode_acknowledgement(
-                        m_engine.apply_ordered_logical_delivery_envelope(
-                            request.envelope, &request.sender_capabilities,
-                            &m_bounds),
+                        m_engine.apply_ordered_logical_delivery_request(
+                            request, &m_bounds),
                         &m_bounds);
                 }
                 case LogicalDeliveryProtocolCodec::MessageType::Hello:

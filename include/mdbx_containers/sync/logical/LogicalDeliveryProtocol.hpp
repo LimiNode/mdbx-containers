@@ -43,10 +43,10 @@ namespace sync {
     };
 
     /// \brief One ordered delivery attempt with sender feature context.
-    /// \details The envelope remains the stable persisted object. Capability
-    /// context describes only this peer exchange and lets a receiver retain
-    /// conservative acknowledgements for older senders.
+    /// \details The receiver identity binds this exchange to one sender-side
+    /// ordered outbox route. The envelope remains the stable persisted object.
     struct LogicalDeliveryRequest {
+        NodeId receiver_node_id{};
         LogicalDeliveryEnvelope envelope;
         LogicalDeliveryCapabilities sender_capabilities;
     };
@@ -59,6 +59,7 @@ namespace sync {
     /// known tail during validation.
     struct LogicalDeliveryAcknowledgement {
         DbId destination_db_uuid{};
+        NodeId receiver_node_id{};
         NodeId origin_node_id{};
         std::uint64_t acknowledged_through = 0u;
         bool ok = true;
@@ -71,6 +72,7 @@ namespace sync {
             const LogicalDeliveryAcknowledgement& acknowledgement,
             const CodecBounds* bounds = nullptr) {
         if (is_zero_sync_id(acknowledgement.destination_db_uuid) ||
+            is_zero_sync_id(acknowledgement.receiver_node_id) ||
             is_zero_sync_id(acknowledgement.origin_node_id)) {
             throw std::runtime_error(
                 "Logical delivery acknowledgement identity is incomplete");
@@ -88,16 +90,29 @@ namespace sync {
         }
     }
 
+    /// \brief Validates the receiver-bound ordered delivery request.
+    inline void validate_logical_delivery_request(
+            const LogicalDeliveryRequest& request,
+            const CodecBounds* bounds = nullptr) {
+        if (is_zero_sync_id(request.receiver_node_id)) {
+            throw std::runtime_error(
+                "Logical delivery request receiver identity is incomplete");
+        }
+        validate_logical_delivery_envelope(request.envelope, bounds);
+    }
+
     /// \brief Validates an acknowledgement against the delivery it answers.
     /// \details A successful response acknowledges exactly the delivered
     /// sequence. A failed response may acknowledge only an earlier prefix.
     inline void validate_logical_delivery_acknowledgement_for_delivery(
             const LogicalDeliveryAcknowledgement& acknowledgement,
             const LogicalDeliveryEnvelope& delivery,
+            const NodeId& receiver,
             const CodecBounds* bounds = nullptr) {
         validate_logical_delivery_acknowledgement(acknowledgement, bounds);
         if (compare_node_id(acknowledgement.destination_db_uuid,
                             delivery.destination_db_uuid) != 0 ||
+            compare_node_id(acknowledgement.receiver_node_id, receiver) != 0 ||
             compare_node_id(acknowledgement.origin_node_id,
                             delivery.origin_node_id) != 0) {
             throw std::runtime_error(
@@ -129,12 +144,14 @@ namespace sync {
     inline void validate_logical_delivery_acknowledgement_for_sender(
             const LogicalDeliveryAcknowledgement& acknowledgement,
             const LogicalDeliveryEnvelope& delivery,
+            const NodeId& receiver,
             std::uint64_t known_tail,
             bool cumulative_acknowledgement_negotiated,
             const CodecBounds* bounds = nullptr) {
         validate_logical_delivery_acknowledgement(acknowledgement, bounds);
         if (compare_node_id(acknowledgement.destination_db_uuid,
                             delivery.destination_db_uuid) != 0 ||
+            compare_node_id(acknowledgement.receiver_node_id, receiver) != 0 ||
             compare_node_id(acknowledgement.origin_node_id,
                             delivery.origin_node_id) != 0) {
             throw std::runtime_error(
@@ -212,7 +229,7 @@ namespace sync {
         }
 
         static std::size_t magic_size() { return 8u; }
-        static std::uint16_t codec_version() { return 1u; }
+        static std::uint16_t codec_version() { return 2u; }
 
         static std::vector<std::uint8_t> encode_hello(
                 const LogicalDeliveryHello& hello,
@@ -294,10 +311,12 @@ namespace sync {
         static std::vector<std::uint8_t> encode_delivery_request(
                 const LogicalDeliveryRequest& request,
                 const CodecBounds* bounds = nullptr) {
+            validate_logical_delivery_request(request, bounds);
             const std::vector<std::uint8_t> nested =
                 LogicalDeliveryEnvelopeCodec::encode(request.envelope, bounds);
             std::vector<std::uint8_t> out =
                 make_header(MessageType::DeliveryRequest);
+            append_id(out, request.receiver_node_id, bounds);
             detail::append_u64_le(out, request.sender_capabilities.flags);
             append_u32_size(out, nested.size(),
                             "logical delivery envelope exceeds u32");
@@ -314,6 +333,7 @@ namespace sync {
             Cursor cur = make_cursor(encoded, bounds);
             check_header(cur, MessageType::DeliveryRequest);
             LogicalDeliveryRequest out;
+            read_id(cur, out.receiver_node_id);
             out.sender_capabilities.flags = read_u64_le(cur);
             const std::uint32_t size = read_u32_le(cur);
             const std::uint8_t* data = read_bytes(cur, size);
@@ -322,6 +342,7 @@ namespace sync {
                 std::memcpy(&nested[0], data, size);
             }
             out.envelope = LogicalDeliveryEnvelopeCodec::decode(nested, bounds);
+            validate_logical_delivery_request(out, bounds);
             check_consumed(cur);
             return out;
         }
@@ -333,6 +354,7 @@ namespace sync {
             std::vector<std::uint8_t> out =
                 make_header(MessageType::Acknowledgement);
             append_id(out, acknowledgement.destination_db_uuid, bounds);
+            append_id(out, acknowledgement.receiver_node_id, bounds);
             append_id(out, acknowledgement.origin_node_id, bounds);
             detail::append_u64_le(out, acknowledgement.acknowledged_through);
             append_bool(out, acknowledgement.ok);
@@ -349,6 +371,7 @@ namespace sync {
             check_header(cur, MessageType::Acknowledgement);
             LogicalDeliveryAcknowledgement out;
             read_id(cur, out.destination_db_uuid);
+            read_id(cur, out.receiver_node_id);
             read_id(cur, out.origin_node_id);
             out.acknowledged_through = read_u64_le(cur);
             out.ok = read_bool(cur);

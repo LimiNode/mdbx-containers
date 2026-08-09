@@ -380,20 +380,16 @@ namespace sync {
                         body, &m_bounds);
                 LogicalDeliveryAcknowledgement acknowledgement;
                 if (type == LogicalDeliveryProtocolCodec::MessageType::Delivery) {
-                    acknowledgement =
-                        m_engine.apply_ordered_logical_delivery_envelope(
-                            LogicalDeliveryProtocolCodec::decode_delivery(
-                                body, &m_bounds),
-                            &m_bounds);
+                    return make_error(
+                        400, "receiver-bound logical delivery request required");
                 } else if (type ==
                            LogicalDeliveryProtocolCodec::MessageType::DeliveryRequest) {
                     const LogicalDeliveryRequest request =
                         LogicalDeliveryProtocolCodec::decode_delivery_request(
                             body, &m_bounds);
                     acknowledgement =
-                        m_engine.apply_ordered_logical_delivery_envelope(
-                            request.envelope, &request.sender_capabilities,
-                            &m_bounds);
+                        m_engine.apply_ordered_logical_delivery_request(
+                            request, &m_bounds);
                 } else {
                     return make_error(
                         400, "unexpected logical delivery message type");

@@ -94,6 +94,24 @@ mismatched origin is rejected before table mutation. The sender outbox lets an
 application retry delivery after process or transport failure without losing
 the local ordered history that was committed with the envelope.
 
+Each ordered dispatch targets exactly one receiver node. The wire
+`DeliveryRequest` binds that receiver id to the envelope, and the receiver
+checks it before replay, frontier, or adapter work; its acknowledgement repeats
+the actual receiver id. HTTP and WebSocket accept only this receiver-bound
+request for ordered delivery. The legacy envelope-only `Delivery` message is
+not an ordered network-delivery route.
+
+In v0.1, one capture/session commit atomically publishes an envelope for one
+receiver. Atomic fan-out to several receivers and a peer registry are deferred.
+Outbox entries always fit the library-default codec bounds, so a later worker
+can decode them without inheriting caller-specific bounds.
+
+`origin_sequence` identifies one logical event for its origin and database; it
+is not reallocated for another receiver. Pending delivery and acknowledgement
+state remain receiver-specific. Before moving the v0.1 receiver route, recover
+the new replica from the current receiver so it imports the origin frontier.
+Otherwise its first new delivery is rejected as a sequence gap.
+
 For `DirectSyncPeer`, `HttpSyncPeer`, and `WebSocketSyncPeer`, the optional
 worker logical-delivery pass supplies this dispatcher. It runs only when
 `SyncWorkerOptions::enable_logical_delivery` is true, only after raw pull pages

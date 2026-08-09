@@ -72,6 +72,7 @@ public:
         ++m_calls;
         mdbxc::sync::LogicalDeliveryAcknowledgement out;
         out.destination_db_uuid = envelope.destination_db_uuid;
+        out.receiver_node_id = m_hello.node_id;
         out.origin_node_id = envelope.origin_node_id;
         out.acknowledged_through = envelope.origin_sequence;
         return out;
@@ -136,6 +137,7 @@ void test_delivery_and_acknowledgement_round_trip() {
 
     mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
     acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+    acknowledgement.receiver_node_id = make_node(0x90);
     acknowledgement.origin_node_id = envelope.origin_node_id;
     acknowledgement.acknowledged_through = 6u;
     acknowledgement.ok = false;
@@ -149,6 +151,8 @@ void test_delivery_and_acknowledgement_round_trip() {
             encoded_ack);
     MDBXC_TEST_ASSERT(decoded_ack.destination_db_uuid ==
                       acknowledgement.destination_db_uuid);
+    MDBXC_TEST_ASSERT(decoded_ack.receiver_node_id ==
+                      acknowledgement.receiver_node_id);
     MDBXC_TEST_ASSERT(decoded_ack.origin_node_id ==
                       acknowledgement.origin_node_id);
     MDBXC_TEST_ASSERT(decoded_ack.acknowledged_through == 6u);
@@ -168,6 +172,7 @@ void test_stateless_requests_round_trip() {
         hello_request);
 
     mdbxc::sync::LogicalDeliveryRequest request;
+    request.receiver_node_id = make_node(0x90);
     request.envelope = make_envelope();
     request.sender_capabilities.flags = static_cast<std::uint64_t>(
         mdbxc::sync::LogicalDeliveryCapability::OrderedDelivery) |
@@ -184,6 +189,7 @@ void test_stateless_requests_round_trip() {
             encoded);
     MDBXC_TEST_ASSERT(decoded.envelope.origin_sequence ==
                       request.envelope.origin_sequence);
+    MDBXC_TEST_ASSERT(decoded.receiver_node_id == request.receiver_node_id);
     MDBXC_TEST_ASSERT(decoded.envelope.frame_id == request.envelope.frame_id);
     MDBXC_TEST_ASSERT(decoded.sender_capabilities.flags ==
                       request.sender_capabilities.flags);
@@ -215,6 +221,7 @@ void test_protocol_rejects_invalid_header_and_acknowledgement() {
 
     mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
     acknowledgement.destination_db_uuid = make_node(0x70);
+    acknowledgement.receiver_node_id = make_node(0x90);
     acknowledgement.origin_node_id = make_node(0x80);
     acknowledgement.ok = true;
     acknowledgement.retryable = true;
@@ -226,42 +233,52 @@ void test_protocol_rejects_invalid_header_and_acknowledgement() {
 
 void test_acknowledgement_matches_its_delivery() {
     const mdbxc::sync::LogicalDeliveryEnvelope envelope = make_envelope();
+    const mdbxc::sync::NodeId receiver = make_node(0x90);
     mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
     acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+    acknowledgement.receiver_node_id = receiver;
     acknowledgement.origin_node_id = envelope.origin_node_id;
     acknowledgement.acknowledged_through = envelope.origin_sequence;
     mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
-        acknowledgement, envelope);
+        acknowledgement, envelope, receiver);
 
     acknowledgement.ok = false;
     acknowledgement.retryable = true;
     acknowledgement.error = "retry";
-    MDBXC_TEST_ASSERT(throws_runtime_error([&acknowledgement, &envelope]() {
+    MDBXC_TEST_ASSERT(throws_runtime_error([&acknowledgement, &envelope, &receiver]() {
         mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
-            acknowledgement, envelope);
+            acknowledgement, envelope, receiver);
     }));
 
     acknowledgement.acknowledged_through = envelope.origin_sequence - 1u;
     mdbxc::sync::validate_logical_delivery_acknowledgement_for_delivery(
-        acknowledgement, envelope);
+        acknowledgement, envelope, receiver);
 }
 
 void test_cumulative_acknowledgement_respects_sender_tail() {
     const mdbxc::sync::LogicalDeliveryEnvelope envelope = make_envelope();
+    const mdbxc::sync::NodeId receiver = make_node(0x90);
     mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
     acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+    acknowledgement.receiver_node_id = receiver;
     acknowledgement.origin_node_id = envelope.origin_node_id;
     acknowledgement.acknowledged_through = envelope.origin_sequence + 2u;
 
     mdbxc::sync::validate_logical_delivery_acknowledgement_for_sender(
-        acknowledgement, envelope, envelope.origin_sequence + 2u, true);
-    MDBXC_TEST_ASSERT(throws_runtime_error([&acknowledgement, &envelope]() {
+        acknowledgement, envelope, receiver, envelope.origin_sequence + 2u, true);
+    acknowledgement.receiver_node_id = make_node(0x91);
+    MDBXC_TEST_ASSERT(throws_runtime_error([&acknowledgement, &envelope, &receiver]() {
         mdbxc::sync::validate_logical_delivery_acknowledgement_for_sender(
-            acknowledgement, envelope, envelope.origin_sequence + 1u, true);
+            acknowledgement, envelope, receiver, envelope.origin_sequence + 2u, true);
     }));
-    MDBXC_TEST_ASSERT(throws_runtime_error([&acknowledgement, &envelope]() {
+    acknowledgement.receiver_node_id = receiver;
+    MDBXC_TEST_ASSERT(throws_runtime_error([&acknowledgement, &envelope, &receiver]() {
         mdbxc::sync::validate_logical_delivery_acknowledgement_for_sender(
-            acknowledgement, envelope, envelope.origin_sequence + 2u, false);
+            acknowledgement, envelope, receiver, envelope.origin_sequence + 1u, true);
+    }));
+    MDBXC_TEST_ASSERT(throws_runtime_error([&acknowledgement, &envelope, &receiver]() {
+        mdbxc::sync::validate_logical_delivery_acknowledgement_for_sender(
+            acknowledgement, envelope, receiver, envelope.origin_sequence + 2u, false);
     }));
 }
 
@@ -318,26 +335,29 @@ void test_default_outer_message_bound_includes_protocol_overhead() {
     }));
 }
 
-void test_legacy_peer_receives_request_through_default_forwarding() {
+void test_legacy_peer_rejects_receiver_bound_request() {
     const mdbxc::sync::LogicalDeliveryEnvelope envelope = make_envelope();
     mdbxc::sync::LogicalDeliveryHello hello;
     hello.node_id = make_node(0x91);
     hello.db_uuid = envelope.destination_db_uuid;
     LegacyLogicalDeliveryPeer peer(hello);
     mdbxc::sync::LogicalDeliveryRequest request;
+    request.receiver_node_id = hello.node_id;
     request.envelope = envelope;
     request.sender_capabilities.flags = static_cast<std::uint64_t>(
         mdbxc::sync::LogicalDeliveryCapability::OrderedDelivery);
 
     const mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement =
         peer.deliver_ordered_logical_request(request);
-    MDBXC_TEST_ASSERT(peer.calls() == 1u);
+    MDBXC_TEST_ASSERT(peer.calls() == 0u);
     MDBXC_TEST_ASSERT(acknowledgement.destination_db_uuid ==
                       envelope.destination_db_uuid);
+    MDBXC_TEST_ASSERT(acknowledgement.receiver_node_id == hello.node_id);
     MDBXC_TEST_ASSERT(acknowledgement.origin_node_id ==
                       envelope.origin_node_id);
-    MDBXC_TEST_ASSERT(acknowledgement.acknowledged_through ==
-                      envelope.origin_sequence);
+    MDBXC_TEST_ASSERT(!acknowledgement.ok);
+    MDBXC_TEST_ASSERT(acknowledgement.error.find("receiver-bound") !=
+                      std::string::npos);
 }
 
 } // namespace
@@ -350,6 +370,6 @@ int main() {
     test_acknowledgement_matches_its_delivery();
     test_cumulative_acknowledgement_respects_sender_tail();
     test_default_outer_message_bound_includes_protocol_overhead();
-    test_legacy_peer_receives_request_through_default_forwarding();
+    test_legacy_peer_rejects_receiver_bound_request();
     return 0;
 }

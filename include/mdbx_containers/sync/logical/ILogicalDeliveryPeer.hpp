@@ -47,14 +47,22 @@ namespace sync {
             return deliver_ordered_logical_delivery(envelope, bounds);
         }
 
-        /// \brief Delivers one request with sender feature context.
-        /// \details The default preserves existing peers that implemented the
-        /// earlier envelope-only virtual method. Such peers remain on the
-        /// conservative acknowledgement path until they override this method.
+        /// \brief Delivers one receiver-bound request with sender context.
+        /// \details An envelope-only peer cannot prove that it received the
+        /// selected receiver route, so it must not be used for ordered delivery.
         virtual LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
                 const LogicalDeliveryRequest& request,
                 const CodecBounds* bounds = nullptr) {
-            return deliver_ordered_logical_delivery(request.envelope, bounds);
+            (void)bounds;
+            LogicalDeliveryAcknowledgement acknowledgement;
+            acknowledgement.destination_db_uuid =
+                request.envelope.destination_db_uuid;
+            acknowledgement.receiver_node_id = request.receiver_node_id;
+            acknowledgement.origin_node_id = request.envelope.origin_node_id;
+            acknowledgement.ok = false;
+            acknowledgement.error =
+                "Logical delivery peer does not implement receiver-bound requests";
+            return acknowledgement;
         }
 
         /// \brief Delivers a request with optional cancellation.

@@ -80,8 +80,8 @@ namespace sync {
                 const CancellationToken* cancel_token = nullptr) override {
             (void)cancel_token;
             assert(m_remote != nullptr);
-            return m_remote->apply_ordered_logical_delivery_envelope(
-                request.envelope, &request.sender_capabilities, bounds);
+            return m_remote->apply_ordered_logical_delivery_request(
+                request, bounds);
         }
 
     private:
