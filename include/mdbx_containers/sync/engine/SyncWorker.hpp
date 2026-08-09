@@ -772,6 +772,9 @@ namespace sync {
                 }
 
                 if (!m_peer.supports_logical_delivery()) {
+                    if (!m_engine.has_pending_logical_deliveries(destination)) {
+                        return;
+                    }
                     result.ok = false;
                     result.error =
                         "Sync peer does not support configured logical delivery";

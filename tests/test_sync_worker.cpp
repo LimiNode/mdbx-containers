@@ -2957,6 +2957,31 @@ void test_worker_delivers_pending_logical_outbox_after_raw_sync() {
     cleanup(replica_path);
 }
 
+void test_worker_allows_raw_only_peer_when_logical_outbox_is_empty() {
+    using namespace mdbxc;
+    const std::string path = "test_worker_empty_logical_outbox.mdbx";
+    cleanup(path);
+
+    const sync::DbId db_id = make_node(0xDF);
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0xAF), db_id);
+
+    EmptyPeer peer;
+    sync::SyncWorkerOptions options;
+    options.enable_logical_delivery = true;
+    sync::SyncWorker worker(engine, peer, options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (!result.ok || result.pages_pulled != 1u ||
+        result.logical_deliveries_delivered != 0u) {
+        throw std::runtime_error(
+            "raw-only peer failed with an empty logical outbox");
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_worker_preserves_outbox_after_unavailable_or_retryable_logical_delivery() {
     using namespace mdbxc;
     const std::string source_path =
@@ -3089,6 +3114,8 @@ int main() {
           &test_worker_rejects_manifest_only_snapshot_fallback },
         { "test_worker_delivers_pending_logical_outbox_after_raw_sync",
           &test_worker_delivers_pending_logical_outbox_after_raw_sync },
+        { "test_worker_allows_raw_only_peer_when_logical_outbox_is_empty",
+          &test_worker_allows_raw_only_peer_when_logical_outbox_is_empty },
         { "test_worker_preserves_outbox_after_unavailable_or_retryable_logical_delivery",
           &test_worker_preserves_outbox_after_unavailable_or_retryable_logical_delivery },
         { "test_worker_rejects_logical_complete_snapshot_fallback",

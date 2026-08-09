@@ -904,6 +904,18 @@ namespace sync {
                                        limit, bounds);
         }
 
+        /// \brief Returns whether any receiver route has pending delivery.
+        /// \details A raw-only worker uses this before it can obtain a
+        /// receiver-specific logical hello.
+        bool has_pending_logical_deliveries(
+                const DbId& destination,
+                const CodecBounds* bounds = nullptr) const {
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            return outbox.has_pending_for_destination(txn.handle(), destination,
+                                                      bounds);
+        }
+
         /// \brief Persists a cumulative acknowledgement and removes its prefix.
         std::size_t acknowledge_logical_deliveries(
                 const DbId& destination,

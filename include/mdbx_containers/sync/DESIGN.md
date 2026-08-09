@@ -1779,10 +1779,12 @@ or equivalent mechanism when polling alone cannot unblock the operation.
 
 `SyncWorkerOptions::enable_logical_delivery` is false by default. When enabled,
 the worker attempts logical dispatch only after its normal raw pull loop has
-drained the current round (`has_more == false`). It obtains the remote hello,
-then checks the outbox for that replication `DbId` and receiver node pair; an
-empty receiver queue does not require dispatch. A non-empty outbox requires
-`ISyncPeer::supports_logical_delivery()`. The worker dispatches at most one
+drained the current round (`has_more == false`). It first checks whether the
+replication `DbId` has any pending logical entry. An empty logical outbox does
+not require capability negotiation, so a raw-only peer still completes the
+round. Pending logical state requires `ISyncPeer::supports_logical_delivery()`;
+the worker then obtains the remote hello and checks its receiver route. The
+worker dispatches at most one
 envelope in each peer call, reports `LogicalDeliveryStarted` and
 `LogicalDeliveryFinished` stages, and stores delivered and acknowledged counts
 in its round result. `max_logical_deliveries == 0` drains the pending prefix;
