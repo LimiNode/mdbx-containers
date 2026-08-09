@@ -254,6 +254,7 @@ public:
         (void)bounds;
         mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
         acknowledgement.destination_db_uuid = request.envelope.destination_db_uuid;
+        acknowledgement.receiver_node_id = request.receiver_node_id;
         acknowledgement.origin_node_id = request.envelope.origin_node_id;
         acknowledgement.ok = false;
         acknowledgement.retryable = true;
