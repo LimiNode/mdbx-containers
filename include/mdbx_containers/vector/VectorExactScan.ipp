@@ -12,17 +12,19 @@ namespace mdbxc {
     }
 
     inline void VectorExactScan::normalize(float* values, std::size_t dimension) {
-        float squared_norm = 0.0f;
+        double squared_norm = 0.0;
         for (std::size_t index = 0u; index < dimension; ++index) {
-            squared_norm += values[index] * values[index];
+            const double component = static_cast<double>(values[index]);
+            squared_norm += component * component;
         }
-        const float norm = std::sqrt(squared_norm);
-        if (norm == 0.0f) {
+        const double norm = std::sqrt(squared_norm);
+        if (norm == 0.0) {
             std::fill(values, values + dimension, 0.0f);
             return;
         }
         for (std::size_t index = 0u; index < dimension; ++index) {
-            values[index] /= norm;
+            values[index] = static_cast<float>(
+                static_cast<double>(values[index]) / norm);
         }
     }
 

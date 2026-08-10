@@ -62,6 +62,21 @@ bool search_rejects_dimension(const mdbxc::VectorExactScan& scan) {
     return false;
 }
 
+void verify_cosine_self_similarity(
+        const std::shared_ptr<mdbxc::Connection>& connection,
+        const std::string& collection_id,
+        float magnitude) {
+    mdbxc::VectorCollection collection(
+        connection, make_descriptor(collection_id, mdbxc::VectorMetric::COSINE));
+    const mdbxc::Embedding embedding = make_embedding(magnitude, 0.0f);
+    collection.insert_or_assign("self", embedding);
+    const mdbxc::VectorExactScan scan(collection);
+    const std::vector<mdbxc::VectorExactMatch> matches = scan.search(embedding, 1u);
+    MDBXC_TEST_ASSERT(matches.size() == 1u);
+    MDBXC_TEST_ASSERT(matches[0].record_id == "self");
+    MDBXC_TEST_ASSERT(approximately_equal(matches[0].score, 1.0f));
+}
+
 void verify_metric(mdbxc::VectorMetric metric,
                    const std::string& collection_id,
                    const std::shared_ptr<mdbxc::Connection>& connection) {
@@ -110,6 +125,10 @@ int main() {
     verify_metric(mdbxc::VectorMetric::COSINE, "exact-cosine", connection);
     verify_metric(mdbxc::VectorMetric::DOT, "exact-dot", connection);
     verify_metric(mdbxc::VectorMetric::L2, "exact-l2", connection);
+    verify_cosine_self_similarity(
+        connection, "exact-cosine-max", (std::numeric_limits<float>::max)());
+    verify_cosine_self_similarity(
+        connection, "exact-cosine-min", (std::numeric_limits<float>::min)());
 
     {
         mdbxc::VectorCollection empty_collection(
