@@ -77,9 +77,11 @@ Raw-копия adapter-owned user DBI без logical delivery state не мог�
 `LogicalRecoveryResponse` и не меняет raw `PullRequest`, `FullSnapshotChunk`
 или raw complete snapshot guard.
 
-На данном этапе transport-neutral вариант доступен через `DirectSyncPeer`.
-HTTP- и WebSocket-binding не считаются capable для logical recovery, пока не
-реализуют тот же отдельный wire contract.
+`DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer` используют один
+отдельный wire contract logical recovery. В запросе передаются node requester
+и целевой `DbId`; источник отклоняет несовпадающий database до materialization
+snapshot. HTTP bearer и WebSocket session identity policy применяют к этому
+`DbId` существующее per-principal правило доступа к database.
 
 Источник берёт один stable read baseline, в который входят:
 

@@ -1635,13 +1635,17 @@ for physical operations and logical baseline records; source enumeration spends
 that budget before retaining each logical record. `LogicalRecoveryPeer` also
 accepts a cooperative cancellation token: a cancelled materialization returns a
 retryable failure and publishes no snapshot session. `LogicalRecoveryProtocolCodec`
-is a distinct strict versioned wire contract (`MDBXCLRP`): it carries only
-requests and responses, rejects trailing bytes and inconsistent page shapes,
-and nests the existing bounded `FullSnapshotCodec` for physical pages.
-`DirectSyncPeer`, `HttpSyncPeer`, and `WebSocketSyncPeer` implement this
-capability. HTTP and WebSocket forward a caller cancellation token to their
-client-side socket/post operation; propagation of a remote disconnect into
-source materialization remains concrete-server-backend work and is deferred.
+is a distinct strict versioned wire contract (`MDBXCLRP`): every request carries
+the requester and target `DbId`; it rejects trailing bytes, incompatible codec
+versions, and inconsistent page shapes, and nests the existing bounded
+`FullSnapshotCodec` for physical pages. Sources reject a mismatched `DbId`
+before snapshot materialization. HTTP bearer and WebSocket authenticated-node
+policies apply their existing per-principal DB access checks to this request,
+as they do for raw pull and push. `DirectSyncPeer`, `HttpSyncPeer`, and
+`WebSocketSyncPeer` implement this capability. HTTP and WebSocket forward a
+caller cancellation token to their client-side socket/post operation;
+propagation of a remote disconnect into source materialization remains
+concrete-server-backend work and is deferred.
 
 `SyncEngine::apply_full_snapshot_chunk()` stages all pages in bounded process
 memory and validates immutable page-zero metadata on every continuation. Only

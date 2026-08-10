@@ -291,6 +291,7 @@ void test_peer_middleware_forwards_logical_capabilities() {
 
     mdbxc::sync::LogicalRecoveryRequest request;
     request.requester = make_node(0x33);
+    request.db_id = make_node(0xD3);
     mdbxc::sync::CancellationSource cancellation;
     const mdbxc::sync::CancellationToken token = cancellation.token();
     const mdbxc::sync::LogicalRecoveryResponse response =
@@ -671,6 +672,7 @@ void test_http_bearer_node_identity_policy() {
 
     mdbxc::sync::LogicalRecoveryRequest recovery;
     recovery.requester = node_a;
+    recovery.db_id = db_a;
     request.target = mdbxc::sync::HttpSyncRoutes::logical_recovery_target();
     request.body = mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(
         recovery);
@@ -678,7 +680,15 @@ void test_http_bearer_node_identity_policy() {
     require_true(decision.allowed,
                  "matching logical recovery requester was rejected");
 
+    recovery.db_id = db_b;
+    request.body = mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(
+        recovery);
+    decision = policy.check_http_request(request);
+    require_true(!decision.allowed && decision.status_code == 403,
+                 "logical recovery db_id mismatch was not rejected");
+
     recovery.requester = node_b;
+    recovery.db_id = db_a;
     request.body = mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(
         recovery);
     decision = policy.check_http_request(request);

@@ -36,7 +36,7 @@ namespace sync {
         }
 
         static std::size_t magic_size() { return 8u; }
-        static std::uint16_t codec_version() { return 1u; }
+        static std::uint16_t codec_version() { return 2u; }
 
         static std::vector<std::uint8_t> encode_request(
                 const LogicalRecoveryRequest& request,
@@ -45,6 +45,7 @@ namespace sync {
             validate_request(request, &effective);
             std::vector<std::uint8_t> out = make_header(MessageType::Request);
             append_id(out, request.requester);
+            append_id(out, request.db_id);
             append_snapshot_token(out, request.snapshot_id, effective);
             append_snapshot_token(out, request.continuation, effective);
             append_u64(out, request.max_bytes);
@@ -61,6 +62,7 @@ namespace sync {
             check_header(cur, MessageType::Request);
             LogicalRecoveryRequest out;
             read_id(cur, out.requester);
+            read_id(cur, out.db_id);
             out.snapshot_id = read_snapshot_token(cur, effective);
             out.continuation = read_snapshot_token(cur, effective);
             out.max_bytes = read_u64(cur);
@@ -79,7 +81,7 @@ namespace sync {
             append_bool(out, response.ok);
             append_bool(out, response.has_more);
             append_bool(out, response.has_baseline);
-            append_u16(out, static_cast<std::uint16_t>(response.error_code));
+            append_response_error_code(out, response.error_code);
             append_bool(out, response.error_retryable);
             append_error(out, response.error, effective);
             if (response.ok) {
@@ -140,6 +142,10 @@ namespace sync {
             if (is_zero_sync_id(request.requester)) {
                 throw std::invalid_argument(
                     "Logical recovery requester identity is incomplete");
+            }
+            if (is_zero_sync_id(request.db_id)) {
+                throw std::invalid_argument(
+                    "Logical recovery db_id is incomplete");
             }
             if (request.snapshot_id.size() > effective.max_snapshot_id_len ||
                 request.continuation.size() > effective.max_snapshot_id_len) {
@@ -496,6 +502,10 @@ namespace sync {
                 const std::vector<std::uint8_t> envelope =
                     LogicalDeliveryEnvelopeCodec::encode(
                         baseline.source_outbox_pending[i], &bounds);
+                if (envelope.size() > bounds.max_batch_total_bytes) {
+                    throw std::length_error(
+                        "logical recovery envelope exceeds max_batch_total_bytes");
+                }
                 append_u32_size(out, envelope.size(),
                                 "logical recovery envelope length exceeds u32");
                 append_bytes(out, envelope.empty() ? nullptr : &envelope[0],
@@ -562,6 +572,11 @@ namespace sync {
             append_u16(out, static_cast<std::uint16_t>(entry.record.kind));
             append_u32(out, entry.record.schema_version);
             append_u32(out, entry.record.flags);
+            if (entry.record.dbi_names.size() >
+                bounds.max_snapshot_manifest_entries) {
+                throw std::length_error(
+                    "logical recovery schema DBI count exceeds max_snapshot_manifest_entries");
+            }
             append_u32_size(out, entry.record.dbi_names.size(),
                             "logical recovery schema DBI count exceeds u32");
             for (std::size_t i = 0u; i < entry.record.dbi_names.size(); ++i) {
@@ -670,6 +685,26 @@ namespace sync {
                 throw std::length_error(error);
             }
             return count;
+        }
+
+        static void append_response_error_code(
+                std::vector<std::uint8_t>& out,
+                SyncResponseErrorCode code) {
+            switch (code) {
+                case SyncResponseErrorCode::None:
+                case SyncResponseErrorCode::DbIdMismatch:
+                case SyncResponseErrorCode::UnsupportedFullSnapshot:
+                case SyncResponseErrorCode::ApplyConflict:
+                case SyncResponseErrorCode::SnapshotRequired:
+                case SyncResponseErrorCode::BatchTooLarge:
+                case SyncResponseErrorCode::SnapshotNotConfigured:
+                case SyncResponseErrorCode::SnapshotSessionInvalid:
+                case SyncResponseErrorCode::SnapshotSessionBusy:
+                case SyncResponseErrorCode::SnapshotLogicalStateUnsupported:
+                    append_u16(out, static_cast<std::uint16_t>(code));
+                    return;
+            }
+            throw std::logic_error("unknown SyncResponseErrorCode");
         }
 
         static void validate_baseline(const LogicalRecoveryBaseline& baseline,

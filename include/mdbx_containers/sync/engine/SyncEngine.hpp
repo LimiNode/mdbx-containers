@@ -367,6 +367,13 @@ namespace sync {
         LogicalRecoveryResponse handle_logical_recovery(
                 const LogicalRecoveryRequest& request,
                 const CancellationToken* cancel_token = nullptr) {
+            if (!db_id_matches(request.db_id)) {
+                LogicalRecoveryResponse mismatch;
+                mismatch.ok = false;
+                mismatch.error = "db_id mismatch";
+                mismatch.error_code = SyncResponseErrorCode::DbIdMismatch;
+                return mismatch;
+            }
             if (cancel_token != nullptr &&
                 cancel_token->is_cancellation_requested()) {
                 LogicalRecoveryResponse cancelled;
@@ -377,6 +384,7 @@ namespace sync {
             }
             PullRequest snapshot_request;
             snapshot_request.requester = request.requester;
+            snapshot_request.db_id = request.db_id;
             snapshot_request.request_full_snapshot = true;
             snapshot_request.full_snapshot_id = request.snapshot_id;
             snapshot_request.full_snapshot_continuation = request.continuation;

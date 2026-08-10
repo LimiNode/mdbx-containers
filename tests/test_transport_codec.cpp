@@ -441,6 +441,7 @@ void test_logical_recovery_protocol_roundtrip() {
 
     LogicalRecoveryRequest request;
     request.requester = make_node(0x31);
+    request.db_id = make_node(0xD1);
     request.max_bytes = 8192u;
     request.max_single_batch_bytes = 4096u;
     const LogicalRecoveryRequest decoded_request =
@@ -448,6 +449,8 @@ void test_logical_recovery_protocol_roundtrip() {
             LogicalRecoveryProtocolCodec::encode_request(request));
     require_true(decoded_request.requester == request.requester,
                  "logical recovery requester mismatch");
+    require_true(decoded_request.db_id == request.db_id,
+                 "logical recovery db_id mismatch");
     require_true(decoded_request.max_bytes == request.max_bytes,
                  "logical recovery max bytes mismatch");
 
@@ -569,7 +572,44 @@ void test_logical_recovery_protocol_rejections() {
     expect_throw("logical recovery transport bound", [&bounds] {
         LogicalRecoveryRequest request;
         request.requester = make_node(0x44);
+        request.db_id = make_node(0xD4);
         (void)LogicalRecoveryProtocolCodec::encode_request(request, &bounds);
+    });
+
+    LogicalRecoveryResponse invalid_error_code;
+    invalid_error_code.ok = false;
+    invalid_error_code.error_code =
+        static_cast<SyncResponseErrorCode>(0xFFFFu);
+    expect_throw("logical recovery unknown error code", [invalid_error_code] {
+        (void)LogicalRecoveryProtocolCodec::encode_response(invalid_error_code);
+    });
+
+    LogicalRecoveryResponse oversized_pending = response;
+    LogicalDeliveryEnvelope pending;
+    pending.destination_db_uuid = response.snapshot_chunk.source_db_uuid;
+    pending.origin_node_id = make_node(0x55);
+    pending.origin_sequence = 1u;
+    pending.frame_id = "pending-bound";
+    oversized_pending.baseline.source_outbox_pending.push_back(pending);
+    CodecBounds envelope_bounds;
+    envelope_bounds.max_batch_total_bytes = 1u;
+    expect_throw("logical recovery pending envelope bound", [oversized_pending,
+                                                               &envelope_bounds] {
+        (void)LogicalRecoveryProtocolCodec::encode_response(
+            oversized_pending, &envelope_bounds);
+    });
+
+    response.baseline.schemas.push_back(LogicalSchemaRegistryEntry());
+    response.baseline.schemas.back().schema_id = "app.recovery.bound";
+    response.baseline.schemas.back().record.dbi_name = "documents";
+    response.baseline.schemas.back().record.kind = LogicalTableKind::KeyValue;
+    response.baseline.schemas.back().record.schema_version = 1u;
+    response.baseline.schemas.back().record.dbi_names.push_back("documents");
+    response.baseline.schemas.back().record.dbi_names.push_back("metadata");
+    CodecBounds schema_bounds;
+    schema_bounds.max_snapshot_manifest_entries = 1u;
+    expect_throw("logical recovery schema DBI count bound", [response, &schema_bounds] {
+        (void)LogicalRecoveryProtocolCodec::encode_response(response, &schema_bounds);
     });
 }
 

@@ -402,13 +402,22 @@ void test_websocket_authenticated_node_policy() {
 
     mdbxc::sync::LogicalRecoveryRequest recovery;
     recovery.requester = node_a;
+    recovery.db_id = db_a;
     context.binary_message =
         mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(recovery);
     decision = policy.check_websocket_message(context);
     require_true(decision.allowed,
                  "matching WebSocket logical recovery requester was rejected");
 
+    recovery.db_id = db_b;
+    context.binary_message =
+        mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(recovery);
+    decision = policy.check_websocket_message(context);
+    require_true(!decision.allowed && decision.status_code == 1008,
+                 "WebSocket logical recovery db_id mismatch was not rejected");
+
     recovery.requester = node_b;
+    recovery.db_id = db_a;
     context.binary_message =
         mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(recovery);
     decision = policy.check_websocket_message(context);
@@ -550,14 +559,21 @@ void test_websocket_peer_logical_recovery_route() {
     cleanup(source_path);
 
     std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
-    mdbxc::sync::SyncEngine engine(source);
+    mdbxc::sync::FullSnapshotExportOptions options;
+    options.replacement_scope =
+        mdbxc::sync::FullSnapshotScope::CompleteUserDatabase;
+    mdbxc::sync::SyncEngine engine(
+        source, mdbxc::sync::ConflictPolicy::Reject, options);
     engine.initialize_local_identity(make_node(0x81), make_node(0x91));
+    mdbxc::KeyValueTable<int, std::string> source_values(source, "values");
+    source_values.insert_or_assign(1, "recovery-value");
     mdbxc::sync::WebSocketSyncServer server(engine);
     LoopbackWebSocketChannel channel(server);
     mdbxc::sync::WebSocketSyncPeer peer(channel);
 
     mdbxc::sync::LogicalRecoveryRequest request;
     request.requester = make_node(0xA1);
+    request.db_id = make_node(0x91);
     mdbxc::sync::CancellationSource cancellation;
     const mdbxc::sync::CancellationToken token = cancellation.token();
     const mdbxc::sync::LogicalRecoveryResponse response =
@@ -565,9 +581,9 @@ void test_websocket_peer_logical_recovery_route() {
 
     require_true(peer.supports_logical_recovery(),
                  "WebSocket peer did not advertise logical recovery");
-    require_true(!response.ok && response.error_code ==
-                     mdbxc::sync::SyncResponseErrorCode::SnapshotNotConfigured,
-                 "WebSocket logical recovery structured failure mismatch");
+    require_true(response.ok && response.has_baseline &&
+                     !response.snapshot_chunk.has_more,
+                 "WebSocket logical recovery success response mismatch");
     require_true(channel.last_was_logical(),
                  "WebSocket logical recovery did not use logical wire family");
     require_true(channel.last_token_cancellable(),

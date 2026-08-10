@@ -414,15 +414,21 @@ namespace sync {
 
         HttpSyncResponse handle_logical_recovery(
                 const std::vector<std::uint8_t>& body) const {
+            LogicalRecoveryRequest decoded;
             try {
-                const LogicalRecoveryRequest request =
-                    LogicalRecoveryProtocolCodec::decode_request(body, &m_bounds);
-                return make_binary(LogicalRecoveryProtocolCodec::encode_response(
-                    m_engine.handle_logical_recovery(request), &m_bounds));
+                decoded = LogicalRecoveryProtocolCodec::decode_request(
+                    body, &m_bounds);
             } catch (const std::length_error& e) {
                 return make_error(413, e.what());
             } catch (const std::exception& e) {
                 return make_error(400, e.what());
+            }
+
+            try {
+                return make_binary(LogicalRecoveryProtocolCodec::encode_response(
+                    m_engine.handle_logical_recovery(decoded), &m_bounds));
+            } catch (const std::exception& e) {
+                return make_error(500, e.what());
             }
         }
 

@@ -2863,8 +2863,18 @@ void test_engine_recovers_logical_baseline_atomically() {
 
     sync::LogicalRecoveryRequest request;
     request.requester = replica_node;
+    request.db_id = db_id;
     request.max_bytes = 8192u;
     request.max_single_batch_bytes = 8192u;
+    request.db_id = make_node(0xE1);
+    const sync::LogicalRecoveryResponse db_mismatch =
+        source.handle_logical_recovery(request);
+    if (db_mismatch.ok || db_mismatch.error_code !=
+            sync::SyncResponseErrorCode::DbIdMismatch) {
+        throw std::runtime_error(
+            "logical recovery did not reject a mismatched db_id");
+    }
+    request.db_id = db_id;
     const sync::LogicalRecoveryResponse response =
         source.handle_logical_recovery(request);
     if (!response.ok || response.has_more || !response.has_baseline) {
@@ -3033,6 +3043,7 @@ void test_engine_recovery_preserves_global_origin_sequence_across_receiver_cutov
 
     sync::LogicalRecoveryRequest request;
     request.requester = recovered_node;
+    request.db_id = db_id;
     request.max_bytes = 8192u;
     request.max_single_batch_bytes = 8192u;
     const sync::LogicalRecoveryResponse response =
@@ -3119,6 +3130,7 @@ void test_engine_recovery_counts_fixed_logical_baseline_records_in_byte_budget()
 
     sync::LogicalRecoveryRequest request;
     request.requester = requester_node;
+    request.db_id = db_id;
     request.max_bytes = 8192u;
     request.max_single_batch_bytes = 8192u;
     const sync::LogicalRecoveryResponse response =
@@ -3194,6 +3206,7 @@ void test_engine_recovery_counts_schema_dbi_name_storage_in_byte_budget() {
 
     sync::LogicalRecoveryRequest request;
     request.requester = requester_node;
+    request.db_id = db_id;
     request.max_bytes = 8192u;
     request.max_single_batch_bytes = 8192u;
     const sync::LogicalRecoveryResponse response =
@@ -3241,6 +3254,7 @@ void test_engine_recovery_counts_outbox_change_storage_in_byte_budget() {
 
     sync::LogicalRecoveryRequest request;
     request.requester = requester_node;
+    request.db_id = db_id;
     request.max_bytes = 8192u;
     request.max_single_batch_bytes = 8192u;
     const sync::LogicalRecoveryResponse response =
@@ -3284,6 +3298,7 @@ void test_engine_cancels_direct_logical_recovery_materialization() {
     sync::DirectSyncPeer peer(&source);
     sync::LogicalRecoveryRequest request;
     request.requester = replica_node;
+    request.db_id = db_id;
     request.max_bytes = 8192u;
     request.max_single_batch_bytes = 8192u;
     sync::CancellationSource cancellation;

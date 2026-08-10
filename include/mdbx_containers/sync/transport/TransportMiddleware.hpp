@@ -537,7 +537,7 @@ namespace sync {
                         "logical recovery requester does not match authenticated node",
                         403);
                 }
-                return SyncTransportDecision::allow();
+                return check_db(binding, request.db_id);
             } catch (const std::length_error& e) {
                 return SyncTransportDecision::reject(e.what(), 413);
             } catch (const std::exception& e) {
@@ -662,7 +662,7 @@ namespace sync {
                     "logical recovery requester does not match authenticated WebSocket node",
                     1008);
             }
-            return SyncTransportDecision::allow();
+            return check_db(context.db_access, request.db_id);
         }
 
         static SyncTransportDecision check_db(
