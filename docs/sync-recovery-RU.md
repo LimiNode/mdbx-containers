@@ -114,12 +114,16 @@ replay acknowledgement, а не второе изменение; следующ�
 применяется обычно. Повреждённый baseline, отсутствующий adapter или не fresh
 logical state получателя откатывают final transaction.
 
-Source materialization bounds покрывают и physical snapshot operations, и
-fixed/variable footprint logical baseline records. Receiver применяет тот же
-combined bound к staged physical pages и final baseline до открытия destination
-write transaction. `LogicalRecoveryPeer` принимает cooperative cancellation
-token для recovery call; cancellation даёт retryable response и отбрасывает
-неопубликованную source session. Этот контракт поддерживает `DirectSyncPeer`.
+Source materialization bounds покрывают physical snapshot operations и
+учитываемое logical-baseline representation: fixed records, dynamic container
+elements и serialized variable payloads. Receiver применяет тот же combined
+bound к staged physical pages и final baseline до открытия destination write
+transaction. Это structural materialization accounting limit, а не гарантированный
+process-heap ceiling: allocator overhead, container capacities и temporary
+copies зависят от реализации. `LogicalRecoveryPeer` принимает cooperative
+cancellation token для recovery call; cancellation даёт retryable response и
+отбрасывает неопубликованную source session. Этот контракт поддерживает
+`DirectSyncPeer`.
 
 ## Процедура оператора
 
