@@ -56,7 +56,7 @@ in-memory staging; persisted importer resume сейчас не реализов�
 
 ## Граница логического состояния
 
-`CompleteUserDatabase` предназначен только для raw sync. Источник отклоняет его
+Raw `CompleteUserDatabase` предназначен только для raw sync. Источник отклоняет его
 с `SnapshotLogicalStateUnsupported`, когда находит любой persistent logical-sync
 state, в том числе:
 
@@ -67,8 +67,59 @@ state, в том числе:
 
 Raw-копия adapter-owned user DBI без logical delivery state не могла бы
 безопасно продолжить logical replication. `ManifestOnly` также не обещает
-восстановления или bootstrap logical state. Будущий logical snapshot protocol
-должен атомарно переносить logical schema, replay, ordering и recovery state.
+восстановления или bootstrap logical state.
+
+## Logical-aware recovery для fresh replica
+
+`SyncWorkerOptions::enable_logical_recovery_fallback` - отдельный, по
+умолчанию выключенный путь для fresh replica после `SnapshotRequired`. Он
+использует отдельный peer contract `LogicalRecoveryRequest` /
+`LogicalRecoveryResponse` и не меняет raw `PullRequest`, `FullSnapshotChunk`
+или raw complete snapshot guard.
+
+На данном этапе transport-neutral вариант доступен через `DirectSyncPeer`.
+HTTP- и WebSocket-binding не считаются capable для logical recovery, пока не
+реализуют тот же отдельный wire contract.
+
+Источник берёт один stable read baseline, в который входят:
+
+- complete non-reserved user-DBI snapshot и raw applied-cursor tail;
+- logical schema markers;
+- replay markers и pruning watermarks;
+- ordered-delivery receiver frontiers;
+- source outbox tail и ещё не подтверждённые envelopes для конкретного
+  requesting receiver node.
+
+Pending source suffix непрерывен и заканчивается на known tail этого receiver.
+Он не общий с другой репликой, даже если у неё тот же database identity.
+
+У упорядоченного logical event одна глобальная identity на database и origin:
+`(DbId, origin_node_id, origin_sequence)`. Source не выделяет новый
+`origin_sequence`, когда в v0.1 переносится единственный receiver route. Pending
+outbox entries и acknowledgements остаются receiver-specific. Поэтому route с
+receiver B на fresh receiver C переносится только через logical-aware recovery
+из B в C. Он импортирует ordered frontiers B, после чего C принимает следующий
+global event от source. Отправка более позднего event сразу на не
+восстановленный C fail-closed отклоняется как ordered sequence gap.
+
+Получатель требует совместимый in-memory adapter для каждой schema из
+baseline. Физические страницы staging'уются в памяти. На final page он
+проверяет baseline, заменяет user DBI, bootstrap'ит raw cursor,
+восстанавливает logical metadata и создаёт replay markers для source
+envelopes, которые ещё не были acknowledged. Всё это commit'ится одной MDBX
+transaction. Source outbox не копируется как local outbox получателя.
+
+Благодаря этому повторная отправка старого pending source envelope получает
+replay acknowledgement, а не второе изменение; следующий source sequence
+применяется обычно. Повреждённый baseline, отсутствующий adapter или не fresh
+logical state получателя откатывают final transaction.
+
+Source materialization bounds покрывают и physical snapshot operations, и
+fixed/variable footprint logical baseline records. Receiver применяет тот же
+combined bound к staged physical pages и final baseline до открытия destination
+write transaction. `LogicalRecoveryPeer` принимает cooperative cancellation
+token для recovery call; cancellation даёт retryable response и отбрасывает
+неопубликованную source session. Этот контракт поддерживает `DirectSyncPeer`.
 
 ## Процедура оператора
 
@@ -80,8 +131,9 @@ Raw-копия adapter-owned user DBI без logical delivery state не мог�
    `SyncWorkerOptions::enable_full_snapshot_fallback`, либо ведите явный
    snapshot request из application code.
 4. Считайте `SnapshotLogicalStateUnsupported` сменой recovery method, а не
-   retryable transport error. Для него нужен application-specific logical
-   recovery process.
+   retryable transport error. Для fresh receiver с capable peer используйте
+   explicit logical-aware fallback; в остальных случаях нужен
+   application-specific logical recovery process.
 5. Используйте `ManifestOnly` только тогда, когда замена перечисленных
    физических DBI является нужной application operation и корректно оставить
    global replication cursor без изменений.

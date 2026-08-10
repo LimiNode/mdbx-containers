@@ -93,6 +93,14 @@ namespace sync {
         /// partially replicated database.
         bool enable_full_snapshot_fallback = false;
 
+        /// \brief Requests logical-aware fresh-replica recovery after
+        /// \c SnapshotRequired.
+        /// \details Disabled by default. This is a separate peer capability
+        /// and commits the final physical snapshot page together with schema,
+        /// replay, and ordered-delivery metadata. It never relaxes the raw
+        /// CompleteUserDatabase logical-state guard.
+        bool enable_logical_recovery_fallback = false;
+
         /// \brief Sends this engine's queued logical deliveries after raw sync.
         /// \details Disabled by default, preserving the raw-only worker contract.
         /// When enabled, the worker sends only the outbox prefix addressed to
@@ -630,9 +638,15 @@ namespace sync {
                     }
                     if (!response.ok) {
                         if (response.error_code ==
-                                SyncResponseErrorCode::SnapshotRequired &&
-                            m_options.enable_full_snapshot_fallback) {
-                            return run_full_snapshot_fallback(request, result);
+                                SyncResponseErrorCode::SnapshotRequired) {
+                            if (m_options.enable_logical_recovery_fallback &&
+                                m_peer.supports_logical_recovery()) {
+                                return run_logical_recovery_fallback(request,
+                                                                     result);
+                            }
+                            if (m_options.enable_full_snapshot_fallback) {
+                                return run_full_snapshot_fallback(request, result);
+                            }
                         }
                         result.ok = false;
                         result.error = response.error.empty()
@@ -836,6 +850,123 @@ namespace sync {
                 if (remaining != 0u) {
                     --remaining;
                 }
+            }
+        }
+
+        SyncWorkerRoundResult run_logical_recovery_fallback(
+                const PullRequest& incremental_request,
+                SyncWorkerRoundResult result) {
+            m_engine.discard_full_snapshot_import();
+            FullSnapshotImportResetGuard reset_guard(m_engine);
+            LogicalRecoveryRequest request;
+            request.requester = incremental_request.requester;
+            request.max_bytes = incremental_request.max_bytes;
+            request.max_single_batch_bytes =
+                incremental_request.max_single_batch_bytes;
+
+            for (;;) {
+                if (stop_requested()) {
+                    result.has_more = true;
+                    return result;
+                }
+
+                LogicalRecoveryResponse response;
+                {
+                    CancellationToken cancel_token;
+                    PeerCallGuard peer_call(*this, cancel_token);
+                    if (!peer_call.active()) {
+                        result.has_more = true;
+                        return result;
+                    }
+                    notify_stage_changed(make_stage_event(
+                        SyncWorkerStage::PullStarted, result));
+                    response = m_peer.logical_recovery_with_cancel(
+                        request, &cancel_token);
+                }
+                {
+                    SyncWorkerStageEvent event = make_stage_event(
+                        SyncWorkerStage::PullFinished, result);
+                    event.has_more = response.has_more;
+                    event.ok = response.ok;
+                    event.error = response.error;
+                    event.sync_error_code = response.error_code;
+                    event.sync_error_retryable = response.error_retryable;
+                    notify_stage_changed(event);
+                }
+                if (!response.ok) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error = response.error.empty()
+                        ? "logical recovery pull failed"
+                        : response.error;
+                    result.retry_hint = m_peer.last_retry_hint();
+                    result.sync_error_code = response.error_code;
+                    result.sync_error_retryable = response.error_retryable;
+                    return result;
+                }
+                if (response.snapshot_chunk.replacement_scope !=
+                        FullSnapshotScope::CompleteUserDatabase ||
+                    response.has_more != response.snapshot_chunk.has_more ||
+                    response.has_baseline == response.has_more) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error = "logical recovery returned an invalid response shape";
+                    result.sync_error_code =
+                        SyncResponseErrorCode::SnapshotSessionInvalid;
+                    return result;
+                }
+                ++result.pages_pulled;
+                if (stop_requested() || !begin_apply_stage() ||
+                    !enter_apply_gate()) {
+                    m_engine.discard_full_snapshot_import();
+                    result.has_more = response.has_more;
+                    return result;
+                }
+                {
+                    SyncWorkerStageEvent event = make_stage_event(
+                        SyncWorkerStage::ApplyStarted, result);
+                    event.has_more = response.has_more;
+                    notify_stage_changed(event);
+                }
+                const LogicalRecoveryBaseline* baseline = response.has_baseline
+                    ? &response.baseline : nullptr;
+                const FullSnapshotImportResult imported =
+                    m_engine.apply_logical_recovery_chunk(
+                        response.snapshot_chunk, baseline);
+                {
+                    SyncWorkerStageEvent event = make_stage_event(
+                        SyncWorkerStage::ApplyFinished, result);
+                    event.has_more = response.has_more;
+                    event.ok = true;
+                    notify_stage_changed(event);
+                }
+                if (response.has_more && imported.completed) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error =
+                        "logical recovery importer completed before final page";
+                    return result;
+                }
+                if (!response.has_more && !imported.completed) {
+                    m_engine.discard_full_snapshot_import();
+                    result.ok = false;
+                    result.error =
+                        "logical recovery importer did not complete final page";
+                    return result;
+                }
+
+                result.has_more = response.has_more;
+                if (!response.has_more) {
+                    result.progress = make_progress_estimate(
+                        response.snapshot_chunk.source_tail,
+                        m_engine.applied_cursor(), result.batches_applied);
+                    result.sync_error_code = SyncResponseErrorCode::None;
+                    result.sync_error_retryable = false;
+                    reset_guard.dismiss();
+                    return result;
+                }
+                request.snapshot_id = response.snapshot_chunk.snapshot_id;
+                request.continuation = response.snapshot_chunk.continuation;
             }
         }
 

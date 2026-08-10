@@ -26,6 +26,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#if defined(MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT)
+#include <functional>
+#endif
 #include <limits>
 #include <map>
 #include <memory>
@@ -122,6 +125,31 @@ namespace sync {
             std::uint64_t chunk_index = 0u;
         };
 
+        struct MaterializationBudget {
+            explicit MaterializationBudget(
+                    const FullSnapshotExportOptions& options)
+                : operations_left(options.max_materialized_operations),
+                  bytes_left(options.max_materialized_bytes) {}
+
+            void consume(std::uint64_t operations, std::uint64_t bytes,
+                         const char* context) {
+                if (operations > operations_left || bytes > bytes_left) {
+                    throw std::length_error(context);
+                }
+                operations_left -= operations;
+                bytes_left -= bytes;
+            }
+
+            std::uint64_t operations_left;
+            std::uint64_t bytes_left;
+        };
+
+        class FullSnapshotCancelled : public std::runtime_error {
+        public:
+            FullSnapshotCancelled()
+                : std::runtime_error("full snapshot materialization cancelled") {}
+        };
+
         struct FullSnapshotSession {
             NodeId source_node_id{};
             DbId source_db_uuid{};
@@ -132,6 +160,8 @@ namespace sync {
                 FullSnapshotScope::ManifestOnly;
             std::vector<FullSnapshotManifestEntry> manifest;
             std::vector<ChangeOp> operations;
+            bool logical_recovery = false;
+            LogicalRecoveryBaseline logical_recovery_baseline;
             std::map<std::string, FullSnapshotContinuation> continuations;
             std::chrono::steady_clock::time_point last_access;
             std::mutex mutex;
@@ -164,6 +194,7 @@ namespace sync {
             std::uint64_t staged_bytes = 0u;
             std::vector<ChangeOp> operations;
             std::map<std::string, ReplacementState> replacement_state;
+            bool logical_recovery = false;
         };
 
     public:
@@ -283,9 +314,8 @@ namespace sync {
                 std::lock_guard<std::mutex> lock(
                     m_full_snapshot_import_mutex);
                 try {
-                    result = apply_full_snapshot_chunk_locked(chunk,
-                                                              notification,
-                                                              notification_ready);
+                    result = apply_full_snapshot_chunk_locked(
+                        chunk, nullptr, false, notification, notification_ready);
                 } catch (...) {
                     m_full_snapshot_import_session.reset();
                     throw;
@@ -296,6 +326,95 @@ namespace sync {
             }
             return result;
         }
+
+        /// \brief Stages or atomically applies one logical-aware recovery page.
+        /// \details The final page carries its immutable logical baseline. The
+        /// user-DBI replacement and logical schema/replay/order state commit in
+        /// the same MDBX transaction; malformed metadata therefore leaves the
+        /// destination unchanged.
+        FullSnapshotImportResult apply_logical_recovery_chunk(
+                const FullSnapshotChunk& chunk,
+                const LogicalRecoveryBaseline* baseline = nullptr) {
+            FullSnapshotCodec::validate(chunk);
+            if (chunk.has_more ? baseline != nullptr : baseline == nullptr) {
+                throw std::invalid_argument(
+                    "logical recovery baseline must accompany only the final page");
+            }
+            FullSnapshotImportResult result;
+            Connection::SyncApplyNotification notification;
+            bool notification_ready = false;
+            {
+                std::lock_guard<std::mutex> lock(
+                    m_full_snapshot_import_mutex);
+                try {
+                    result = apply_full_snapshot_chunk_locked(
+                        chunk, baseline, true, notification, notification_ready);
+                } catch (...) {
+                    m_full_snapshot_import_session.reset();
+                    throw;
+                }
+            }
+            if (result.completed && notification_ready) {
+                m_conn->notify_sync_apply_observers(notification);
+            }
+            return result;
+        }
+
+        /// \brief Serves one page of the explicit logical-aware recovery path.
+        /// \details This does not alter raw \c handle_pull semantics. It is a
+        /// distinct API so only a peer that opted into logical recovery can
+        /// receive a CompleteUserDatabase baseline from a logical source.
+        LogicalRecoveryResponse handle_logical_recovery(
+                const LogicalRecoveryRequest& request,
+                const CancellationToken* cancel_token = nullptr) {
+            if (cancel_token != nullptr &&
+                cancel_token->is_cancellation_requested()) {
+                LogicalRecoveryResponse cancelled;
+                cancelled.ok = false;
+                cancelled.error = "logical recovery cancelled";
+                cancelled.error_retryable = true;
+                return cancelled;
+            }
+            PullRequest snapshot_request;
+            snapshot_request.requester = request.requester;
+            snapshot_request.request_full_snapshot = true;
+            snapshot_request.full_snapshot_id = request.snapshot_id;
+            snapshot_request.full_snapshot_continuation = request.continuation;
+            snapshot_request.max_bytes = request.max_bytes;
+            snapshot_request.max_single_batch_bytes =
+                request.max_single_batch_bytes;
+
+            LogicalRecoveryBaseline baseline;
+            const PullResponse snapshot_response = handle_full_snapshot_pull(
+                snapshot_request, true, &baseline, cancel_token);
+            LogicalRecoveryResponse out;
+            out.ok = snapshot_response.ok;
+            out.has_more = snapshot_response.has_more;
+            out.error = snapshot_response.error;
+            out.error_code = snapshot_response.error_code;
+            out.error_retryable = snapshot_response.error_retryable;
+            if (snapshot_response.ok) {
+                out.snapshot_chunk = snapshot_response.snapshot_chunk;
+                out.has_baseline = !snapshot_response.has_more;
+                if (out.has_baseline) {
+                    out.baseline = baseline;
+                }
+            }
+            return out;
+        }
+
+#if defined(MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT)
+        /// \brief Installs a test-only barrier before logical recovery scans.
+        void set_logical_recovery_materialization_checkpoint_for_testing(
+                const std::function<void()>& checkpoint) {
+            m_logical_recovery_materialization_checkpoint = checkpoint;
+        }
+
+        /// \brief Removes the test-only logical recovery barrier.
+        void clear_logical_recovery_materialization_checkpoint_for_testing() {
+            m_logical_recovery_materialization_checkpoint = std::function<void()>();
+        }
+#endif
 
         /// \brief Registers or verifies a persistent logical table schema.
         /// \details This is the normal lifecycle entry point for application
@@ -1542,27 +1661,18 @@ namespace sync {
 
         static void append_full_snapshot_operation(
                 FullSnapshotSession& session,
-                const FullSnapshotExportOptions& options,
+                MaterializationBudget& budget,
                 const std::string& dbi_name,
                 std::uint32_t dbi_flags,
                 ChangeOpType op_type,
                 const MDBX_val* key,
-                const MDBX_val* value,
-                std::uint64_t& materialized_bytes) {
-            if (static_cast<std::uint64_t>(session.operations.size()) >=
-                options.max_materialized_operations) {
-                throw std::length_error(
-                    "full snapshot exceeds max_materialized_operations");
-            }
+                const MDBX_val* value) {
             MDBX_val empty = { nullptr, 0u };
             const MDBX_val& actual_key = key == nullptr ? empty : *key;
             const MDBX_val& actual_value = value == nullptr ? empty : *value;
             const std::uint64_t add = snapshot_materialized_bytes_for(
                 dbi_name, actual_key, actual_value);
-            if (add > options.max_materialized_bytes - materialized_bytes) {
-                throw std::length_error(
-                    "full snapshot exceeds max_materialized_bytes");
-            }
+            budget.consume(1u, add, "full snapshot exceeds materialization budget");
 
             ChangeOp op;
             op.op_type = op_type;
@@ -1579,7 +1689,13 @@ namespace sync {
                 op.value.assign(bytes, bytes + actual_value.iov_len);
             }
             session.operations.push_back(std::move(op));
-            materialized_bytes += add;
+        }
+
+        static void throw_if_cancelled(const CancellationToken* cancel_token) {
+            if (cancel_token != nullptr &&
+                cancel_token->is_cancellation_requested()) {
+                throw FullSnapshotCancelled();
+            }
         }
 
         std::string next_full_snapshot_id_locked() {
@@ -1627,16 +1743,400 @@ namespace sync {
             }
         }
 
+        void collect_logical_recovery_baseline(
+                MDBX_txn* txn,
+                FullSnapshotSession& session,
+                MaterializationBudget& budget,
+                const CancellationToken* cancel_token) const {
+            SchemaRegistryStore schemas(m_conn->env_handle());
+            LogicalDeliveryStore delivery(m_conn->env_handle());
+            LogicalDeliveryOrderStore order(m_conn->env_handle());
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            session.logical_recovery_baseline.source_node_id =
+                session.source_node_id;
+            session.logical_recovery_baseline.source_db_uuid =
+                session.source_db_uuid;
+            session.logical_recovery_baseline.snapshot_id = session.snapshot_id;
+            budget.consume(0u,
+                logical_recovery_baseline_header_bytes(
+                    session.logical_recovery_baseline),
+                "logical recovery baseline exceeds materialization budget");
+            schemas.for_each_entry(txn,
+                [&session, &budget, cancel_token](
+                        const LogicalSchemaRegistryEntry& entry) {
+                    throw_if_cancelled(cancel_token);
+                    budget.consume(1u, logical_recovery_schema_bytes(entry),
+                        "logical recovery baseline exceeds materialization budget");
+                    session.logical_recovery_baseline.schemas.push_back(entry);
+                });
+            delivery.for_each_marker(txn,
+                [&session, &budget, cancel_token](
+                        const LogicalDeliveryMarkerInfo& marker) {
+                    throw_if_cancelled(cancel_token);
+                    budget.consume(1u, logical_recovery_marker_bytes(marker),
+                        "logical recovery baseline exceeds materialization budget");
+                    session.logical_recovery_baseline.delivery_markers.push_back(marker);
+                });
+            delivery.for_each_watermark(txn,
+                [&session, &budget, cancel_token](
+                        const LogicalDeliveryWatermarkInfo& watermark) {
+                    throw_if_cancelled(cancel_token);
+                    budget.consume(1u, logical_recovery_watermark_bytes(watermark),
+                        "logical recovery baseline exceeds materialization budget");
+                    session.logical_recovery_baseline.delivery_watermarks.push_back(
+                        watermark);
+                });
+            order.for_each_entry(txn,
+                [&session, &budget, cancel_token](
+                        const LogicalDeliveryOrderEntry& entry) {
+                    throw_if_cancelled(cancel_token);
+                    budget.consume(1u, logical_recovery_order_bytes(entry),
+                        "logical recovery baseline exceeds materialization budget");
+                    session.logical_recovery_baseline.delivery_order.push_back(entry);
+                });
+            outbox.for_each_pending(txn, session.source_db_uuid,
+                session.requester,
+                [&session, &budget, cancel_token](
+                        const LogicalDeliveryEnvelope& envelope) {
+                    throw_if_cancelled(cancel_token);
+                    budget.consume(1u, logical_recovery_outbox_bytes(envelope),
+                        "logical recovery baseline exceeds materialization budget");
+                    session.logical_recovery_baseline.source_outbox_pending.push_back(
+                        envelope);
+                });
+            session.logical_recovery_baseline.source_outbox_known_tail =
+                outbox.known_tail(txn, session.source_db_uuid,
+                                  session.requester);
+        }
+
+        static void add_logical_recovery_baseline_bytes(
+                std::uint64_t& total,
+                std::size_t additional) {
+            const std::uint64_t max =
+                (std::numeric_limits<std::uint64_t>::max)();
+            if (additional > max || total > max -
+                    static_cast<std::uint64_t>(additional)) {
+                throw std::length_error(
+                    "logical recovery baseline size overflow");
+            }
+            total += static_cast<std::uint64_t>(additional);
+        }
+
+        static std::uint64_t logical_recovery_schema_bytes(
+                const LogicalSchemaRegistryEntry& entry) {
+            std::uint64_t bytes = 0u;
+            add_logical_recovery_baseline_bytes(bytes,
+                                                sizeof(LogicalSchemaRegistryEntry));
+            add_logical_recovery_baseline_bytes(bytes, entry.schema_id.size());
+            add_logical_recovery_baseline_bytes(bytes,
+                                                entry.record.dbi_name.size());
+            for (std::size_t i = 0u; i < entry.record.dbi_names.size(); ++i) {
+                add_logical_recovery_baseline_bytes(bytes,
+                    entry.record.dbi_names[i].size());
+            }
+            return bytes;
+        }
+
+        static std::uint64_t logical_recovery_marker_bytes(
+                const LogicalDeliveryMarkerInfo& marker) {
+            std::uint64_t bytes = 0u;
+            add_logical_recovery_baseline_bytes(bytes,
+                                                sizeof(LogicalDeliveryMarkerInfo));
+            add_logical_recovery_baseline_bytes(bytes, marker.frame_id.size());
+            add_logical_recovery_baseline_bytes(bytes,
+                                                marker.encoded_frame.size());
+            return bytes;
+        }
+
+        static std::uint64_t logical_recovery_outbox_bytes(
+                const LogicalDeliveryEnvelope& envelope) {
+            const std::vector<std::uint8_t> encoded =
+                LogicalDeliveryEnvelopeCodec::encode(envelope);
+            std::uint64_t bytes = 0u;
+            add_logical_recovery_baseline_bytes(bytes,
+                                                sizeof(LogicalDeliveryEnvelope));
+            add_logical_recovery_baseline_bytes(bytes, encoded.size());
+            return bytes;
+        }
+
+        static std::uint64_t logical_recovery_watermark_bytes(
+                const LogicalDeliveryWatermarkInfo&) {
+            return sizeof(LogicalDeliveryWatermarkInfo);
+        }
+
+        static std::uint64_t logical_recovery_order_bytes(
+                const LogicalDeliveryOrderEntry&) {
+            return sizeof(LogicalDeliveryOrderEntry);
+        }
+
+        static std::uint64_t logical_recovery_baseline_header_bytes(
+                const LogicalRecoveryBaseline& baseline) {
+            std::uint64_t bytes = 0u;
+            add_logical_recovery_baseline_bytes(bytes,
+                                                sizeof(LogicalRecoveryBaseline));
+            add_logical_recovery_baseline_bytes(bytes, baseline.snapshot_id.size());
+            return bytes;
+        }
+
+        static std::uint64_t logical_recovery_baseline_entry_count(
+                const LogicalRecoveryBaseline& baseline) {
+            const std::uint64_t max =
+                (std::numeric_limits<std::uint64_t>::max)();
+            const std::size_t counts[] = {
+                baseline.schemas.size(),
+                baseline.delivery_markers.size(),
+                baseline.delivery_watermarks.size(),
+                baseline.delivery_order.size(),
+                baseline.source_outbox_pending.size()
+            };
+            std::uint64_t total = 0u;
+            for (std::size_t i = 0u; i < sizeof(counts) / sizeof(counts[0]); ++i) {
+                if (counts[i] > max || total > max -
+                        static_cast<std::uint64_t>(counts[i])) {
+                    throw std::length_error("logical recovery baseline size overflow");
+                }
+                total += static_cast<std::uint64_t>(counts[i]);
+            }
+            return total;
+        }
+
+        static std::uint64_t logical_recovery_baseline_bytes(
+                const LogicalRecoveryBaseline& baseline) {
+            std::uint64_t bytes = logical_recovery_baseline_header_bytes(baseline);
+            for (std::size_t i = 0u; i < baseline.schemas.size(); ++i) {
+                const std::uint64_t entry_bytes =
+                    logical_recovery_schema_bytes(baseline.schemas[i]);
+                if (bytes > (std::numeric_limits<std::uint64_t>::max)() -
+                        entry_bytes) {
+                    throw std::length_error("logical recovery baseline size overflow");
+                }
+                bytes += entry_bytes;
+            }
+            for (std::size_t i = 0u; i < baseline.delivery_markers.size(); ++i) {
+                const std::uint64_t entry_bytes =
+                    logical_recovery_marker_bytes(baseline.delivery_markers[i]);
+                if (bytes > (std::numeric_limits<std::uint64_t>::max)() -
+                        entry_bytes) {
+                    throw std::length_error("logical recovery baseline size overflow");
+                }
+                bytes += entry_bytes;
+            }
+            for (std::size_t i = 0u;
+                 i < baseline.delivery_watermarks.size(); ++i) {
+                const std::uint64_t entry_bytes = logical_recovery_watermark_bytes(
+                    baseline.delivery_watermarks[i]);
+                if (bytes > (std::numeric_limits<std::uint64_t>::max)() -
+                        entry_bytes) {
+                    throw std::length_error("logical recovery baseline size overflow");
+                }
+                bytes += entry_bytes;
+            }
+            for (std::size_t i = 0u; i < baseline.delivery_order.size(); ++i) {
+                const std::uint64_t entry_bytes = logical_recovery_order_bytes(
+                    baseline.delivery_order[i]);
+                if (bytes > (std::numeric_limits<std::uint64_t>::max)() -
+                        entry_bytes) {
+                    throw std::length_error("logical recovery baseline size overflow");
+                }
+                bytes += entry_bytes;
+            }
+            for (std::size_t i = 0u;
+                 i < baseline.source_outbox_pending.size(); ++i) {
+                const std::uint64_t entry_bytes = logical_recovery_outbox_bytes(
+                    baseline.source_outbox_pending[i]);
+                if (bytes > (std::numeric_limits<std::uint64_t>::max)() -
+                        entry_bytes) {
+                    throw std::length_error("logical recovery baseline size overflow");
+                }
+                bytes += entry_bytes;
+            }
+            return bytes;
+        }
+
+        static bool logical_schema_record_matches_adapter(
+                const LogicalSchemaRegistryEntry& entry,
+                const ILogicalTableAdapter& adapter) {
+            const LogicalSchemaRef ref = adapter.schema_ref();
+            if (!is_logical_schema_ref_complete(ref) ||
+                ref.schema_id != entry.schema_id ||
+                ref.kind != entry.record.kind ||
+                ref.schema_version != entry.record.schema_version ||
+                entry.record.dbi_name != adapter.primary_dbi()) {
+                return false;
+            }
+            std::vector<std::string> adapter_dbis;
+            std::vector<std::string> record_dbis;
+            return canonical_logical_dbi_names(adapter.affected_dbis(),
+                                               adapter_dbis) &&
+                canonical_logical_dbi_names(entry.record.dbi_names,
+                                            record_dbis) &&
+                adapter_dbis == record_dbis;
+        }
+
+        void validate_logical_recovery_baseline(
+                const FullSnapshotImportSession& session,
+                const LogicalRecoveryBaseline& baseline) const {
+            if (compare_node_id(baseline.source_node_id,
+                                session.source_node_id) != 0 ||
+                compare_node_id(baseline.source_db_uuid,
+                                session.source_db_uuid) != 0 ||
+                baseline.snapshot_id != session.snapshot_id) {
+                throw std::invalid_argument(
+                    "logical recovery baseline does not match snapshot identity");
+            }
+            std::map<std::string, bool> seen_schemas;
+            for (std::size_t i = 0u; i < baseline.schemas.size(); ++i) {
+                const LogicalSchemaRegistryEntry& entry = baseline.schemas[i];
+                if (entry.schema_id.empty() ||
+                    !seen_schemas.insert(std::make_pair(entry.schema_id, true)).second) {
+                    throw std::invalid_argument(
+                        "logical recovery baseline has duplicate or empty schema id");
+                }
+                ILogicalTableAdapter* adapter =
+                    m_logical_registry.find(entry.schema_id);
+                if (adapter == nullptr ||
+                    !logical_schema_record_matches_adapter(entry, *adapter)) {
+                    throw std::logic_error(
+                        "logical recovery destination adapter does not match baseline");
+                }
+            }
+            for (std::size_t i = 0u; i < baseline.delivery_markers.size(); ++i) {
+                const LogicalDeliveryMarkerInfo& marker =
+                    baseline.delivery_markers[i];
+                if (compare_node_id(marker.destination_db_uuid,
+                                    session.source_db_uuid) != 0) {
+                    throw std::invalid_argument(
+                        "logical recovery marker destination does not match snapshot db_uuid");
+                }
+            }
+            for (std::size_t i = 0u; i < baseline.delivery_order.size(); ++i) {
+                if (compare_node_id(baseline.delivery_order[i].origin_node_id,
+                                    session.source_node_id) == 0) {
+                    throw std::invalid_argument(
+                        "logical recovery baseline contains a source self frontier");
+                }
+            }
+            std::uint64_t previous_pending = 0u;
+            for (std::size_t i = 0u;
+                 i < baseline.source_outbox_pending.size(); ++i) {
+                const LogicalDeliveryEnvelope& envelope =
+                    baseline.source_outbox_pending[i];
+                validate_logical_delivery_envelope(envelope);
+                if (compare_node_id(envelope.destination_db_uuid,
+                                    session.source_db_uuid) != 0 ||
+                    compare_node_id(envelope.origin_node_id,
+                                    session.source_node_id) != 0 ||
+                    envelope.origin_sequence >
+                        baseline.source_outbox_known_tail ||
+                    (previous_pending != 0u && envelope.origin_sequence !=
+                        previous_pending + 1u)) {
+                    throw std::invalid_argument(
+                        "logical recovery source outbox baseline is invalid");
+                }
+                previous_pending = envelope.origin_sequence;
+            }
+            if (!baseline.source_outbox_pending.empty() &&
+                previous_pending != baseline.source_outbox_known_tail) {
+                throw std::invalid_argument(
+                    "logical recovery pending outbox does not reach known tail");
+            }
+        }
+
+        void validate_logical_recovery_import_bounds(
+                const FullSnapshotImportSession& session,
+                const LogicalRecoveryBaseline& baseline) const {
+            const std::uint64_t baseline_entries =
+                logical_recovery_baseline_entry_count(baseline);
+            const std::uint64_t baseline_bytes =
+                logical_recovery_baseline_bytes(baseline);
+            const std::uint64_t staged_operations =
+                static_cast<std::uint64_t>(session.operations.size());
+            const std::uint64_t max_operations =
+                m_full_snapshot_import_options.max_staged_operations;
+            const std::uint64_t max_bytes =
+                m_full_snapshot_import_options.max_staged_bytes;
+            if (staged_operations > max_operations ||
+                session.staged_bytes > max_bytes ||
+                baseline_entries > max_operations - staged_operations ||
+                baseline_bytes > max_bytes - session.staged_bytes) {
+                throw std::length_error(
+                    "logical recovery import exceeds staged materialization budget");
+            }
+        }
+
+        void require_fresh_logical_recovery_target(MDBX_txn* txn) const {
+            SchemaRegistryStore schemas(m_conn->env_handle());
+            LogicalDeliveryStore delivery(m_conn->env_handle());
+            LogicalDeliveryOrderStore order(m_conn->env_handle());
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            if (schemas.has_entries(txn) || delivery.has_persistent_state(txn) ||
+                order.has_entries(txn) || outbox.has_persistent_state(txn)) {
+                throw std::logic_error(
+                    "logical recovery destination has persistent logical state");
+            }
+        }
+
+        void apply_logical_recovery_baseline(
+                MDBX_txn* txn,
+                const FullSnapshotImportSession& session,
+                const LogicalRecoveryBaseline& baseline) {
+            validate_logical_recovery_baseline(session, baseline);
+            require_fresh_logical_recovery_target(txn);
+
+            SchemaRegistryStore schemas(m_conn->env_handle());
+            LogicalDeliveryStore delivery(m_conn->env_handle());
+            LogicalDeliveryOrderStore order(m_conn->env_handle());
+            for (std::size_t i = 0u; i < baseline.schemas.size(); ++i) {
+                const LogicalSchemaRegistryEntry& entry = baseline.schemas[i];
+                ILogicalTableAdapter* adapter =
+                    m_logical_registry.find(entry.schema_id);
+                adapter->verify_storage(txn);
+                schemas.register_or_verify(txn, entry.schema_id, entry.record);
+            }
+            for (std::size_t i = 0u; i < baseline.delivery_markers.size(); ++i) {
+                delivery.restore_marker(txn, baseline.delivery_markers[i]);
+            }
+            for (std::size_t i = 0u; i < baseline.delivery_watermarks.size(); ++i) {
+                delivery.restore_watermark(txn,
+                                           baseline.delivery_watermarks[i]);
+            }
+            for (std::size_t i = 0u;
+                 i < baseline.source_outbox_pending.size(); ++i) {
+                if (!delivery.try_mark_applied(
+                        txn, baseline.source_outbox_pending[i])) {
+                    throw std::runtime_error(
+                        "logical recovery source outbox marker conflicts");
+                }
+            }
+            for (std::size_t i = 0u; i < baseline.delivery_order.size(); ++i) {
+                order.restore_entry(txn, baseline.delivery_order[i]);
+            }
+            if (baseline.source_outbox_known_tail != 0u) {
+                LogicalDeliveryOrderEntry source_frontier;
+                source_frontier.origin_node_id = session.source_node_id;
+                source_frontier.acknowledged_through =
+                    baseline.source_outbox_known_tail;
+                order.restore_entry(txn, source_frontier);
+            }
+        }
+
         std::shared_ptr<FullSnapshotSession> materialize_full_snapshot(
                 const FullSnapshotExportOptions& options,
-                const NodeId& requester) const {
+                const NodeId& requester,
+                bool logical_recovery,
+                const std::string& snapshot_id,
+                const CancellationToken* cancel_token) const {
+            throw_if_cancelled(cancel_token);
             std::shared_ptr<FullSnapshotSession> session(
                 new FullSnapshotSession());
             session->requester = requester;
+            session->snapshot_id = snapshot_id;
             session->replacement_scope = options.replacement_scope;
+            session->logical_recovery = logical_recovery;
             session->last_access = std::chrono::steady_clock::now();
 
             auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            throw_if_cancelled(cancel_token);
             MetaStore meta(m_conn->env_handle());
             meta.open(txn.handle());
             session->source_node_id = meta.get_node_id(txn.handle());
@@ -1647,7 +2147,7 @@ namespace sync {
                     "full snapshot source identity is not initialized");
             }
 
-            if (options.replacement_scope ==
+            if (!logical_recovery && options.replacement_scope ==
                 FullSnapshotScope::CompleteUserDatabase) {
                 require_raw_only_complete_snapshot_source(txn.handle());
             }
@@ -1662,6 +2162,8 @@ namespace sync {
                 throw std::runtime_error(
                     "complete full snapshot source has no user DBIs");
             }
+
+            throw_if_cancelled(cancel_token);
 
             if (options.replacement_scope ==
                     FullSnapshotScope::CompleteUserDatabase) {
@@ -1680,8 +2182,18 @@ namespace sync {
                 }
             }
 
-            std::uint64_t materialized_bytes = 0u;
+            MaterializationBudget materialization_budget(options);
+            if (logical_recovery) {
+#if defined(MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT)
+                if (m_logical_recovery_materialization_checkpoint) {
+                    m_logical_recovery_materialization_checkpoint();
+                }
+#endif
+                collect_logical_recovery_baseline(
+                    txn.handle(), *session, materialization_budget, cancel_token);
+            }
             for (std::size_t i = 0u; i < session->manifest.size(); ++i) {
+                throw_if_cancelled(cancel_token);
                 const FullSnapshotManifestEntry& entry = session->manifest[i];
                 MDBX_dbi dbi = 0;
                 const MDBX_db_flags_t open_flags =
@@ -1708,9 +2220,9 @@ namespace sync {
                         entry.dbi_name);
                 }
 
-                append_full_snapshot_operation(*session, options,
+                append_full_snapshot_operation(*session, materialization_budget,
                     entry.dbi_name, actual_flags, ChangeOpType::ClearTable,
-                    nullptr, nullptr, materialized_bytes);
+                    nullptr, nullptr);
 
                 MDBX_cursor* raw = nullptr;
                 check_mdbx(mdbx_cursor_open(txn.handle(), dbi, &raw),
@@ -1720,9 +2232,10 @@ namespace sync {
                 MDBX_val value;
                 rc = mdbx_cursor_get(raw, &key, &value, MDBX_FIRST);
                 while (rc == MDBX_SUCCESS) {
-                    append_full_snapshot_operation(*session, options,
+                    throw_if_cancelled(cancel_token);
+                    append_full_snapshot_operation(*session, materialization_budget,
                         entry.dbi_name, actual_flags, ChangeOpType::Put,
-                        &key, &value, materialized_bytes);
+                        &key, &value);
                     rc = mdbx_cursor_get(raw, &key, &value, MDBX_NEXT);
                 }
                 if (rc != MDBX_NOTFOUND) {
@@ -1822,8 +2335,19 @@ namespace sync {
             return out;
         }
 
-        PullResponse handle_full_snapshot_pull(const PullRequest& request) {
+        PullResponse handle_full_snapshot_pull(
+                const PullRequest& request,
+                bool logical_recovery = false,
+                LogicalRecoveryBaseline* final_baseline = nullptr,
+                const CancellationToken* cancel_token = nullptr) {
             PullResponse out;
+            if (cancel_token != nullptr &&
+                cancel_token->is_cancellation_requested()) {
+                out.ok = false;
+                out.error = "full snapshot materialization cancelled";
+                out.error_retryable = true;
+                return out;
+            }
             if (request.full_snapshot_id.empty() !=
                 request.full_snapshot_continuation.empty()) {
                 out.ok = false;
@@ -1844,6 +2368,7 @@ namespace sync {
             std::uint64_t chunk_index = 0u;
             if (request.full_snapshot_id.empty()) {
                 FullSnapshotExportOptions options;
+                std::string snapshot_id;
                 {
                     std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
                     prune_expired_full_snapshot_sessions_locked();
@@ -1851,6 +2376,15 @@ namespace sync {
                     if (!full_snapshot_export_is_configured(options)) {
                         out.ok = false;
                         out.error = "full snapshot source export is not configured";
+                        out.error_code =
+                            SyncResponseErrorCode::SnapshotNotConfigured;
+                        return out;
+                    }
+                    if (logical_recovery && options.replacement_scope !=
+                            FullSnapshotScope::CompleteUserDatabase) {
+                        out.ok = false;
+                        out.error =
+                            "logical recovery requires CompleteUserDatabase snapshot export";
                         out.error_code =
                             SyncResponseErrorCode::SnapshotNotConfigured;
                         return out;
@@ -1864,9 +2398,20 @@ namespace sync {
                         return out;
                     }
                     ++m_full_snapshot_creating;
+                    snapshot_id = next_full_snapshot_id_locked();
                 }
                 try {
-                    session = materialize_full_snapshot(options, request.requester);
+                    session = materialize_full_snapshot(
+                        options, request.requester, logical_recovery, snapshot_id,
+                        cancel_token);
+                    throw_if_cancelled(cancel_token);
+                } catch (const FullSnapshotCancelled& e) {
+                    std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+                    --m_full_snapshot_creating;
+                    out.ok = false;
+                    out.error = e.what();
+                    out.error_retryable = true;
+                    return out;
                 } catch (const FullSnapshotLogicalStateUnsupported& e) {
                     std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
                     --m_full_snapshot_creating;
@@ -1874,6 +2419,13 @@ namespace sync {
                     out.error = e.what();
                     out.error_code =
                         SyncResponseErrorCode::SnapshotLogicalStateUnsupported;
+                    return out;
+                } catch (const std::length_error& e) {
+                    std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+                    --m_full_snapshot_creating;
+                    out.ok = false;
+                    out.error = e.what();
+                    out.error_code = SyncResponseErrorCode::BatchTooLarge;
                     return out;
                 } catch (...) {
                     std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
@@ -1884,7 +2436,6 @@ namespace sync {
                     std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
                     --m_full_snapshot_creating;
                     prune_expired_full_snapshot_sessions_locked();
-                    session->snapshot_id = next_full_snapshot_id_locked();
                     m_full_snapshot_sessions[session->snapshot_id] = session;
                 }
             } else {
@@ -1900,6 +2451,12 @@ namespace sync {
                     return out;
                 }
                 session = it->second;
+                if (session->logical_recovery != logical_recovery) {
+                    out.ok = false;
+                    out.error = "full snapshot session belongs to another protocol";
+                    out.error_code = SyncResponseErrorCode::SnapshotSessionInvalid;
+                    return out;
+                }
             }
 
             std::lock_guard<std::mutex> lock(session->mutex);
@@ -1937,8 +2494,13 @@ namespace sync {
                 session->last_access = std::chrono::steady_clock::now();
             }
             try {
-                return make_full_snapshot_page(*session, request,
-                                               start_operation, chunk_index);
+                PullResponse page = make_full_snapshot_page(
+                    *session, request, start_operation, chunk_index);
+                if (logical_recovery && page.ok && !page.has_more &&
+                    final_baseline != nullptr) {
+                    *final_baseline = session->logical_recovery_baseline;
+                }
+                return page;
             } catch (const std::length_error& e) {
                 out.ok = false;
                 out.error = e.what();
@@ -2144,6 +2706,8 @@ namespace sync {
 
         FullSnapshotImportResult apply_full_snapshot_chunk_locked(
                 const FullSnapshotChunk& chunk,
+                const LogicalRecoveryBaseline* logical_baseline,
+                bool logical_recovery,
                 Connection::SyncApplyNotification& notification,
                 bool& notification_ready) {
             if (chunk.replacement_scope != FullSnapshotScope::ManifestOnly &&
@@ -2166,6 +2730,7 @@ namespace sync {
                 session->replacement_scope = chunk.replacement_scope;
                 session->manifest_version = chunk.manifest_version;
                 session->manifest = chunk.manifest;
+                session->logical_recovery = logical_recovery;
                 for (std::size_t i = 0u; i < session->manifest.size(); ++i) {
                     session->replacement_state[session->manifest[i].dbi_name] =
                         FullSnapshotImportSession::ReplacementState::NotSeen;
@@ -2176,9 +2741,17 @@ namespace sync {
             FullSnapshotImportSession& session =
                 *m_full_snapshot_import_session;
             if (chunk.chunk_index != session.next_chunk_index ||
-                !full_snapshot_metadata_matches(session, chunk)) {
+                !full_snapshot_metadata_matches(session, chunk) ||
+                session.logical_recovery != logical_recovery) {
                 throw std::invalid_argument(
                     "full snapshot chunk does not match the active import session");
+            }
+            if ((!logical_recovery && logical_baseline != nullptr) ||
+                (logical_recovery &&
+                 (chunk.has_more ? logical_baseline != nullptr :
+                                   logical_baseline == nullptr))) {
+                throw std::invalid_argument(
+                    "logical recovery baseline does not match snapshot finality");
             }
             append_full_snapshot_import_chunk(session, chunk);
             ++session.next_chunk_index;
@@ -2196,6 +2769,13 @@ namespace sync {
                 MetaStore meta(m_conn->env_handle());
                 meta.open(txn.handle());
                 require_fresh_full_snapshot_target(txn.handle(), meta, session);
+                if (logical_recovery) {
+                    validate_logical_recovery_baseline(session,
+                                                       *logical_baseline);
+                    validate_logical_recovery_import_bounds(session,
+                                                            *logical_baseline);
+                    require_fresh_logical_recovery_target(txn.handle());
+                }
 
                 std::vector<std::string> affected_dbi_names;
                 for (std::size_t i = 0u; i < session.manifest.size(); ++i) {
@@ -2219,6 +2799,10 @@ namespace sync {
                         applied.set_last_applied_seq(txn.handle(), it->first,
                                                      it->second);
                     }
+                }
+                if (logical_recovery) {
+                    apply_logical_recovery_baseline(txn.handle(), session,
+                                                    *logical_baseline);
                 }
                 txn.commit();
                 result.completed = true;
@@ -3028,6 +3612,9 @@ namespace sync {
                                     m_full_snapshot_sessions;
         std::uint64_t               m_next_full_snapshot_session_id = 0u;
         std::size_t                  m_full_snapshot_creating = 0u;
+#if defined(MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT)
+        std::function<void()>        m_logical_recovery_materialization_checkpoint;
+#endif
         FullSnapshotImportOptions    m_full_snapshot_import_options;
         mutable std::mutex           m_full_snapshot_import_mutex;
         std::unique_ptr<FullSnapshotImportSession>

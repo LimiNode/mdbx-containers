@@ -56,7 +56,7 @@ implemented, so a later retry starts a new source session.
 
 ## Logical-State Boundary
 
-`CompleteUserDatabase` is raw-sync-only. The source rejects it with
+Raw `CompleteUserDatabase` is raw-sync-only. The source rejects it with
 `SnapshotLogicalStateUnsupported` when it finds any persistent logical-sync
 state, including:
 
@@ -67,8 +67,61 @@ state, including:
 
 A raw copy of adapter-owned user DBIs without that logical delivery state could
 not safely continue logical replication. `ManifestOnly` likewise makes no
-claim to repair or bootstrap logical state. A future logical snapshot protocol
-must transfer logical schema, replay, ordering, and recovery state atomically.
+claim to repair or bootstrap logical state.
+
+## Logical-Aware Fresh Recovery
+
+`SyncWorkerOptions::enable_logical_recovery_fallback` is a separate, disabled
+by-default path for a fresh replica after `SnapshotRequired`. It uses the
+dedicated `LogicalRecoveryRequest` / `LogicalRecoveryResponse` peer contract;
+it does not change raw `PullRequest`, `FullSnapshotChunk`, or the raw complete
+snapshot guard.
+
+The current transport-neutral implementation is available through
+`DirectSyncPeer`. HTTP and WebSocket bindings are intentionally not treated as
+logical-recovery capable until they implement the same separate wire contract.
+
+The source captures one stable read baseline consisting of:
+
+- the complete non-reserved user-DBI snapshot and raw applied-cursor tail;
+- logical schema markers;
+- replay markers and pruning watermarks;
+- ordered-delivery receiver frontiers;
+- the source outbox tail and still-pending envelopes for this requesting
+  receiver node.
+
+The pending source suffix is contiguous and ends at that receiver's known tail.
+It is not shared with another replica that happens to use the same database
+identity.
+
+An ordered logical event has one global identity per database and origin:
+`(DbId, origin_node_id, origin_sequence)`. The source does not allocate a new
+`origin_sequence` when its v0.1 single receiver route moves. Pending outbox
+entries and acknowledgements remain receiver-specific. Therefore, move a route
+from receiver B to a fresh receiver C only by first performing logical-aware
+recovery from B to C. That imports B's ordered frontiers, so C can accept the
+next global event from the source. Sending a later event directly to an
+unrecovered C fails closed as an ordered sequence gap.
+
+The receiver requires a matching in-memory adapter for every baseline schema.
+It stages all physical pages in memory. On the final page it verifies the
+baseline, replaces user DBIs, bootstraps the raw cursor, restores logical
+metadata, and creates replay markers for source envelopes that were still
+unacknowledged. All of those changes commit in one MDBX transaction. The
+receiver does not copy the source outbox as its own local outbox.
+
+This last rule makes a subsequent redelivery of an old pending source envelope
+a replay acknowledgement rather than a second mutation; the next source
+sequence then applies normally. A malformed baseline, missing adapter, or
+non-fresh logical receiver state aborts the final transaction.
+
+The source's materialization bounds cover both physical snapshot operations and
+the fixed and variable footprint of logical baseline records. The receiver
+applies the same combined bound to its staged physical pages and final baseline
+before opening the destination write transaction. `LogicalRecoveryPeer` accepts
+cooperative cancellation for a recovery call; cancellation produces a retryable
+response and discards the unpublished source session. `DirectSyncPeer`
+implements this contract.
 
 ## Operator Procedure
 
@@ -80,8 +133,9 @@ must transfer logical schema, replay, ordering, and recovery state atomically.
    `SyncWorkerOptions::enable_full_snapshot_fallback`, or drive the explicit
    snapshot request from application code.
 4. Treat `SnapshotLogicalStateUnsupported` as a change of recovery method, not
-   as a retryable transport error. Use an application-specific logical recovery
-   process instead.
+   as a retryable transport error. For a fresh receiver and a capable peer, use
+   the explicit logical-aware fallback; otherwise use an application-specific
+   logical recovery process.
 5. Use `ManifestOnly` only when replacing the listed physical DBIs is the
    intended application operation and leaving the global replication cursor
    unchanged is correct.

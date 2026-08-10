@@ -1610,16 +1610,33 @@ rejected. Unknown, expired, or mismatched continuations or a different requester
 return `SnapshotSessionInvalid`; bounded session capacity returns retryable
 `SnapshotSessionBusy`.
 
-`CompleteUserDatabase` is currently a raw-sync-only recovery scope. Before a
+Raw `CompleteUserDatabase` is a raw-sync-only recovery scope. Before a
 session is materialized, the source rejects any persistent logical-sync state
 with `SnapshotLogicalStateUnsupported`: schema markers, replay markers or
 pruning watermarks, ordered-delivery frontiers, and durable outbox metadata or
 entries. A physical copy of logical adapter DBIs without this state cannot
 safely continue logical delivery.
 `ManifestOnly` is likewise only a manual physical replacement tool: it does
-not claim to repair or bootstrap logical replication. A future logical snapshot
-protocol must atomically define the logical schema, delivery, replay, and
-recovery state it transfers.
+not claim to repair or bootstrap logical replication.
+
+`LogicalRecoveryRequest` / `LogicalRecoveryResponse` define the separate
+logical-aware fresh-replica path. It reuses bounded physical snapshot pages but
+delivers their final page with an immutable baseline containing schema markers,
+replay markers and watermarks, ordered receiver frontiers, and the source
+outbox tail plus pending envelopes for the requesting receiver node. The
+pending suffix must be contiguous and end at that receiver's known tail. The
+importer creates replay markers for those pending source envelopes, restores
+the source frontier, and never copies the source outbox as receiver-local work.
+The final physical replacement, raw cursor bootstrap, and logical metadata
+restoration share one MDBX transaction. Missing matching destination adapters,
+corrupt baseline metadata, or existing logical receiver state abort that
+transaction. Source materialization and receiver staging use one shared budget
+for physical operations and logical baseline records; source enumeration spends
+that budget before retaining each logical record. `LogicalRecoveryPeer` also
+accepts a cooperative cancellation token: a cancelled materialization returns a
+retryable failure and publishes no snapshot session. This capability is
+currently implemented by `DirectSyncPeer`; raw transports remain incapable
+until they implement the distinct logical-recovery wire contract.
 
 `SyncEngine::apply_full_snapshot_chunk()` stages all pages in bounded process
 memory and validates immutable page-zero metadata on every continuation. Only
@@ -2168,3 +2185,13 @@ When HLC or similar lands in v0.2, it goes in as opaque bytes inside
 - Public sync API stability after the first external transport adapter.
 - `PeerRegistry` for multi-peer fan-out — single peer per sync invocation
   in v0.1.
+
+In v0.1 one capture/session commit atomically publishes an ordered envelope for
+exactly one receiver; atomic multi-recipient fan-out is deferred. Moving that
+single receiver to another replica requires logical-aware recovery first: the
+new receiver must import the origin frontier before it can accept the next
+globally sequenced event. Sending a new route to a fresh receiver fails closed
+with an ordered-delivery gap.
+
+Before the first external sync release, logical-store layouts and logical wire
+codec versions do not carry a persistent compatibility or migration guarantee.

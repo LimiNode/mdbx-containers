@@ -37,6 +37,22 @@ namespace sync {
             return true;
         }
 
+        bool supports_logical_recovery() const override {
+            return true;
+        }
+
+        LogicalRecoveryResponse logical_recovery(
+                const LogicalRecoveryRequest& request) override {
+            return logical_recovery_with_cancel(request, nullptr);
+        }
+
+        LogicalRecoveryResponse logical_recovery_with_cancel(
+                const LogicalRecoveryRequest& request,
+                const CancellationToken* cancel_token = nullptr) override {
+            assert(m_remote != nullptr);
+            return m_remote->handle_logical_recovery(request, cancel_token);
+        }
+
         LogicalDeliveryHello logical_delivery_hello() override {
             return logical_delivery_hello_with_cancel(nullptr);
         }

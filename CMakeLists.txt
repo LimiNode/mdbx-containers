@@ -540,6 +540,11 @@ if(MDBXC_BUILD_TESTS)
             MDBXC_TEST_INJECT_TRANSACTION_COMMIT_FAILURE=1)
     endif()
 
+    if(TARGET test_sync_engine)
+        target_compile_definitions(test_sync_engine PRIVATE
+            MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT=1)
+    endif()
+
     if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU" OR
             ((CMAKE_CXX_COMPILER_ID MATCHES "Clang") AND
              NOT CMAKE_CXX_SIMULATE_ID STREQUAL "MSVC"))

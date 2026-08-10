@@ -18,6 +18,12 @@
 namespace mdbxc {
 namespace sync {
 
+    /// \brief One persisted ordered-delivery frontier.
+    struct LogicalDeliveryOrderEntry {
+        NodeId origin_node_id{};
+        std::uint64_t acknowledged_through = 0u;
+    };
+
     /// \brief Persists the highest contiguous ordered delivery per origin.
     class LogicalDeliveryOrderStore {
     public:
@@ -107,6 +113,83 @@ namespace sync {
             }
             mdbx_cursor_close(cursor);
             return found;
+        }
+
+        /// \brief Visits every persisted ordered-delivery frontier.
+        /// \details The visitor runs while the MDBX cursor is open and may
+        /// stop enumeration by throwing.
+        template <typename Visitor>
+        void for_each_entry(MDBX_txn* txn, Visitor visitor) const {
+            txn = checked_txn(txn,
+                              "LogicalDeliveryOrderStore::for_each_entry");
+            open_existing(txn);
+            MDBX_cursor* cursor = nullptr;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
+                       "LogicalDeliveryOrderStore cursor open failed");
+            try {
+                MDBX_val key;
+                MDBX_val value;
+                int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
+                while (rc == MDBX_SUCCESS) {
+                    LogicalDeliveryOrderEntry entry;
+                    entry.origin_node_id = decode_origin(key);
+                    entry.acknowledged_through = decode_value(value);
+                    visitor(entry);
+                    rc = mdbx_cursor_get(cursor, &key, &value, MDBX_NEXT);
+                }
+                if (rc != MDBX_NOTFOUND) {
+                    check_mdbx(rc,
+                               "LogicalDeliveryOrderStore cursor read failed");
+                }
+            } catch (...) {
+                mdbx_cursor_close(cursor);
+                throw;
+            }
+            mdbx_cursor_close(cursor);
+        }
+
+        /// \brief Lists every persisted ordered-delivery frontier.
+        /// \details All entries are decoded before returning. This is used by
+        /// the logical recovery baseline, which transfers receiver ordering
+        /// state as data rather than treating it as an implicit local cache.
+        std::vector<LogicalDeliveryOrderEntry> list_entries(
+                MDBX_txn* txn) const {
+            std::vector<LogicalDeliveryOrderEntry> out;
+            for_each_entry(txn, [&out](const LogicalDeliveryOrderEntry& entry) {
+                out.push_back(entry);
+            });
+            return out;
+        }
+
+        /// \brief Restores one exact frontier into an otherwise empty store.
+        /// \details Recovery must not silently merge a baseline with local
+        /// receiver history. Repeating the same entry is idempotent; a
+        /// different existing frontier is rejected.
+        void restore_entry(MDBX_txn* txn,
+                           const LogicalDeliveryOrderEntry& entry) {
+            txn = checked_txn(txn,
+                              "LogicalDeliveryOrderStore::restore_entry");
+            validate_origin(entry.origin_node_id);
+            if (entry.acknowledged_through == 0u) {
+                throw std::invalid_argument(
+                    "LogicalDeliveryOrderStore restored sequence is zero");
+            }
+            open_for_write(txn);
+            const std::uint64_t existing = last_applied(
+                txn, entry.origin_node_id);
+            if (existing != 0u && existing != entry.acknowledged_through) {
+                throw std::runtime_error(
+                    "LogicalDeliveryOrderStore recovery frontier mismatch");
+            }
+            if (existing == entry.acknowledged_through) {
+                return;
+            }
+            MDBX_val key = make_key(entry.origin_node_id);
+            const std::vector<std::uint8_t> encoded =
+                encode_value(entry.acknowledged_through);
+            MDBX_val value = make_val(encoded);
+            check_mdbx(mdbx_put(txn, m_dbi, &key, &value, MDBX_NOOVERWRITE),
+                       "LogicalDeliveryOrderStore recovery write failed");
         }
 
     private:
