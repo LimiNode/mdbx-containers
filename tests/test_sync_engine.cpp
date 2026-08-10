@@ -3195,13 +3195,38 @@ void test_engine_cancels_direct_logical_recovery_materialization() {
     sync::CancellationSource cancellation;
     const sync::CancellationToken cancellation_token = cancellation.token();
     sync::LogicalRecoveryResponse response;
+    std::mutex checkpoint_mutex;
+    std::condition_variable checkpoint_condition;
+    bool checkpoint_entered = false;
+    bool checkpoint_released = false;
+    source.set_logical_recovery_materialization_checkpoint_for_testing(
+        [&checkpoint_mutex, &checkpoint_condition, &checkpoint_entered,
+         &checkpoint_released]() {
+            std::unique_lock<std::mutex> lock(checkpoint_mutex);
+            checkpoint_entered = true;
+            checkpoint_condition.notify_one();
+            checkpoint_condition.wait(lock, [&checkpoint_released]() {
+                return checkpoint_released;
+            });
+        });
     std::thread recovery([&peer, &request, &cancellation_token, &response]() {
         response = peer.logical_recovery_with_cancel(
             request, &cancellation_token);
     });
-    std::this_thread::sleep_for(std::chrono::milliseconds(2));
+    {
+        std::unique_lock<std::mutex> lock(checkpoint_mutex);
+        checkpoint_condition.wait(lock, [&checkpoint_entered]() {
+            return checkpoint_entered;
+        });
+    }
     cancellation.request_cancel();
+    {
+        std::lock_guard<std::mutex> lock(checkpoint_mutex);
+        checkpoint_released = true;
+    }
+    checkpoint_condition.notify_one();
     recovery.join();
+    source.clear_logical_recovery_materialization_checkpoint_for_testing();
     if (response.ok || !response.error_retryable ||
         response.error.find("cancelled") == std::string::npos) {
         throw std::runtime_error(

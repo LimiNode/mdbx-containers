@@ -26,6 +26,9 @@
 #include <chrono>
 #include <cstdint>
 #include <cstring>
+#if defined(MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT)
+#include <functional>
+#endif
 #include <limits>
 #include <map>
 #include <memory>
@@ -399,6 +402,19 @@ namespace sync {
             }
             return out;
         }
+
+#if defined(MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT)
+        /// \brief Installs a test-only barrier before logical recovery scans.
+        void set_logical_recovery_materialization_checkpoint_for_testing(
+                const std::function<void()>& checkpoint) {
+            m_logical_recovery_materialization_checkpoint = checkpoint;
+        }
+
+        /// \brief Removes the test-only logical recovery barrier.
+        void clear_logical_recovery_materialization_checkpoint_for_testing() {
+            m_logical_recovery_materialization_checkpoint = std::function<void()>();
+        }
+#endif
 
         /// \brief Registers or verifies a persistent logical table schema.
         /// \details This is the normal lifecycle entry point for application
@@ -2168,6 +2184,11 @@ namespace sync {
 
             MaterializationBudget materialization_budget(options);
             if (logical_recovery) {
+#if defined(MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT)
+                if (m_logical_recovery_materialization_checkpoint) {
+                    m_logical_recovery_materialization_checkpoint();
+                }
+#endif
                 collect_logical_recovery_baseline(
                     txn.handle(), *session, materialization_budget, cancel_token);
             }
@@ -3591,6 +3612,9 @@ namespace sync {
                                     m_full_snapshot_sessions;
         std::uint64_t               m_next_full_snapshot_session_id = 0u;
         std::size_t                  m_full_snapshot_creating = 0u;
+#if defined(MDBXC_TEST_LOGICAL_RECOVERY_MATERIALIZATION_CHECKPOINT)
+        std::function<void()>        m_logical_recovery_materialization_checkpoint;
+#endif
         FullSnapshotImportOptions    m_full_snapshot_import_options;
         mutable std::mutex           m_full_snapshot_import_mutex;
         std::unique_ptr<FullSnapshotImportSession>
