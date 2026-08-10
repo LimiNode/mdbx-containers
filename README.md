@@ -304,6 +304,36 @@ for (const auto& r : results) {
 }
 ```
 
+### Descriptor-driven vector collection
+
+`VectorCollection` is a separate persistent foundation for vector backends
+that need application-owned stable record ids. Its descriptor is stored on
+first open and must match exactly on every subsequent open before vector
+records are opened or mutated. It includes dimension, metric, normalization,
+vector codec, signature encoder, and block-layout versions. Record ids are
+non-empty opaque `std::string` byte sequences, including embedded NUL bytes.
+
+This collection currently provides durable insert-or-replace, read, erase, and
+count operations only. It has no RAM index, exact-search API, ANN backend, or
+logical-sync adapter yet. `VectorStore` remains unchanged as the supported
+embedded exact-search MVP.
+
+```cpp
+mdbxc::VectorCollectionDescriptor descriptor;
+descriptor.collection_id = "knowledge-v1";
+descriptor.dimension = 3;
+descriptor.metric = mdbxc::VectorMetric::COSINE;
+descriptor.normalization = mdbxc::VectorNormalization::None;
+descriptor.vector_codec_id = "raw-f32";
+descriptor.vector_codec_version = 1;
+descriptor.signature_encoder_id = "none";
+descriptor.signature_encoder_version = 1;
+descriptor.block_layout_version = 1;
+
+mdbxc::VectorCollection collection(cfg, descriptor);
+collection.insert_or_assign("document:42", e1);
+```
+
 ### Hash-indexed key-value store
 
 ```cpp

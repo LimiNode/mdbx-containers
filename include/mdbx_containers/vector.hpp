@@ -11,5 +11,7 @@
 #include "vector/SearchResult.hpp"
 #include "vector/FlatVectorIndex.hpp"
 #include "vector/VectorStore.hpp"
+#include "vector/VectorCollectionDescriptor.hpp"
+#include "vector/VectorCollection.hpp"
 
 #endif // MDBX_CONTAINERS_HEADER_VECTOR_HPP_INCLUDED
