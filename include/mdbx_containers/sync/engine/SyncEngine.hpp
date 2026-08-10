@@ -1822,11 +1822,37 @@ namespace sync {
             total += static_cast<std::uint64_t>(additional);
         }
 
+        static void add_logical_recovery_baseline_element_bytes(
+                std::uint64_t& total,
+                std::size_t count,
+                std::size_t element_size) {
+            const std::uint64_t max =
+                (std::numeric_limits<std::uint64_t>::max)();
+            const std::uint64_t element_count =
+                static_cast<std::uint64_t>(count);
+            const std::uint64_t bytes_per_element =
+                static_cast<std::uint64_t>(element_size);
+            if (bytes_per_element != 0u &&
+                element_count > max / bytes_per_element) {
+                throw std::length_error(
+                    "logical recovery baseline size overflow");
+            }
+            const std::uint64_t additional =
+                element_count * bytes_per_element;
+            if (total > max - additional) {
+                throw std::length_error(
+                    "logical recovery baseline size overflow");
+            }
+            total += additional;
+        }
+
         static std::uint64_t logical_recovery_schema_bytes(
                 const LogicalSchemaRegistryEntry& entry) {
             std::uint64_t bytes = 0u;
             add_logical_recovery_baseline_bytes(bytes,
                                                 sizeof(LogicalSchemaRegistryEntry));
+            add_logical_recovery_baseline_element_bytes(bytes,
+                entry.record.dbi_names.size(), sizeof(std::string));
             add_logical_recovery_baseline_bytes(bytes, entry.schema_id.size());
             add_logical_recovery_baseline_bytes(bytes,
                                                 entry.record.dbi_name.size());
@@ -1855,6 +1881,8 @@ namespace sync {
             std::uint64_t bytes = 0u;
             add_logical_recovery_baseline_bytes(bytes,
                                                 sizeof(LogicalDeliveryEnvelope));
+            add_logical_recovery_baseline_element_bytes(bytes,
+                envelope.frame.changes.size(), sizeof(LogicalChange));
             add_logical_recovery_baseline_bytes(bytes, encoded.size());
             return bytes;
         }

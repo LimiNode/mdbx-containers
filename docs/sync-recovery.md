@@ -115,13 +115,16 @@ a replay acknowledgement rather than a second mutation; the next source
 sequence then applies normally. A malformed baseline, missing adapter, or
 non-fresh logical receiver state aborts the final transaction.
 
-The source's materialization bounds cover both physical snapshot operations and
-the fixed and variable footprint of logical baseline records. The receiver
-applies the same combined bound to its staged physical pages and final baseline
-before opening the destination write transaction. `LogicalRecoveryPeer` accepts
-cooperative cancellation for a recovery call; cancellation produces a retryable
-response and discards the unpublished source session. `DirectSyncPeer`
-implements this contract.
+The source's materialization bounds cover physical snapshot operations and the
+accounted logical-baseline representation: fixed records, dynamic container
+elements, and serialized variable payloads. The receiver applies the same
+combined bound to its staged physical pages and final baseline before opening
+the destination write transaction. This is a structural materialization
+accounting limit, not a guaranteed process-heap ceiling: allocator overhead,
+container capacities, and temporary copies remain implementation-dependent.
+`LogicalRecoveryPeer` accepts cooperative cancellation for a recovery call;
+cancellation produces a retryable response and discards the unpublished source
+session. `DirectSyncPeer` implements this contract.
 
 ## Operator Procedure
 

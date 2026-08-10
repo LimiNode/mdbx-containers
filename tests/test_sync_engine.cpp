@@ -3160,6 +3160,100 @@ void test_engine_recovery_counts_fixed_logical_baseline_records_in_byte_budget()
     cleanup(receiver_path);
 }
 
+void test_engine_recovery_counts_schema_dbi_name_storage_in_byte_budget() {
+    using namespace mdbxc;
+    const std::string source_path =
+        "test_engine_logical_recovery_schema_name_budget.mdbx";
+    cleanup(source_path);
+
+    const sync::NodeId source_node = make_node(0x95);
+    const sync::NodeId requester_node = make_node(0xA5);
+    const sync::DbId db_id = make_node(0xD5);
+    const std::size_t owned_dbi_count = 32u;
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 64u;
+    options.max_materialized_bytes = 1024u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(source_conn, sync::ConflictPolicy::Reject, options);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(source_conn, "documents");
+    documents.insert_or_assign("document", "value");
+
+    sync::LogicalSchemaRecord record;
+    record.dbi_name = "documents";
+    record.kind = sync::LogicalTableKind::KeyValue;
+    record.schema_version = 1u;
+    record.dbi_names.push_back(record.dbi_name);
+    for (std::size_t i = 1u; i < owned_dbi_count; ++i) {
+        record.dbi_names.push_back(
+            std::string("owned-") + std::to_string(static_cast<unsigned long long>(i)));
+    }
+    source.register_logical_schema("app.recovery.schema-budget", record);
+
+    sync::LogicalRecoveryRequest request;
+    request.requester = requester_node;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::LogicalRecoveryResponse response =
+        source.handle_logical_recovery(request);
+    if (response.ok || response.error_code != sync::SyncResponseErrorCode::BatchTooLarge) {
+        throw std::runtime_error(
+            "logical recovery omitted schema DBI name storage from byte budget");
+    }
+
+    source_conn->disconnect();
+    cleanup(source_path);
+}
+
+void test_engine_recovery_counts_outbox_change_storage_in_byte_budget() {
+    using namespace mdbxc;
+    const std::string source_path =
+        "test_engine_logical_recovery_outbox_change_budget.mdbx";
+    cleanup(source_path);
+
+    const sync::NodeId source_node = make_node(0x96);
+    const sync::NodeId requester_node = make_node(0xA6);
+    const sync::DbId db_id = make_node(0xD6);
+    const std::size_t change_count = 32u;
+    sync::FullSnapshotExportOptions options;
+    options.replacement_scope = sync::FullSnapshotScope::CompleteUserDatabase;
+    options.max_materialized_operations = 64u;
+    options.max_materialized_bytes = 3072u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(source_conn, sync::ConflictPolicy::Reject, options);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> documents(source_conn, "documents");
+    documents.insert_or_assign("document", "value");
+
+    sync::LogicalSchemaRef schema;
+    schema.schema_id = "app.recovery.outbox-budget";
+    schema.kind = sync::LogicalTableKind::KeyValue;
+    schema.schema_version = 1u;
+    sync::LogicalChangeFrame frame;
+    for (std::size_t i = 0u; i < change_count; ++i) {
+        frame.changes.push_back(sync::LogicalChange(
+            schema, 1u, 0u, std::vector<std::uint8_t>()));
+    }
+    source.enqueue_logical_delivery(db_id, requester_node, frame);
+
+    sync::LogicalRecoveryRequest request;
+    request.requester = requester_node;
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 8192u;
+    const sync::LogicalRecoveryResponse response =
+        source.handle_logical_recovery(request);
+    if (response.ok || response.error_code != sync::SyncResponseErrorCode::BatchTooLarge) {
+        throw std::runtime_error(
+            "logical recovery omitted outbox change storage from byte budget");
+    }
+
+    source_conn->disconnect();
+    cleanup(source_path);
+}
+
 void test_engine_cancels_direct_logical_recovery_materialization() {
     using namespace mdbxc;
     const std::string source_path =
@@ -3895,6 +3989,10 @@ int main() {
           &test_engine_recovery_preserves_global_origin_sequence_across_receiver_cutover },
         { "test_engine_recovery_counts_fixed_logical_baseline_records_in_byte_budget",
           &test_engine_recovery_counts_fixed_logical_baseline_records_in_byte_budget },
+        { "test_engine_recovery_counts_schema_dbi_name_storage_in_byte_budget",
+          &test_engine_recovery_counts_schema_dbi_name_storage_in_byte_budget },
+        { "test_engine_recovery_counts_outbox_change_storage_in_byte_budget",
+          &test_engine_recovery_counts_outbox_change_storage_in_byte_budget },
         { "test_engine_cancels_direct_logical_recovery_materialization",
           &test_engine_cancels_direct_logical_recovery_materialization },
         { "test_engine_changelog_page_rejects_full_snapshot_request",
