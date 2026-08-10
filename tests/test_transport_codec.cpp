@@ -436,6 +436,143 @@ void test_logical_snapshot_error_roundtrip() {
                  "logical snapshot error unexpectedly retryable");
 }
 
+void test_logical_recovery_protocol_roundtrip() {
+    using namespace mdbxc::sync;
+
+    LogicalRecoveryRequest request;
+    request.requester = make_node(0x31);
+    request.max_bytes = 8192u;
+    request.max_single_batch_bytes = 4096u;
+    const LogicalRecoveryRequest decoded_request =
+        LogicalRecoveryProtocolCodec::decode_request(
+            LogicalRecoveryProtocolCodec::encode_request(request));
+    require_true(decoded_request.requester == request.requester,
+                 "logical recovery requester mismatch");
+    require_true(decoded_request.max_bytes == request.max_bytes,
+                 "logical recovery max bytes mismatch");
+
+    LogicalRecoveryResponse intermediate;
+    intermediate.has_more = true;
+    intermediate.snapshot_chunk = make_snapshot_chunk();
+    const LogicalRecoveryResponse decoded_intermediate =
+        LogicalRecoveryProtocolCodec::decode_response(
+            LogicalRecoveryProtocolCodec::encode_response(intermediate));
+    require_true(decoded_intermediate.ok && decoded_intermediate.has_more &&
+                     !decoded_intermediate.has_baseline,
+                 "logical recovery intermediate response mismatch");
+
+    LogicalRecoveryResponse final_response;
+    final_response.snapshot_chunk = make_snapshot_chunk();
+    final_response.snapshot_chunk.has_more = false;
+    final_response.snapshot_chunk.continuation.clear();
+    final_response.snapshot_chunk.batch.batch_flags = BATCH_NONE;
+    final_response.has_baseline = true;
+    final_response.baseline.source_node_id =
+        final_response.snapshot_chunk.source_node_id;
+    final_response.baseline.source_db_uuid =
+        final_response.snapshot_chunk.source_db_uuid;
+    final_response.baseline.snapshot_id =
+        final_response.snapshot_chunk.snapshot_id;
+    LogicalSchemaRegistryEntry schema;
+    schema.schema_id = "app.recovery.v1";
+    schema.record.dbi_name = "documents";
+    schema.record.kind = LogicalTableKind::KeyValue;
+    schema.record.schema_version = 1u;
+    schema.record.dbi_names.push_back("documents");
+    final_response.baseline.schemas.push_back(schema);
+    LogicalSchemaRef frame_schema;
+    frame_schema.schema_id = schema.schema_id;
+    frame_schema.kind = schema.record.kind;
+    frame_schema.schema_version = schema.record.schema_version;
+    LogicalChangeFrame frame;
+    frame.changes.push_back(LogicalChange(
+        frame_schema, 1u, 0u, std::vector<std::uint8_t>(1u, 0x5Au)));
+    LogicalDeliveryMarkerInfo marker;
+    marker.destination_db_uuid = final_response.snapshot_chunk.source_db_uuid;
+    marker.origin_node_id = make_node(0x60);
+    marker.origin_sequence = 7u;
+    marker.frame_id = "marker-7";
+    marker.frame_codec_version = LogicalChangeFrameCodec::codec_version();
+    marker.encoded_frame = LogicalChangeFrameCodec::encode(frame);
+    marker.frame_bytes_size = static_cast<std::uint32_t>(
+        marker.encoded_frame.size());
+    final_response.baseline.delivery_markers.push_back(marker);
+    LogicalDeliveryWatermarkInfo watermark;
+    watermark.origin_node_id = make_node(0x61);
+    watermark.sequence = 3u;
+    final_response.baseline.delivery_watermarks.push_back(watermark);
+    LogicalDeliveryOrderEntry order;
+    order.origin_node_id = make_node(0x62);
+    order.acknowledged_through = 5u;
+    final_response.baseline.delivery_order.push_back(order);
+    LogicalDeliveryEnvelope pending;
+    pending.destination_db_uuid = final_response.snapshot_chunk.source_db_uuid;
+    pending.origin_node_id = final_response.snapshot_chunk.source_node_id;
+    pending.origin_sequence = 1u;
+    pending.frame_id = "pending-1";
+    pending.frame = frame;
+    final_response.baseline.source_outbox_pending.push_back(pending);
+    final_response.baseline.source_outbox_known_tail = 1u;
+    const LogicalRecoveryResponse decoded_final =
+        LogicalRecoveryProtocolCodec::decode_response(
+            LogicalRecoveryProtocolCodec::encode_response(final_response));
+    require_true(decoded_final.ok && !decoded_final.has_more &&
+                     decoded_final.has_baseline &&
+                     decoded_final.baseline.snapshot_id == "snapshot-session" &&
+                     decoded_final.baseline.schemas.size() == 1u &&
+                     decoded_final.baseline.delivery_markers.size() == 1u &&
+                     decoded_final.baseline.delivery_watermarks.size() == 1u &&
+                     decoded_final.baseline.delivery_order.size() == 1u &&
+                     decoded_final.baseline.source_outbox_pending.size() == 1u,
+                 "logical recovery final response mismatch");
+
+    LogicalRecoveryResponse failure;
+    failure.ok = false;
+    failure.error = "logical recovery unavailable";
+    failure.error_code = SyncResponseErrorCode::SnapshotSessionBusy;
+    failure.error_retryable = true;
+    const LogicalRecoveryResponse decoded_failure =
+        LogicalRecoveryProtocolCodec::decode_response(
+            LogicalRecoveryProtocolCodec::encode_response(failure));
+    require_true(!decoded_failure.ok && decoded_failure.error_retryable &&
+                     decoded_failure.error_code ==
+                         SyncResponseErrorCode::SnapshotSessionBusy,
+                 "logical recovery failure response mismatch");
+}
+
+void test_logical_recovery_protocol_rejections() {
+    using namespace mdbxc::sync;
+
+    LogicalRecoveryResponse response;
+    response.snapshot_chunk = make_snapshot_chunk();
+    response.snapshot_chunk.has_more = false;
+    response.snapshot_chunk.continuation.clear();
+    response.snapshot_chunk.batch.batch_flags = BATCH_NONE;
+
+    expect_throw("logical recovery missing baseline", [response] {
+        (void)LogicalRecoveryProtocolCodec::encode_response(response);
+    });
+
+    response.has_baseline = true;
+    response.baseline.source_node_id = response.snapshot_chunk.source_node_id;
+    response.baseline.source_db_uuid = response.snapshot_chunk.source_db_uuid;
+    response.baseline.snapshot_id = response.snapshot_chunk.snapshot_id;
+    std::vector<std::uint8_t> encoded =
+        LogicalRecoveryProtocolCodec::encode_response(response);
+    encoded.push_back(0xFFu);
+    expect_throw("logical recovery trailing bytes", [encoded] {
+        (void)LogicalRecoveryProtocolCodec::decode_response(encoded);
+    });
+
+    CodecBounds bounds;
+    bounds.max_transport_message_bytes = 16u;
+    expect_throw("logical recovery transport bound", [&bounds] {
+        LogicalRecoveryRequest request;
+        request.requester = make_node(0x44);
+        (void)LogicalRecoveryProtocolCodec::encode_request(request, &bounds);
+    });
+}
+
 void test_golden_header_shape() {
     using namespace mdbxc::sync;
     const std::vector<std::uint8_t> bytes =
@@ -468,6 +605,8 @@ int main() {
     test_bounds_rejections();
     test_response_error_code_rejections();
     test_logical_snapshot_error_roundtrip();
+    test_logical_recovery_protocol_roundtrip();
+    test_logical_recovery_protocol_rejections();
     test_golden_header_shape();
     return 0;
 }

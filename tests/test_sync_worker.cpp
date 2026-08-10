@@ -3107,11 +3107,12 @@ void test_worker_recovers_logical_fresh_replica() {
     }
 
     SnapshotRequiredLogicalRecoveryPeer peer(source);
+    sync::SyncPeerMiddleware wrapped_peer(peer);
     sync::SyncWorkerOptions options;
     options.enable_logical_recovery_fallback = true;
     options.max_bytes = 8192u;
     options.max_single_batch_bytes = 8192u;
-    sync::SyncWorker worker(replica, peer, options);
+    sync::SyncWorker worker(replica, wrapped_peer, options);
     const sync::SyncWorkerRoundResult result = worker.run_once();
     if (!result.ok || result.pages_pulled != 1u ||
         kv_or_throw(replica_conn, replica_documents, std::string("recovered"),

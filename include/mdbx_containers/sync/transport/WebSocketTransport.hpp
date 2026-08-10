@@ -7,7 +7,7 @@
 /// \details
 /// This header does not open sockets and does not depend on any WebSocket
 /// library. It defines a synchronous request/response message seam over
-/// complete binary WebSocket messages encoded by \c TransportMessageCodec.
+/// complete binary WebSocket messages encoded by a sync wire codec.
 /// Concrete bindings own connection setup, authentication headers, ping/pong,
 /// fragmentation/reassembly, backpressure, retries, and socket cancellation.
 
@@ -17,6 +17,7 @@
 #include <vector>
 
 #include "TransportMessageCodec.hpp"
+#include "../logical/LogicalRecoveryProtocol.hpp"
 
 namespace mdbxc {
 namespace sync {
@@ -72,17 +73,17 @@ namespace sync {
     }
 
     /// \brief Client-side bridge implemented by a concrete WebSocket library.
-    /// \details \p binary_message must contain exactly one
-    /// \c TransportMessageCodec request. Implementations return exactly one
-    /// encoded response message or throw on transport failure.
+    /// \details \p binary_message must contain exactly one raw, logical
+    /// delivery, or logical recovery request. Implementations return exactly
+    /// one encoded response message or throw on transport failure.
     class IWebSocketSyncChannel {
     public:
         virtual ~IWebSocketSyncChannel() {}
 
         /// \brief Sends one binary sync message and waits for its response.
-        /// \param binary_message Encoded pull or push request.
+        /// \param binary_message Encoded sync request.
         /// \param cancel_token Local call-control token; it is not serialized.
-        /// \return Encoded pull or push response.
+        /// \return Encoded sync response.
         /// \note The v0.1 wire DTOs have no request id. Implementations must
         /// serialize concurrent exchanges on one connection unless the
         /// concrete WebSocket binding adds its own correlation layer.
@@ -121,6 +122,9 @@ namespace sync {
             if (is_logical_delivery_message(binary_message)) {
                 return handle_logical_delivery(binary_message);
             }
+            if (is_logical_recovery_message(binary_message)) {
+                return handle_logical_recovery(binary_message);
+            }
             const TransportMessageType type =
                 TransportMessageCodec::peek_message_type(
                     binary_message, &m_bounds);
@@ -145,6 +149,15 @@ namespace sync {
                    std::memcmp(&binary_message[0],
                                LogicalDeliveryProtocolCodec::magic(),
                                LogicalDeliveryProtocolCodec::magic_size()) == 0;
+        }
+
+        static bool is_logical_recovery_message(
+                const std::vector<std::uint8_t>& binary_message) {
+            return binary_message.size() >=
+                       LogicalRecoveryProtocolCodec::magic_size() &&
+                   std::memcmp(&binary_message[0],
+                               LogicalRecoveryProtocolCodec::magic(),
+                               LogicalRecoveryProtocolCodec::magic_size()) == 0;
         }
 
         std::vector<std::uint8_t> handle_pull(
@@ -198,6 +211,21 @@ namespace sync {
             throw std::runtime_error("Unexpected logical delivery message type");
         }
 
+        std::vector<std::uint8_t> handle_logical_recovery(
+                const std::vector<std::uint8_t>& binary_message) const {
+            const LogicalRecoveryProtocolCodec::MessageType type =
+                LogicalRecoveryProtocolCodec::peek_message_type(
+                    binary_message, &m_bounds);
+            if (type != LogicalRecoveryProtocolCodec::MessageType::Request) {
+                throw std::runtime_error(
+                    "WebSocket sync server received logical recovery response message");
+            }
+            const LogicalRecoveryRequest request =
+                LogicalRecoveryProtocolCodec::decode_request(binary_message, &m_bounds);
+            return LogicalRecoveryProtocolCodec::encode_response(
+                m_engine.handle_logical_recovery(request), &m_bounds);
+        }
+
         SyncEngine& m_engine;
         CodecBounds m_bounds;
     };
@@ -234,6 +262,28 @@ namespace sync {
 
         bool supports_logical_delivery() const override {
             return true;
+        }
+
+        bool supports_logical_recovery() const override {
+            return true;
+        }
+
+        LogicalRecoveryResponse logical_recovery(
+                const LogicalRecoveryRequest& request) override {
+            return logical_recovery_with_cancel(request, nullptr);
+        }
+
+        LogicalRecoveryResponse logical_recovery_with_cancel(
+                const LogicalRecoveryRequest& request,
+                const CancellationToken* cancel_token = nullptr) override {
+            const CancellationToken token = cancel_token != nullptr
+                ? *cancel_token
+                : CancellationToken();
+            return LogicalRecoveryProtocolCodec::decode_response(
+                m_channel.exchange_binary(
+                    LogicalRecoveryProtocolCodec::encode_request(request, &m_bounds),
+                    token),
+                &m_bounds);
         }
 
         LogicalDeliveryHello logical_delivery_hello() override {

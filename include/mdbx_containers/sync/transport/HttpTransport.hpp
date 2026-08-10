@@ -20,6 +20,7 @@
 #include <vector>
 
 #include "TransportMessageCodec.hpp"
+#include "../logical/LogicalRecoveryProtocol.hpp"
 
 namespace mdbxc {
 namespace sync {
@@ -275,6 +276,10 @@ namespace sync {
         static const char* logical_delivery_target() {
             return "/mdbxc/sync/v1/logical/delivery";
         }
+
+        static const char* logical_recovery_target() {
+            return "/mdbxc/sync/v1/logical/recovery";
+        }
     };
 
     /// \brief Server-side dispatcher from HTTP-shaped requests to SyncEngine.
@@ -304,6 +309,9 @@ namespace sync {
             } else if (request.target ==
                        HttpSyncRoutes::logical_delivery_target()) {
                 response = handle_logical_delivery(request.body);
+            } else if (request.target ==
+                       HttpSyncRoutes::logical_recovery_target()) {
+                response = handle_logical_recovery(request.body);
             } else {
                 response = make_error(404, "unknown sync route");
             }
@@ -404,6 +412,20 @@ namespace sync {
             }
         }
 
+        HttpSyncResponse handle_logical_recovery(
+                const std::vector<std::uint8_t>& body) const {
+            try {
+                const LogicalRecoveryRequest request =
+                    LogicalRecoveryProtocolCodec::decode_request(body, &m_bounds);
+                return make_binary(LogicalRecoveryProtocolCodec::encode_response(
+                    m_engine.handle_logical_recovery(request), &m_bounds));
+            } catch (const std::length_error& e) {
+                return make_error(413, e.what());
+            } catch (const std::exception& e) {
+                return make_error(400, e.what());
+            }
+        }
+
         static HttpSyncResponse make_binary(
                 const std::vector<std::uint8_t>& body) {
             HttpSyncResponse response;
@@ -466,6 +488,32 @@ namespace sync {
 
         bool supports_logical_delivery() const override {
             return true;
+        }
+
+        bool supports_logical_recovery() const override {
+            return true;
+        }
+
+        LogicalRecoveryResponse logical_recovery(
+                const LogicalRecoveryRequest& request) override {
+            return logical_recovery_with_cancel(request, nullptr);
+        }
+
+        LogicalRecoveryResponse logical_recovery_with_cancel(
+                const LogicalRecoveryRequest& request,
+                const CancellationToken* cancel_token = nullptr) override {
+            clear_last_retry_hint();
+            const CancellationToken token = cancel_token != nullptr
+                ? *cancel_token
+                : CancellationToken();
+            const HttpSyncResponse response = m_client.post(
+                HttpSyncRoutes::logical_recovery_target(),
+                HttpSyncRoutes::content_type(),
+                LogicalRecoveryProtocolCodec::encode_request(request, &m_bounds),
+                token);
+            require_ok_response(response, "logical recovery");
+            return LogicalRecoveryProtocolCodec::decode_response(
+                response.body, &m_bounds);
         }
 
         LogicalDeliveryHello logical_delivery_hello() override {

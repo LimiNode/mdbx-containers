@@ -268,6 +268,11 @@ void test_http_server_status_mapping() {
     require_true(response.status_code == 400,
                  "malformed logical delivery body must be rejected");
 
+    request.target = mdbxc::sync::HttpSyncRoutes::logical_recovery_target();
+    response = server.handle(request);
+    require_true(response.status_code == 400,
+                 "malformed logical recovery body must be rejected");
+
     mdbxc::sync::CodecBounds bounds;
     bounds.max_transport_message_bytes = 16;
     mdbxc::sync::HttpSyncServer bounded_server(engine, bounds);
@@ -355,6 +360,39 @@ void test_http_peer_rejects_transport_error() {
                  "HTTP peer Retry-After hint mismatch");
 }
 
+void test_http_peer_logical_recovery_route() {
+    const std::string source_path = "test_http_logical_recovery_source.mdbx";
+    cleanup(source_path);
+
+    std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
+    mdbxc::sync::SyncEngine engine(source);
+    engine.initialize_local_identity(make_node(0x81), make_node(0x91));
+    mdbxc::sync::HttpSyncServer server(engine);
+    LoopbackHttpClient client(server);
+    mdbxc::sync::HttpSyncPeer peer(client);
+
+    mdbxc::sync::LogicalRecoveryRequest request;
+    request.requester = make_node(0xA1);
+    mdbxc::sync::CancellationSource cancellation;
+    const mdbxc::sync::CancellationToken token = cancellation.token();
+    const mdbxc::sync::LogicalRecoveryResponse response =
+        peer.logical_recovery_with_cancel(request, &token);
+
+    require_true(peer.supports_logical_recovery(),
+                 "HTTP peer did not advertise logical recovery");
+    require_true(!response.ok && response.error_code ==
+                     mdbxc::sync::SyncResponseErrorCode::SnapshotNotConfigured,
+                 "HTTP logical recovery structured failure mismatch");
+    require_true(client.last_target() ==
+                     mdbxc::sync::HttpSyncRoutes::logical_recovery_target(),
+                 "HTTP logical recovery target mismatch");
+    require_true(client.last_token_cancellable(),
+                 "HTTP logical recovery did not receive cancellation token");
+
+    source->disconnect();
+    cleanup(source_path);
+}
+
 } // namespace
 
 int main() {
@@ -362,5 +400,6 @@ int main() {
     test_http_server_status_mapping();
     test_http_peer_rejects_transport_error();
     test_http_peer_delivers_ordered_logical_outbox();
+    test_http_peer_logical_recovery_route();
     return 0;
 }
