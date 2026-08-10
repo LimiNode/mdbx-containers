@@ -15,7 +15,9 @@
 
 namespace mdbxc {
 
-    /// \brief Normalization contract persisted with a vector collection.
+    /// \brief Normalization provenance persisted with a vector collection.
+    /// \details Describes the pipeline that produced stored vectors. It does
+    /// not cause \ref VectorCollection to transform or normalize values.
     enum class VectorNormalization : std::uint32_t {
         None = 0,
         UnitL2 = 1
@@ -53,12 +55,18 @@ namespace mdbxc {
             if (!is_known_normalization(normalization)) {
                 throw std::invalid_argument("Vector collection normalization is invalid");
             }
-            validate_codec(vector_codec_id, vector_codec_version, "vector codec");
-            validate_codec(signature_encoder_id, signature_encoder_version,
-                           "signature encoder");
-            if (block_layout_version == 0u) {
+            if (vector_codec_id != "raw-f32" || vector_codec_version != 1u) {
                 throw std::invalid_argument(
-                    "Vector collection block layout version must be non-zero");
+                    "Vector collection requires the raw-f32 vector codec version 1");
+            }
+            if (signature_encoder_id != "none" ||
+                signature_encoder_version != 1u) {
+                throw std::invalid_argument(
+                    "Vector collection requires the none signature encoder version 1");
+            }
+            if (block_layout_version != 1u) {
+                throw std::invalid_argument(
+                    "Vector collection requires block layout version 1");
             }
         }
 
@@ -171,19 +179,6 @@ namespace mdbxc {
                 }
                 throw std::invalid_argument(
                     "Vector collection id contains unsupported character");
-            }
-        }
-
-        static void validate_codec(const std::string& id,
-                                   std::uint32_t version,
-                                   const char* name) {
-            if (id.empty()) {
-                throw std::invalid_argument(std::string("Vector collection ") + name +
-                                            " id must not be empty");
-            }
-            if (version == 0u) {
-                throw std::invalid_argument(std::string("Vector collection ") + name +
-                                            " version must be non-zero");
             }
         }
 

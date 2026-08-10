@@ -53,6 +53,15 @@ bool throws_invalid_argument_for_empty_id(
     return false;
 }
 
+bool rejects_invalid_descriptor(mdbxc::VectorCollectionDescriptor descriptor) {
+    try {
+        descriptor.validate();
+    } catch (const std::invalid_argument&) {
+        return true;
+    }
+    return false;
+}
+
 } // namespace
 
 int main() {
@@ -78,6 +87,20 @@ int main() {
             rejected = true;
         }
         MDBXC_TEST_ASSERT(rejected);
+    }
+
+    {
+        mdbxc::VectorCollectionDescriptor unsupported_codec = descriptor;
+        unsupported_codec.vector_codec_id = "pq-8bit";
+        MDBXC_TEST_ASSERT(rejects_invalid_descriptor(unsupported_codec));
+
+        mdbxc::VectorCollectionDescriptor unsupported_signature = descriptor;
+        unsupported_signature.signature_encoder_id = "mih-256";
+        MDBXC_TEST_ASSERT(rejects_invalid_descriptor(unsupported_signature));
+
+        mdbxc::VectorCollectionDescriptor unsupported_layout = descriptor;
+        unsupported_layout.block_layout_version = 2u;
+        MDBXC_TEST_ASSERT(rejects_invalid_descriptor(unsupported_layout));
     }
 
     {

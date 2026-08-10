@@ -312,6 +312,9 @@ first open and must match exactly on every subsequent open before vector
 records are opened or mutated. It includes dimension, metric, normalization,
 vector codec, signature encoder, and block-layout versions. Record ids are
 non-empty opaque `std::string` byte sequences, including embedded NUL bytes.
+Version 1 stores only the `raw-f32`/`1` vector codec, `none`/`1` signature
+encoder, and block layout version `1`. `normalization` records pipeline
+provenance and does not transform stored values.
 
 This collection currently provides durable insert-or-replace, read, erase, and
 count operations only. It has no RAM index, exact-search API, ANN backend, or

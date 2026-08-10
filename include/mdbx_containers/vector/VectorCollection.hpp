@@ -19,6 +19,8 @@ namespace mdbxc {
     /// \details This storage foundation deliberately has no search index. It
     /// preserves caller-owned opaque record ids and validates the collection
     /// descriptor before opening the records DBI.
+    /// \thread_safety Not thread-safe. Synchronize simultaneous operations on
+    /// one instance externally, or use a separate instance per worker thread.
     class VectorCollection {
     public:
         /// \brief Opens a collection using a new connection.

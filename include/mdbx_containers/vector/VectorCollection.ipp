@@ -45,14 +45,18 @@ namespace mdbxc {
     }
 
     inline void VectorCollection::verify_or_persist_descriptor() {
-        VectorCollectionDescriptor existing;
-        if (m_descriptor_table.try_get(existing)) {
-            if (existing != m_descriptor) {
-                throw std::invalid_argument("Vector collection descriptor mismatch");
-            }
+        if (m_descriptor_table.insert(m_descriptor)) {
             return;
         }
-        m_descriptor_table.set(m_descriptor);
+
+        VectorCollectionDescriptor existing;
+        if (!m_descriptor_table.try_get(existing)) {
+            throw std::runtime_error(
+                "Vector collection descriptor disappeared after create race");
+        }
+        if (existing != m_descriptor) {
+            throw std::invalid_argument("Vector collection descriptor mismatch");
+        }
     }
 
     inline void VectorCollection::validate_record_id(const std::string& record_id) {
