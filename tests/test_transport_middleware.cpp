@@ -283,7 +283,8 @@ void test_peer_middleware_allows_limits_and_observes() {
 
 void test_peer_middleware_forwards_logical_capabilities() {
     RecordingPeer peer;
-    mdbxc::sync::SyncPeerMiddleware wrapped(peer);
+    mdbxc::sync::SyncTransportMetricsObserver metrics;
+    mdbxc::sync::SyncPeerMiddleware wrapped(peer, nullptr, &metrics);
     require_true(wrapped.supports_logical_delivery(),
                  "peer middleware lost logical delivery capability");
     require_true(wrapped.supports_logical_recovery(),
@@ -302,6 +303,52 @@ void test_peer_middleware_forwards_logical_capabilities() {
                  "peer middleware did not forward logical recovery");
     require_true(peer.logical_recovery_token_cancellable(),
                  "peer middleware did not preserve logical recovery cancellation");
+
+    const mdbxc::sync::SyncTransportMetricsSnapshot snapshot =
+        metrics.snapshot();
+    require_true(snapshot.logical_recovery_calls == 1u,
+                 "logical recovery metric mismatch");
+    require_true(snapshot.failed_calls == 1u,
+                 "logical recovery failure metric mismatch");
+}
+
+void test_peer_middleware_enforces_logical_recovery_policy() {
+    const mdbxc::sync::NodeId requester = make_node(0x34);
+    const mdbxc::sync::DbId allowed_db_id = make_node(0xD4);
+
+    mdbxc::sync::NodeDbAllowListPolicy allow_list;
+    allow_list.allow_node_id(requester);
+    allow_list.allow_db_id(allowed_db_id);
+    mdbxc::sync::CompositeSyncTransportPolicy policy;
+    policy.add(allow_list);
+
+    RecordingPeer peer;
+    mdbxc::sync::SyncTransportMetricsObserver metrics;
+    mdbxc::sync::SyncPeerMiddleware wrapped(peer, &policy, &metrics);
+
+    mdbxc::sync::LogicalRecoveryRequest request;
+    request.requester = requester;
+    request.db_id = make_node(0xD5);
+    const mdbxc::sync::LogicalRecoveryResponse rejected =
+        wrapped.logical_recovery(request);
+    require_true(!rejected.ok, "db-denied logical recovery was allowed");
+    require_true(peer.logical_recovery_count() == 0u,
+                 "db-denied logical recovery reached downstream peer");
+
+    request.db_id = allowed_db_id;
+    const mdbxc::sync::LogicalRecoveryResponse allowed =
+        wrapped.logical_recovery(request);
+    require_true(!allowed.ok,
+                 "recording logical recovery unexpectedly succeeded");
+    require_true(peer.logical_recovery_count() == 1u,
+                 "allowed logical recovery was not forwarded");
+
+    const mdbxc::sync::SyncTransportMetricsSnapshot snapshot =
+        metrics.snapshot();
+    require_true(snapshot.rejected_calls == 1u,
+                 "logical recovery rejection metric mismatch");
+    require_true(snapshot.logical_recovery_calls == 1u,
+                 "allowed logical recovery was not observed");
 }
 
 void test_transport_trace_context_helpers() {
@@ -910,7 +957,7 @@ void test_transport_zero_limit_policies() {
                      std::string(),
                  "zero HTTP request limit must include Retry-After");
 
-    mdbxc::sync::FixedBudgetSyncTransportPolicy budget(0u, 0u, 0u);
+    mdbxc::sync::FixedBudgetSyncTransportPolicy budget(0u, 0u, 0u, 0u);
     mdbxc::sync::PullRequest pull;
     decision = budget.check_pull(pull);
     require_true(!decision.allowed && decision.status_code == 429,
@@ -920,6 +967,11 @@ void test_transport_zero_limit_policies() {
     decision = budget.check_push(push);
     require_true(!decision.allowed && decision.status_code == 429,
                  "zero push budget must reject");
+
+    mdbxc::sync::LogicalRecoveryRequest recovery;
+    decision = budget.check_logical_recovery(recovery);
+    require_true(!decision.allowed && decision.status_code == 429,
+                 "zero logical recovery budget must reject");
 
     decision = budget.check_http_post(
         mdbxc::sync::HttpSyncRoutes::pull_target(),
@@ -1033,6 +1085,7 @@ void test_http_server_middleware_copies_rejection_headers() {
 int main() {
     test_peer_middleware_allows_limits_and_observes();
     test_peer_middleware_forwards_logical_capabilities();
+    test_peer_middleware_enforces_logical_recovery_policy();
     test_transport_trace_context_helpers();
     test_transport_observer_receives_request_context();
     test_observer_exceptions_are_swallowed();
