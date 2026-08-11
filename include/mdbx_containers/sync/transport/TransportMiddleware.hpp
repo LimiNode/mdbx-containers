@@ -29,11 +29,11 @@ namespace sync {
 
     /// \brief Transport operation observed by middleware.
     enum class SyncTransportOperation : std::uint8_t {
-        Pull,
-        Push,
-        LogicalRecovery,
-        HttpPost,
-        WebSocketMessage
+        Pull = 0,
+        Push = 1,
+        HttpPost = 2,
+        WebSocketMessage = 3,
+        LogicalRecovery = 4
     };
 
     /// \brief Result returned by a transport policy.
