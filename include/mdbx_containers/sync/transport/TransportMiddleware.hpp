@@ -242,7 +242,9 @@ namespace sync {
 
     /// \brief Allows only configured node ids and database ids.
     /// \details Node allow-list defaults to "allow any". DB access defaults to
-    /// "allow any" for compatibility with simple peer-level policies.
+    /// "allow any" for compatibility with simple peer-level policies. Logical
+    /// delivery checks the envelope origin for the envelope-only API and the
+    /// receiver route for receiver-bound delivery requests.
     class NodeDbAllowListPolicy : public ISyncTransportPolicy {
     public:
         NodeDbAllowListPolicy()
@@ -1561,9 +1563,8 @@ namespace sync {
                     detail::notify_transport_rejected(
                         m_observer, SyncTransportOperation::LogicalDelivery,
                         decision.error);
-                    return rejected_logical_delivery_acknowledgement(
-                        envelope, NodeId(), decision,
-                        "logical delivery rejected");
+                    throw std::runtime_error(reject_message(
+                        decision, "logical delivery rejected"));
                 }
             }
 

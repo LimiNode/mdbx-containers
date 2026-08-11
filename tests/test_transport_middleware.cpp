@@ -451,14 +451,14 @@ void test_peer_middleware_enforces_logical_delivery_policy() {
     envelope.origin_node_id = origin;
     envelope.origin_sequence = 1u;
     envelope.frame_id = "denied-envelope";
-    const mdbxc::sync::LogicalDeliveryAcknowledgement denied_envelope =
-        wrapped.deliver_ordered_logical_delivery(envelope);
-    require_true(!denied_envelope.ok,
-                 "db-denied logical delivery was allowed");
-    require_true(denied_envelope.destination_db_uuid ==
-                     envelope.destination_db_uuid &&
-                     denied_envelope.origin_node_id == envelope.origin_node_id,
-                 "logical delivery rejection lost envelope identity");
+    bool envelope_rejected = false;
+    try {
+        (void)wrapped.deliver_ordered_logical_delivery(envelope);
+    } catch (const std::runtime_error&) {
+        envelope_rejected = true;
+    }
+    require_true(envelope_rejected,
+                 "db-denied logical delivery did not fail locally");
     require_true(peer.logical_delivery_count() == 0u,
                  "db-denied logical delivery reached downstream peer");
 
@@ -485,6 +485,7 @@ void test_peer_middleware_enforces_logical_delivery_policy() {
                  "node-denied logical delivery request was allowed");
     require_true(denied_request.receiver_node_id == request.receiver_node_id,
                  "logical delivery request rejection lost receiver identity");
+    mdbxc::sync::validate_logical_delivery_acknowledgement(denied_request);
     require_true(peer.logical_request_count() == 0u,
                  "node-denied logical delivery request reached downstream peer");
 
