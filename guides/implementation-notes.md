@@ -212,7 +212,9 @@ Operational rules:
   `ConflictPolicy::LastWriterWins` v1 applies only to DBIs durably registered
   by `VersionedKeyValueTable`. Registered DBIs accept only revisioned
   `Put`/`Delete` operations; direct raw writes, clear, and bulk/range paths
-  fail closed. Other DBIs retain ordinary raw capture on the same engine. The
+  fail closed through a durable registry lookup in `Connection`, independent
+  of `SyncEngine` lifetime and capture suppression. Other DBIs retain ordinary
+  raw capture on the same engine. The
   `_mdbxc_identity_index` sidecar keeps source version and delete tombstones,
   while `_mdbxc_versioned_dbis` records the contract. Full snapshots may not
   include a registered DBI. `time_unix_ns` remains metadata, not a reliable

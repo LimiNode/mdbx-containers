@@ -3627,6 +3627,47 @@ void test_engine_last_writer_wins_versioned_key_value() {
         sync::VersionedWriteResult::Ignored) {
         throw std::runtime_error("older local versioned write was not ignored");
     }
+    typedef sync::KeyValueTableLogicalAdapter<
+        int,
+        int,
+        sync::KeyValueLogicalInt32Codec<int>,
+        sync::KeyValueLogicalInt32Codec<int> > IntLogicalAdapter;
+    sync::LogicalSchemaRecord logical_record;
+    logical_record.dbi_name = source_table.dbi_name();
+    logical_record.kind = sync::LogicalTableKind::KeyValue;
+    logical_record.schema_version = 1u;
+    logical_record.dbi_names.push_back(source_table.dbi_name());
+    source_engine.register_logical_schema(
+        "test.versioned_bars.v1", logical_record);
+    IntLogicalAdapter logical_adapter(source_table, "test.versioned_bars.v1");
+    const sync::LogicalChange logical_change =
+        logical_adapter.make_upsert(1, 11);
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        const sync::LogicalApplyResult logical_result =
+            logical_adapter.apply(txn.handle(), logical_change);
+        if (logical_result.ok) {
+            throw std::runtime_error("logical apply accepted registered versioned DBI");
+        }
+        txn.rollback();
+    }
+    if (kv_or_throw(source_conn, source_table, 1,
+                    "logical LWW guard source value") != 10u) {
+        throw std::runtime_error("logical apply changed registered versioned DBI");
+    }
+    std::unique_ptr<IntLogicalAdapter::LogicalCaptureSession> logical_session =
+        logical_adapter.begin_capture_session();
+    bool rejected_logical_capture = false;
+    try {
+        logical_session->insert_or_assign(1, 12);
+    } catch (const std::logic_error&) {
+        rejected_logical_capture = true;
+    }
+    if (!rejected_logical_capture ||
+        kv_or_throw(source_conn, source_table, 1,
+                    "logical capture LWW guard source value") != 10u) {
+        throw std::runtime_error("logical capture changed registered versioned DBI");
+    }
     source_conn->detach_sync_capture();
     bool rejected_direct_write = false;
     try {
@@ -3892,6 +3933,66 @@ void test_engine_last_writer_wins_versioned_key_value() {
     receiver_conn->disconnect();
     cleanup(source_path);
     cleanup(receiver_path);
+}
+
+void test_versioned_dbi_guard_survives_engine_lifetime() {
+    using namespace mdbxc;
+    const std::string path = "test_versioned_dbi_guard_lifetime.mdbx";
+    cleanup(path);
+    const sync::NodeId node = make_node(0x71);
+    const sync::DbId db_id = make_node(0xC1);
+    const std::vector<std::uint8_t> version = { 0u, 1u };
+
+    std::shared_ptr<Connection> conn = open_env(path);
+    {
+        KeyValueTable<int, int> bars(conn, "bars");
+        sync::ThreadLocalChangeAccumulator capture(conn);
+        {
+            sync::SyncEngine first_engine(
+                conn, sync::ConflictPolicy::LastWriterWins);
+            first_engine.initialize_local_identity(node, db_id);
+            sync::SyncEngine second_engine(
+                conn, sync::ConflictPolicy::LastWriterWins);
+            conn->attach_sync_capture(&capture);
+            sync::VersionedKeyValueTable<int, int> versioned(bars, capture);
+            if (versioned.insert_or_assign(1, 10, version) !=
+                sync::VersionedWriteResult::Applied) {
+                throw std::runtime_error("initial lifetime-guard write was not applied");
+            }
+            conn->detach_sync_capture();
+        }
+        bool rejected_after_engine_destruction = false;
+        try {
+            bars.insert_or_assign(1, 11);
+        } catch (const std::logic_error&) {
+            rejected_after_engine_destruction = true;
+        }
+        if (!rejected_after_engine_destruction ||
+            kv_or_throw(conn, bars, 1, "post-engine versioned value") != 10u) {
+            throw std::runtime_error(
+                "registered DBI was mutable after SyncEngine destruction");
+        }
+    }
+    conn->disconnect();
+    conn.reset();
+
+    std::shared_ptr<Connection> reopened = open_env(path);
+    {
+        KeyValueTable<int, int> bars(reopened, "bars");
+        bool rejected_before_engine_creation = false;
+        try {
+            bars.insert_or_assign(1, 12);
+        } catch (const std::logic_error&) {
+            rejected_before_engine_creation = true;
+        }
+        if (!rejected_before_engine_creation ||
+            kv_or_throw(reopened, bars, 1, "reopened versioned value") != 10u) {
+            throw std::runtime_error(
+                "durable versioned DBI guard did not survive reopen");
+        }
+    }
+    reopened->disconnect();
+    cleanup(path);
 }
 
 void test_engine_handle_pull_pagination_has_more() {
@@ -4305,6 +4406,8 @@ int main() {
         { "test_engine_handle_push_wrong_db_id",&test_engine_handle_push_wrong_db_id },
         { "test_engine_last_writer_wins_versioned_key_value",
           &test_engine_last_writer_wins_versioned_key_value },
+        { "test_versioned_dbi_guard_survives_engine_lifetime",
+          &test_versioned_dbi_guard_survives_engine_lifetime },
         { "test_engine_handle_pull_pagination", &test_engine_handle_pull_pagination_has_more },
         { "test_engine_handle_pull_multi_origin",&test_engine_handle_pull_multi_origin_pagination },
         { "test_engine_handle_pull_legacy_origin_index",&test_engine_handle_pull_legacy_changelog_without_origin_index },

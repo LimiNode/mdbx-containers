@@ -23,24 +23,6 @@
 namespace mdbxc {
 namespace sync {
 
-    /// \brief Validates writes to DBIs with special sync semantics.
-    /// \details Connection invokes this narrow hook before forwarding a table
-    /// write to capture. Implementations may throw to make the surrounding
-    /// connection-managed transaction rollback-only.
-    class ISyncDbiWritePolicy {
-    public:
-        virtual ~ISyncDbiWritePolicy() = default;
-
-        /// \brief Validates one user-table write.
-        /// \param txn Active writable MDBX transaction.
-        /// \param dbi_name User DBI name.
-        /// \param op_type Physical operation about to be captured.
-        virtual void validate_sync_dbi_write(
-                MDBX_txn* txn,
-                const std::string& dbi_name,
-                ChangeOpType op_type) = 0;
-    };
-
     /// \brief Interface between mdbxc-core write paths and the sync recorder.
     /// \details The implementation owns thread-local pending state, decides
     /// when to assemble a batch, and writes it to \c _mdbxc_changelog inside

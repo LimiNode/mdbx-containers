@@ -50,7 +50,9 @@ capture for the table mutation, and emits one revisioned raw `ChangeOp`. It
 requires initialized sync identity and an attached `ThreadLocalChangeAccumulator`.
 The adapter durably registers its DBI in `_mdbxc_versioned_dbis`. Registered
 DBIs accept only these revisioned `Put`/`Delete` operations; `ClearTable`,
-ranges, bulk operations, and direct raw writes fail closed. Other table DBIs
+ranges, bulk operations, direct raw writes, and generic logical-table writes
+fail closed. The durable `Connection` lookup remains active without a live
+`SyncEngine` and is not bypassed by capture suppression. Other table DBIs
 continue under their ordinary raw contracts on the same LWW engine. Full
 snapshots may not include a registered DBI. The registry and
 `_mdbxc_identity_index` consume two additional named DBIs; the index retains

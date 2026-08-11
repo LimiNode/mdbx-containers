@@ -1124,10 +1124,14 @@ Each key is one non-reserved user DBI name with an empty value. Constructing a
 `VersionedKeyValueTable` registers an empty user DBI in the same environment;
 every replica must make the same registration before it receives revisioned
 operations. The registration makes direct raw writes, clear, and bulk/range
-mutations fail closed through `Connection`'s write policy. It also determines
-apply semantics per operation: a registered DBI requires `LastWriterWins` and
-revisioned point put/delete; an unregistered DBI rejects revision metadata and
-uses ordinary raw apply. Full snapshot manifests cannot include registered DBIs.
+mutations fail closed through a `Connection` lookup of the durable registry;
+the result does not depend on `SyncEngine` lifetime or capture attachment.
+Capture suppression prevents raw re-publication only and does not bypass this
+check, so generic logical adapters cannot mutate a registered DBI. It also
+determines apply semantics per operation: a registered DBI requires
+`LastWriterWins` and revisioned point put/delete; an unregistered DBI rejects
+revision metadata and uses ordinary raw apply. Full snapshot manifests cannot
+include registered DBIs.
 
 ### `_mdbxc_sync_schema` (SchemaRegistryStore) — logical adapter marker
 

@@ -187,38 +187,36 @@ namespace mdbxc {
         return m_sync_capture;
     }
 
-    inline void Connection::attach_sync_dbi_write_policy(
-            sync::ISyncDbiWritePolicy* policy) {
-        if (policy == nullptr) {
-            throw std::invalid_argument(
-                "Connection::attach_sync_dbi_write_policy policy cannot be null");
-        }
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        m_sync_dbi_write_policy = policy;
-    }
-
-    inline void Connection::detach_sync_dbi_write_policy(
-            sync::ISyncDbiWritePolicy* policy) {
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        if (m_sync_dbi_write_policy == policy) {
-            m_sync_dbi_write_policy = nullptr;
-        }
-    }
-
     inline void Connection::validate_sync_dbi_write(
             MDBX_txn* txn,
             const std::string& dbi_name,
             sync::ChangeOpType op_type) {
-        sync::ISyncDbiWritePolicy* policy = nullptr;
-        {
-            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-            policy = m_sync_dbi_write_policy;
-        }
-        if (policy == nullptr) {
-            return;
-        }
         try {
-            policy->validate_sync_dbi_write(txn, dbi_name, op_type);
+            (void)op_type;
+            checked_txn_env(txn, m_env, "Connection::validate_sync_dbi_write");
+            MDBX_dbi registry_dbi = 0;
+            const int open_rc = mdbx_dbi_open(
+                txn, "_mdbxc_versioned_dbis", static_cast<MDBX_db_flags_t>(0),
+                &registry_dbi);
+            if (open_rc == MDBX_NOTFOUND) {
+                return;
+            }
+            check_mdbx(open_rc,
+                       "Connection failed to open versioned DBI registry");
+            MDBX_val key = {
+                dbi_name.empty() ? nullptr : const_cast<char*>(dbi_name.data()),
+                dbi_name.size()
+            };
+            MDBX_val value;
+            const int get_rc = mdbx_get(txn, registry_dbi, &key, &value);
+            if (get_rc == MDBX_NOTFOUND) {
+                return;
+            }
+            check_mdbx(get_rc,
+                       "Connection failed to query versioned DBI registry");
+            throw std::logic_error(
+                "registered source-version-wins DBI must be mutated through "
+                "VersionedKeyValueTable");
         } catch (...) {
             mark_sync_capture_failed(txn);
             throw;

@@ -117,8 +117,7 @@ namespace sync {
     };
 
     /// \brief Pull/push/apply coordinator bound to a single \c Connection.
-    class SyncEngine : public ILogicalDeliveryOutbox,
-                       private ISyncDbiWritePolicy {
+    class SyncEngine : public ILogicalDeliveryOutbox {
         struct PullOrigin {
             NodeId origin;
             std::uint64_t last_seq;
@@ -224,11 +223,6 @@ namespace sync {
               m_policy(policy),
               m_full_snapshot_options(full_snapshot_options) {
             validate_full_snapshot_export_options(m_full_snapshot_options);
-            m_conn->attach_sync_dbi_write_policy(this);
-        }
-
-        ~SyncEngine() {
-            m_conn->detach_sync_dbi_write_policy(this);
         }
 
         /// \brief Initialises the local \c node_id and \c db_uuid.
@@ -3757,18 +3751,6 @@ namespace sync {
                 }
             }
             return true;
-        }
-
-        void validate_sync_dbi_write(
-                MDBX_txn* txn,
-                const std::string& dbi_name,
-                ChangeOpType) override {
-            VersionedDbiStore registry(m_conn->env_handle());
-            if (registry.contains(txn, dbi_name)) {
-                throw std::logic_error(
-                    "registered source-version-wins DBI must be mutated through "
-                    "VersionedKeyValueTable");
-            }
         }
 
         static void apply_one_op(MDBX_txn* txn,

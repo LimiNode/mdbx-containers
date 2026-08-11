@@ -223,8 +223,8 @@ namespace mdbxc {
                        const std::vector<std::uint8_t>& storage_key,
                        const std::vector<std::uint8_t>& value) const {
             if (m_connection->is_read_only()) return;
-            if (m_connection->sync_capture_suppressed(txn)) return;
             m_connection->validate_sync_dbi_write(txn, m_name, op_type);
+            if (m_connection->sync_capture_suppressed(txn)) return;
             sync::ISyncCaptureSink* sink = m_connection->sync_capture();
             if (sink == nullptr) return;
             sync::ChangeOp op;

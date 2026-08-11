@@ -60,6 +60,7 @@ namespace sync {
             std::shared_ptr<Connection> connection = m_table.connection();
             auto txn = connection->transaction(TransactionMode::WRITABLE);
             const std::vector<std::uint8_t> storage_key = encode_key(key);
+            const std::vector<std::uint8_t> storage_value = encode_value(value);
             const NodeId local_node = require_local_node(txn.handle());
             IdentityIndexStore index(connection->env_handle());
             index.open(txn.handle());
@@ -67,16 +68,13 @@ namespace sync {
                       source_version, local_node)) {
                 validate_repeated_write(index, txn.handle(), storage_key,
                                         source_version, local_node,
-                                        ChangeOpType::Put, encode_value(value));
+                                        ChangeOpType::Put, storage_value);
                 txn.commit();
                 return VersionedWriteResult::Ignored;
             }
-            {
-                Connection::SyncCaptureSuppressionScope suppress(*connection, txn.handle());
-                m_table.insert_or_assign(key, value, txn.handle());
-            }
+            write_value(txn.handle(), storage_key, storage_value);
             record(txn.handle(), ChangeOpType::Put, storage_key,
-                   encode_value(value), source_version);
+                   storage_value, source_version);
             put_marker(index, txn.handle(), storage_key, local_node,
                        source_version, false);
             txn.commit();
@@ -112,10 +110,7 @@ namespace sync {
                 txn.commit();
                 return VersionedWriteResult::Ignored;
             }
-            {
-                Connection::SyncCaptureSuppressionScope suppress(*connection, txn.handle());
-                (void)m_table.erase(key, txn.handle());
-            }
+            erase_value(txn.handle(), storage_key);
             record(txn.handle(), ChangeOpType::Delete, storage_key,
                    std::vector<std::uint8_t>(), source_version);
             put_marker(index, txn.handle(), storage_key, local_node,
@@ -264,6 +259,29 @@ namespace sync {
                                      MDBX_DB_ACCEDE, &dbi),
                        "VersionedKeyValueTable failed to open table DBI");
             return dbi;
+        }
+
+        void write_value(MDBX_txn* txn,
+                         const std::vector<std::uint8_t>& key,
+                         const std::vector<std::uint8_t>& value) const {
+            const MDBX_dbi dbi = open_table_dbi(txn);
+            MDBX_val db_key = { key.empty() ? nullptr :
+                                const_cast<std::uint8_t*>(key.data()), key.size() };
+            MDBX_val db_value = { value.empty() ? nullptr :
+                                  const_cast<std::uint8_t*>(value.data()), value.size() };
+            check_mdbx(mdbx_put(txn, dbi, &db_key, &db_value, MDBX_UPSERT),
+                       "VersionedKeyValueTable failed to write table value");
+        }
+
+        void erase_value(MDBX_txn* txn,
+                         const std::vector<std::uint8_t>& key) const {
+            const MDBX_dbi dbi = open_table_dbi(txn);
+            MDBX_val db_key = { key.empty() ? nullptr :
+                                const_cast<std::uint8_t*>(key.data()), key.size() };
+            const int rc = mdbx_del(txn, dbi, &db_key, nullptr);
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "VersionedKeyValueTable failed to erase table value");
+            }
         }
 
         void ensure_capture_attached() const {
