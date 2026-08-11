@@ -57,7 +57,11 @@ public:
           m_push_count(0),
           m_cancel_count(0),
           m_logical_recovery_count(0),
-          m_logical_recovery_token_cancellable(false) {}
+          m_logical_recovery_token_cancellable(false),
+          m_logical_delivery_count(0),
+          m_logical_request_count(0),
+          m_logical_delivery_token_cancellable(false),
+          m_logical_request_token_cancellable(false) {}
 
     mdbxc::sync::PullResponse pull(
             const mdbxc::sync::PullRequest& request) override {
@@ -85,6 +89,46 @@ public:
     bool supports_logical_delivery() const override { return true; }
 
     bool supports_logical_recovery() const override { return true; }
+
+    mdbxc::sync::LogicalDeliveryAcknowledgement
+    deliver_ordered_logical_delivery(
+            const mdbxc::sync::LogicalDeliveryEnvelope& envelope,
+            const mdbxc::sync::CodecBounds* bounds = nullptr) override {
+        return deliver_ordered_logical_delivery_with_cancel(
+            envelope, bounds, nullptr);
+    }
+
+    mdbxc::sync::LogicalDeliveryAcknowledgement
+    deliver_ordered_logical_delivery_with_cancel(
+            const mdbxc::sync::LogicalDeliveryEnvelope& envelope,
+            const mdbxc::sync::CodecBounds* bounds = nullptr,
+            const mdbxc::sync::CancellationToken* cancel_token = nullptr) override {
+        (void)bounds;
+        ++m_logical_delivery_count;
+        m_logical_delivery_token_cancellable =
+            cancel_token != nullptr && cancel_token->can_be_cancelled();
+        return acknowledgement_for(envelope, mdbxc::sync::NodeId());
+    }
+
+    mdbxc::sync::LogicalDeliveryAcknowledgement
+    deliver_ordered_logical_request(
+            const mdbxc::sync::LogicalDeliveryRequest& request,
+            const mdbxc::sync::CodecBounds* bounds = nullptr) override {
+        return deliver_ordered_logical_request_with_cancel(
+            request, bounds, nullptr);
+    }
+
+    mdbxc::sync::LogicalDeliveryAcknowledgement
+    deliver_ordered_logical_request_with_cancel(
+            const mdbxc::sync::LogicalDeliveryRequest& request,
+            const mdbxc::sync::CodecBounds* bounds = nullptr,
+            const mdbxc::sync::CancellationToken* cancel_token = nullptr) override {
+        (void)bounds;
+        ++m_logical_request_count;
+        m_logical_request_token_cancellable =
+            cancel_token != nullptr && cancel_token->can_be_cancelled();
+        return acknowledgement_for(request.envelope, request.receiver_node_id);
+    }
 
     mdbxc::sync::LogicalRecoveryResponse logical_recovery(
             const mdbxc::sync::LogicalRecoveryRequest& request) override {
@@ -115,13 +159,40 @@ public:
     bool logical_recovery_token_cancellable() const {
         return m_logical_recovery_token_cancellable;
     }
+    std::size_t logical_delivery_count() const {
+        return m_logical_delivery_count;
+    }
+    std::size_t logical_request_count() const {
+        return m_logical_request_count;
+    }
+    bool logical_delivery_token_cancellable() const {
+        return m_logical_delivery_token_cancellable;
+    }
+    bool logical_request_token_cancellable() const {
+        return m_logical_request_token_cancellable;
+    }
 
 private:
+    static mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement_for(
+            const mdbxc::sync::LogicalDeliveryEnvelope& envelope,
+            const mdbxc::sync::NodeId& receiver_node_id) {
+        mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement;
+        acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+        acknowledgement.receiver_node_id = receiver_node_id;
+        acknowledgement.origin_node_id = envelope.origin_node_id;
+        acknowledgement.acknowledged_through = envelope.origin_sequence;
+        return acknowledgement;
+    }
+
     std::size_t m_pull_count;
     std::size_t m_push_count;
     std::size_t m_cancel_count;
     std::size_t m_logical_recovery_count;
     bool m_logical_recovery_token_cancellable;
+    std::size_t m_logical_delivery_count;
+    std::size_t m_logical_request_count;
+    bool m_logical_delivery_token_cancellable;
+    bool m_logical_request_token_cancellable;
     mdbxc::sync::PullRequest m_last_pull;
     mdbxc::sync::PushRequest m_last_push;
     mdbxc::sync::LogicalRecoveryRequest m_last_logical_recovery;
@@ -174,6 +245,14 @@ public:
         (void)request;
         (void)response;
         throw std::runtime_error("observer failure");
+    }
+
+    void on_sync_transport_logical_delivery_result(
+            const mdbxc::sync::LogicalDeliveryEnvelope& envelope,
+            const mdbxc::sync::LogicalDeliveryAcknowledgement& acknowledgement) override {
+        (void)envelope;
+        (void)acknowledgement;
+        throw std::runtime_error("observer logical delivery failure");
     }
 
     void on_sync_transport_rejected(
@@ -351,6 +430,87 @@ void test_peer_middleware_enforces_logical_recovery_policy() {
                  "allowed logical recovery was not observed");
 }
 
+void test_peer_middleware_enforces_logical_delivery_policy() {
+    const mdbxc::sync::NodeId origin = make_node(0x35);
+    const mdbxc::sync::NodeId receiver = make_node(0x36);
+    const mdbxc::sync::DbId allowed_db_id = make_node(0xD6);
+
+    mdbxc::sync::NodeDbAllowListPolicy allow_list;
+    allow_list.allow_node_id(origin);
+    allow_list.allow_node_id(receiver);
+    allow_list.allow_db_id(allowed_db_id);
+    mdbxc::sync::CompositeSyncTransportPolicy policy;
+    policy.add(allow_list);
+
+    RecordingPeer peer;
+    mdbxc::sync::SyncTransportMetricsObserver metrics;
+    mdbxc::sync::SyncPeerMiddleware wrapped(peer, &policy, &metrics);
+
+    mdbxc::sync::LogicalDeliveryEnvelope envelope;
+    envelope.destination_db_uuid = make_node(0xD7);
+    envelope.origin_node_id = origin;
+    envelope.origin_sequence = 1u;
+    envelope.frame_id = "denied-envelope";
+    bool envelope_rejected = false;
+    try {
+        (void)wrapped.deliver_ordered_logical_delivery(envelope);
+    } catch (const std::runtime_error&) {
+        envelope_rejected = true;
+    }
+    require_true(envelope_rejected,
+                 "db-denied logical delivery did not fail locally");
+    require_true(peer.logical_delivery_count() == 0u,
+                 "db-denied logical delivery reached downstream peer");
+
+    envelope.destination_db_uuid = allowed_db_id;
+    mdbxc::sync::CancellationSource envelope_cancellation;
+    const mdbxc::sync::CancellationToken envelope_token =
+        envelope_cancellation.token();
+    const mdbxc::sync::LogicalDeliveryAcknowledgement allowed_envelope =
+        wrapped.deliver_ordered_logical_delivery_with_cancel(
+            envelope, nullptr, &envelope_token);
+    require_true(allowed_envelope.ok,
+                 "allowed logical delivery unexpectedly failed");
+    require_true(peer.logical_delivery_count() == 1u,
+                 "allowed logical delivery was not forwarded");
+    require_true(peer.logical_delivery_token_cancellable(),
+                 "logical delivery cancellation was not preserved");
+
+    mdbxc::sync::LogicalDeliveryRequest request;
+    request.receiver_node_id = make_node(0x37);
+    request.envelope = envelope;
+    const mdbxc::sync::LogicalDeliveryAcknowledgement denied_request =
+        wrapped.deliver_ordered_logical_request(request);
+    require_true(!denied_request.ok,
+                 "node-denied logical delivery request was allowed");
+    require_true(denied_request.receiver_node_id == request.receiver_node_id,
+                 "logical delivery request rejection lost receiver identity");
+    mdbxc::sync::validate_logical_delivery_acknowledgement(denied_request);
+    require_true(peer.logical_request_count() == 0u,
+                 "node-denied logical delivery request reached downstream peer");
+
+    request.receiver_node_id = receiver;
+    mdbxc::sync::CancellationSource request_cancellation;
+    const mdbxc::sync::CancellationToken request_token =
+        request_cancellation.token();
+    const mdbxc::sync::LogicalDeliveryAcknowledgement allowed_request =
+        wrapped.deliver_ordered_logical_request_with_cancel(
+            request, nullptr, &request_token);
+    require_true(allowed_request.ok,
+                 "allowed logical delivery request unexpectedly failed");
+    require_true(peer.logical_request_count() == 1u,
+                 "allowed logical delivery request was not forwarded");
+    require_true(peer.logical_request_token_cancellable(),
+                 "logical delivery request cancellation was not preserved");
+
+    const mdbxc::sync::SyncTransportMetricsSnapshot snapshot =
+        metrics.snapshot();
+    require_true(snapshot.logical_delivery_calls == 2u,
+                 "logical delivery metric mismatch");
+    require_true(snapshot.rejected_calls == 2u,
+                 "logical delivery rejection metric mismatch");
+}
+
 void test_transport_trace_context_helpers() {
     mdbxc::sync::HttpSyncRequest request;
     mdbxc::sync::http_add_header(
@@ -467,6 +627,18 @@ void test_observer_exceptions_are_swallowed() {
     require_true(response.ok, "observer exception changed pull result");
     require_true(peer.pull_count() == 1u,
                  "observer exception prevented downstream pull");
+
+    mdbxc::sync::LogicalDeliveryEnvelope delivery;
+    delivery.destination_db_uuid = make_node(0x52);
+    delivery.origin_node_id = make_node(0x53);
+    delivery.origin_sequence = 1u;
+    delivery.frame_id = "observer-exception";
+    const mdbxc::sync::LogicalDeliveryAcknowledgement acknowledgement =
+        wrapped.deliver_ordered_logical_delivery(delivery);
+    require_true(acknowledgement.ok,
+                 "observer exception changed logical delivery result");
+    require_true(peer.logical_delivery_count() == 1u,
+                 "observer exception prevented logical delivery forwarding");
 
     mdbxc::sync::NodeDbAllowListPolicy deny_db;
     deny_db.allow_db_id(make_node(0x99));
@@ -957,7 +1129,8 @@ void test_transport_zero_limit_policies() {
                      std::string(),
                  "zero HTTP request limit must include Retry-After");
 
-    mdbxc::sync::FixedBudgetSyncTransportPolicy budget(0u, 0u, 0u, 0u);
+    mdbxc::sync::FixedBudgetSyncTransportPolicy budget(
+        0u, 0u, 0u, 0u, 0u);
     mdbxc::sync::PullRequest pull;
     decision = budget.check_pull(pull);
     require_true(!decision.allowed && decision.status_code == 429,
@@ -972,6 +1145,26 @@ void test_transport_zero_limit_policies() {
     decision = budget.check_logical_recovery(recovery);
     require_true(!decision.allowed && decision.status_code == 429,
                  "zero logical recovery budget must reject");
+
+    mdbxc::sync::LogicalDeliveryEnvelope delivery;
+    decision = budget.check_logical_delivery(delivery);
+    require_true(!decision.allowed && decision.status_code == 429,
+                 "zero logical delivery budget must reject");
+
+    mdbxc::sync::FixedBudgetSyncTransportPolicy shared_delivery_budget(
+        mdbxc::sync::FixedBudgetSyncTransportPolicy::unlimited_budget(),
+        mdbxc::sync::FixedBudgetSyncTransportPolicy::unlimited_budget(),
+        mdbxc::sync::FixedBudgetSyncTransportPolicy::unlimited_budget(),
+        mdbxc::sync::FixedBudgetSyncTransportPolicy::unlimited_budget(),
+        1u);
+    decision = shared_delivery_budget.check_logical_delivery(delivery);
+    require_true(decision.allowed,
+                 "first shared logical delivery budget use was rejected");
+    mdbxc::sync::LogicalDeliveryRequest delivery_request;
+    decision = shared_delivery_budget.check_logical_delivery_request(
+        delivery_request);
+    require_true(!decision.allowed && decision.status_code == 429,
+                 "logical delivery request did not share delivery budget");
 
     decision = budget.check_http_post(
         mdbxc::sync::HttpSyncRoutes::pull_target(),
@@ -1086,6 +1279,7 @@ int main() {
     test_peer_middleware_allows_limits_and_observes();
     test_peer_middleware_forwards_logical_capabilities();
     test_peer_middleware_enforces_logical_recovery_policy();
+    test_peer_middleware_enforces_logical_delivery_policy();
     test_transport_trace_context_helpers();
     test_transport_observer_receives_request_context();
     test_observer_exceptions_are_swallowed();

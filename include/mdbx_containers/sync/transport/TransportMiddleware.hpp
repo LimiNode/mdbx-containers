@@ -32,6 +32,7 @@ namespace sync {
         Pull,
         Push,
         LogicalRecovery,
+        LogicalDelivery,
         HttpPost,
         WebSocketMessage
     };
@@ -184,6 +185,18 @@ namespace sync {
             return SyncTransportDecision::allow();
         }
 
+        virtual SyncTransportDecision check_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope) {
+            (void)envelope;
+            return SyncTransportDecision::allow();
+        }
+
+        virtual SyncTransportDecision check_logical_delivery_request(
+                const LogicalDeliveryRequest& request) {
+            (void)request;
+            return SyncTransportDecision::allow();
+        }
+
         virtual SyncTransportDecision check_http_post(
                 const std::string& target,
                 const std::string& content_type,
@@ -229,7 +242,9 @@ namespace sync {
 
     /// \brief Allows only configured node ids and database ids.
     /// \details Node allow-list defaults to "allow any". DB access defaults to
-    /// "allow any" for compatibility with simple peer-level policies.
+    /// "allow any" for compatibility with simple peer-level policies. Logical
+    /// delivery checks the envelope origin for the envelope-only API and the
+    /// receiver route for receiver-bound delivery requests.
     class NodeDbAllowListPolicy : public ISyncTransportPolicy {
     public:
         NodeDbAllowListPolicy()
@@ -280,6 +295,21 @@ namespace sync {
             return check_node_and_db(request.requester,
                                      request.db_id,
                                      "sync requester is not allowed");
+        }
+
+        SyncTransportDecision check_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope) override {
+            return check_node_and_db(envelope.origin_node_id,
+                                     envelope.destination_db_uuid,
+                                     "logical delivery origin is not allowed");
+        }
+
+        SyncTransportDecision check_logical_delivery_request(
+                const LogicalDeliveryRequest& request) override {
+            return check_node_and_db(
+                request.receiver_node_id,
+                request.envelope.destination_db_uuid,
+                "logical delivery receiver is not allowed");
         }
 
     private:
@@ -943,21 +973,25 @@ namespace sync {
                 std::uint64_t pull_budget,
                 std::uint64_t push_budget,
                 std::uint64_t http_post_budget = unlimited_budget(),
-                std::uint64_t logical_recovery_budget = unlimited_budget())
+                std::uint64_t logical_recovery_budget = unlimited_budget(),
+                std::uint64_t logical_delivery_budget = unlimited_budget())
             : m_pull_remaining(pull_budget),
               m_push_remaining(push_budget),
               m_http_post_remaining(http_post_budget),
-              m_logical_recovery_remaining(logical_recovery_budget) {}
+              m_logical_recovery_remaining(logical_recovery_budget),
+              m_logical_delivery_remaining(logical_delivery_budget) {}
 
         void reset(std::uint64_t pull_budget,
                    std::uint64_t push_budget,
                    std::uint64_t http_post_budget = unlimited_budget(),
-                   std::uint64_t logical_recovery_budget = unlimited_budget()) {
+                   std::uint64_t logical_recovery_budget = unlimited_budget(),
+                   std::uint64_t logical_delivery_budget = unlimited_budget()) {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pull_remaining = pull_budget;
             m_push_remaining = push_budget;
             m_http_post_remaining = http_post_budget;
             m_logical_recovery_remaining = logical_recovery_budget;
+            m_logical_delivery_remaining = logical_delivery_budget;
         }
 
         SyncTransportDecision check_pull(
@@ -977,6 +1011,20 @@ namespace sync {
             (void)request;
             return consume(m_logical_recovery_remaining,
                            "sync logical recovery rate limit exceeded");
+        }
+
+        SyncTransportDecision check_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope) override {
+            (void)envelope;
+            return consume(m_logical_delivery_remaining,
+                           "sync logical delivery rate limit exceeded");
+        }
+
+        SyncTransportDecision check_logical_delivery_request(
+                const LogicalDeliveryRequest& request) override {
+            (void)request;
+            return consume(m_logical_delivery_remaining,
+                           "sync logical delivery rate limit exceeded");
         }
 
         SyncTransportDecision check_http_post(
@@ -1009,6 +1057,7 @@ namespace sync {
         std::uint64_t m_push_remaining;
         std::uint64_t m_http_post_remaining;
         std::uint64_t m_logical_recovery_remaining;
+        std::uint64_t m_logical_delivery_remaining;
     };
 
     /// \brief Runs several policies in insertion order.
@@ -1051,6 +1100,30 @@ namespace sync {
             for (std::size_t i = 0; i < m_policies.size(); ++i) {
                 const SyncTransportDecision decision =
                     m_policies[i]->check_logical_recovery(request);
+                if (!decision.allowed) {
+                    return decision;
+                }
+            }
+            return SyncTransportDecision::allow();
+        }
+
+        SyncTransportDecision check_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope) override {
+            for (std::size_t i = 0; i < m_policies.size(); ++i) {
+                const SyncTransportDecision decision =
+                    m_policies[i]->check_logical_delivery(envelope);
+                if (!decision.allowed) {
+                    return decision;
+                }
+            }
+            return SyncTransportDecision::allow();
+        }
+
+        SyncTransportDecision check_logical_delivery_request(
+                const LogicalDeliveryRequest& request) override {
+            for (std::size_t i = 0; i < m_policies.size(); ++i) {
+                const SyncTransportDecision decision =
+                    m_policies[i]->check_logical_delivery_request(request);
                 if (!decision.allowed) {
                     return decision;
                 }
@@ -1108,6 +1181,7 @@ namespace sync {
         std::uint64_t pull_calls = 0;
         std::uint64_t push_calls = 0;
         std::uint64_t logical_recovery_calls = 0;
+        std::uint64_t logical_delivery_calls = 0;
         std::uint64_t http_post_calls = 0;
         std::uint64_t rejected_calls = 0;
         std::uint64_t failed_calls = 0;
@@ -1151,6 +1225,13 @@ namespace sync {
                 const LogicalRecoveryResponse& response) {
             (void)request;
             (void)response;
+        }
+
+        virtual void on_sync_transport_logical_delivery_result(
+                const LogicalDeliveryEnvelope& envelope,
+                const LogicalDeliveryAcknowledgement& acknowledgement) {
+            (void)envelope;
+            (void)acknowledgement;
         }
 
         virtual void on_sync_transport_http_request(
@@ -1235,6 +1316,17 @@ namespace sync {
             std::lock_guard<std::mutex> lock(m_mutex);
             ++m_snapshot.logical_recovery_calls;
             if (!response.ok) {
+                ++m_snapshot.failed_calls;
+            }
+        }
+
+        void on_sync_transport_logical_delivery_result(
+                const LogicalDeliveryEnvelope& envelope,
+                const LogicalDeliveryAcknowledgement& acknowledgement) override {
+            (void)envelope;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            ++m_snapshot.logical_delivery_calls;
+            if (!acknowledgement.ok) {
                 ++m_snapshot.failed_calls;
             }
         }
@@ -1455,7 +1547,8 @@ namespace sync {
         LogicalDeliveryAcknowledgement deliver_ordered_logical_delivery(
                 const LogicalDeliveryEnvelope& envelope,
                 const CodecBounds* bounds = nullptr) override {
-            return m_next.deliver_ordered_logical_delivery(envelope, bounds);
+            return deliver_ordered_logical_delivery_with_cancel(
+                envelope, bounds, nullptr);
         }
 
         LogicalDeliveryAcknowledgement
@@ -1463,14 +1556,42 @@ namespace sync {
                 const LogicalDeliveryEnvelope& envelope,
                 const CodecBounds* bounds = nullptr,
                 const CancellationToken* cancel_token = nullptr) override {
-            return m_next.deliver_ordered_logical_delivery_with_cancel(
-                envelope, bounds, cancel_token);
+            if (m_policy != nullptr) {
+                const SyncTransportDecision decision =
+                    m_policy->check_logical_delivery(envelope);
+                if (!decision.allowed) {
+                    detail::notify_transport_rejected(
+                        m_observer, SyncTransportOperation::LogicalDelivery,
+                        decision.error);
+                    throw std::runtime_error(reject_message(
+                        decision, "logical delivery rejected"));
+                }
+            }
+
+            try {
+                const LogicalDeliveryAcknowledgement acknowledgement =
+                    m_next.deliver_ordered_logical_delivery_with_cancel(
+                        envelope, bounds, cancel_token);
+                notify_logical_delivery_result(envelope, acknowledgement);
+                return acknowledgement;
+            } catch (const std::exception& e) {
+                detail::notify_transport_exception(
+                    m_observer, SyncTransportOperation::LogicalDelivery,
+                    e.what());
+                throw;
+            } catch (...) {
+                detail::notify_transport_exception(
+                    m_observer, SyncTransportOperation::LogicalDelivery,
+                    "unknown logical delivery exception");
+                throw;
+            }
         }
 
         LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
                 const LogicalDeliveryRequest& request,
                 const CodecBounds* bounds = nullptr) override {
-            return m_next.deliver_ordered_logical_request(request, bounds);
+            return deliver_ordered_logical_request_with_cancel(
+                request, bounds, nullptr);
         }
 
         LogicalDeliveryAcknowledgement
@@ -1478,8 +1599,36 @@ namespace sync {
                 const LogicalDeliveryRequest& request,
                 const CodecBounds* bounds = nullptr,
                 const CancellationToken* cancel_token = nullptr) override {
-            return m_next.deliver_ordered_logical_request_with_cancel(
-                request, bounds, cancel_token);
+            if (m_policy != nullptr) {
+                const SyncTransportDecision decision =
+                    m_policy->check_logical_delivery_request(request);
+                if (!decision.allowed) {
+                    detail::notify_transport_rejected(
+                        m_observer, SyncTransportOperation::LogicalDelivery,
+                        decision.error);
+                    return rejected_logical_delivery_acknowledgement(
+                        request.envelope, request.receiver_node_id, decision,
+                        "logical delivery request rejected");
+                }
+            }
+
+            try {
+                const LogicalDeliveryAcknowledgement acknowledgement =
+                    m_next.deliver_ordered_logical_request_with_cancel(
+                        request, bounds, cancel_token);
+                notify_logical_delivery_result(request.envelope, acknowledgement);
+                return acknowledgement;
+            } catch (const std::exception& e) {
+                detail::notify_transport_exception(
+                    m_observer, SyncTransportOperation::LogicalDelivery,
+                    e.what());
+                throw;
+            } catch (...) {
+                detail::notify_transport_exception(
+                    m_observer, SyncTransportOperation::LogicalDelivery,
+                    "unknown logical delivery request exception");
+                throw;
+            }
         }
 
         bool supports_logical_recovery() const override {
@@ -1535,6 +1684,21 @@ namespace sync {
                                           : decision.error;
         }
 
+        static LogicalDeliveryAcknowledgement
+        rejected_logical_delivery_acknowledgement(
+                const LogicalDeliveryEnvelope& envelope,
+                const NodeId& receiver_node_id,
+                const SyncTransportDecision& decision,
+                const char* fallback) {
+            LogicalDeliveryAcknowledgement acknowledgement;
+            acknowledgement.destination_db_uuid = envelope.destination_db_uuid;
+            acknowledgement.receiver_node_id = receiver_node_id;
+            acknowledgement.origin_node_id = envelope.origin_node_id;
+            acknowledgement.ok = false;
+            acknowledgement.error = reject_message(decision, fallback);
+            return acknowledgement;
+        }
+
         void notify_pull_result(const PullRequest& request,
                                 const PullResponse& response) const {
             if (m_observer == nullptr) {
@@ -1564,6 +1728,18 @@ namespace sync {
             try {
                 m_observer->on_sync_transport_logical_recovery_result(
                     request, response);
+            } catch (...) {}
+        }
+
+        void notify_logical_delivery_result(
+                const LogicalDeliveryEnvelope& envelope,
+                const LogicalDeliveryAcknowledgement& acknowledgement) const {
+            if (m_observer == nullptr) {
+                return;
+            }
+            try {
+                m_observer->on_sync_transport_logical_delivery_result(
+                    envelope, acknowledgement);
             } catch (...) {}
         }
 
