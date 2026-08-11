@@ -332,6 +332,12 @@ namespace mdbxc {
         bool sync_capture_suppressed(MDBX_txn* txn) const;
         void ensure_sync_capture_txn_supported(MDBX_txn* txn,
                                                const char* context) const;
+        void ensure_sync_dbi_external_txn_supported(
+            MDBX_txn* txn,
+            const std::string& dbi_name,
+            const char* context) const;
+        bool is_sync_versioned_dbi(MDBX_txn* txn,
+                                   const std::string& dbi_name) const;
         void validate_sync_dbi_write(MDBX_txn* txn,
                                      const std::string& dbi_name,
                                      sync::ChangeOpType op_type);

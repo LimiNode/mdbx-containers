@@ -3972,6 +3972,37 @@ void test_versioned_dbi_guard_survives_engine_lifetime() {
             throw std::runtime_error(
                 "registered DBI was mutable after SyncEngine destruction");
         }
+
+        KeyValueTable<int, int> trades(conn, "trades");
+        MDBX_txn* raw_trades_txn = nullptr;
+        check_mdbx(mdbx_txn_begin(conn->env_handle(), nullptr,
+                                  MDBX_TXN_READWRITE, &raw_trades_txn),
+                   "failed to begin raw trades transaction");
+        trades.insert_or_assign(1, 20, raw_trades_txn);
+        check_mdbx(mdbx_txn_commit(raw_trades_txn),
+                   "failed to commit raw trades transaction");
+        if (kv_or_throw(conn, trades, 1, "raw transaction value") != 20u) {
+            throw std::runtime_error(
+                "raw transaction write to ordinary DBI was rejected");
+        }
+
+        MDBX_txn* raw_bars_txn = nullptr;
+        check_mdbx(mdbx_txn_begin(conn->env_handle(), nullptr,
+                                  MDBX_TXN_READWRITE, &raw_bars_txn),
+                   "failed to begin raw versioned transaction");
+        bool rejected_raw_versioned_write = false;
+        try {
+            bars.insert_or_assign(1, 11, raw_bars_txn);
+        } catch (const std::logic_error&) {
+            rejected_raw_versioned_write = true;
+        }
+        check_mdbx(mdbx_txn_commit(raw_bars_txn),
+                   "failed to commit rejected raw versioned transaction");
+        if (!rejected_raw_versioned_write ||
+            kv_or_throw(conn, bars, 1, "raw versioned value") != 10u) {
+            throw std::runtime_error(
+                "raw transaction write bypassed versioned DBI guard");
+        }
     }
     conn->disconnect();
     conn.reset();

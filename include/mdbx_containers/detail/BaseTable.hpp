@@ -184,6 +184,8 @@ namespace mdbxc {
 #       if MDBXC_SYNC_ENABLED
             m_connection->ensure_sync_capture_txn_supported(
                 checked, "BaseTable external transaction");
+            m_connection->ensure_sync_dbi_external_txn_supported(
+                checked, m_name, "BaseTable external transaction");
 #       endif
             return checked;
         }

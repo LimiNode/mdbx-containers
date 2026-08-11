@@ -193,27 +193,9 @@ namespace mdbxc {
             sync::ChangeOpType op_type) {
         try {
             (void)op_type;
-            checked_txn_env(txn, m_env, "Connection::validate_sync_dbi_write");
-            MDBX_dbi registry_dbi = 0;
-            const int open_rc = mdbx_dbi_open(
-                txn, "_mdbxc_versioned_dbis", static_cast<MDBX_db_flags_t>(0),
-                &registry_dbi);
-            if (open_rc == MDBX_NOTFOUND) {
+            if (!is_sync_versioned_dbi(txn, dbi_name)) {
                 return;
             }
-            check_mdbx(open_rc,
-                       "Connection failed to open versioned DBI registry");
-            MDBX_val key = {
-                dbi_name.empty() ? nullptr : const_cast<char*>(dbi_name.data()),
-                dbi_name.size()
-            };
-            MDBX_val value;
-            const int get_rc = mdbx_get(txn, registry_dbi, &key, &value);
-            if (get_rc == MDBX_NOTFOUND) {
-                return;
-            }
-            check_mdbx(get_rc,
-                       "Connection failed to query versioned DBI registry");
             throw std::logic_error(
                 "registered source-version-wins DBI must be mutated through "
                 "VersionedKeyValueTable");
@@ -418,6 +400,54 @@ namespace mdbxc {
             std::string(context) +
             " cannot use caller-created raw writable MDBX_txn* while sync capture is attached; "
             "use mdbx_containers::Transaction or Connection::begin()/commit()");
+    }
+
+    inline void Connection::ensure_sync_dbi_external_txn_supported(
+            MDBX_txn* txn,
+            const std::string& dbi_name,
+            const char* context) const {
+        if (thread_txn() == txn) {
+            return;
+        }
+        const MDBX_txn_flags_t flags = mdbx_txn_flags(txn);
+        if ((static_cast<int>(flags) &
+             static_cast<int>(MDBX_TXN_RDONLY)) != 0) {
+            return;
+        }
+        if (!is_sync_versioned_dbi(txn, dbi_name)) {
+            return;
+        }
+        throw std::logic_error(
+            std::string(context) +
+            " cannot use caller-created raw writable MDBX_txn* with a "
+            "registered source-version-wins DBI; use VersionedKeyValueTable");
+    }
+
+    inline bool Connection::is_sync_versioned_dbi(
+            MDBX_txn* txn,
+            const std::string& dbi_name) const {
+        checked_txn_env(txn, m_env, "Connection::is_sync_versioned_dbi");
+        MDBX_dbi registry_dbi = 0;
+        const int open_rc = mdbx_dbi_open(
+            txn, "_mdbxc_versioned_dbis", static_cast<MDBX_db_flags_t>(0),
+            &registry_dbi);
+        if (open_rc == MDBX_NOTFOUND) {
+            return false;
+        }
+        check_mdbx(open_rc,
+                   "Connection failed to open versioned DBI registry");
+        MDBX_val key = {
+            dbi_name.empty() ? nullptr : const_cast<char*>(dbi_name.data()),
+            dbi_name.size()
+        };
+        MDBX_val value;
+        const int get_rc = mdbx_get(txn, registry_dbi, &key, &value);
+        if (get_rc == MDBX_NOTFOUND) {
+            return false;
+        }
+        check_mdbx(get_rc,
+                   "Connection failed to query versioned DBI registry");
+        return true;
     }
 
     inline Connection::SyncApplyNotification Connection::mark_sync_apply_committed(
