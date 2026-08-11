@@ -29,10 +29,11 @@ namespace sync {
 
     /// \brief Transport operation observed by middleware.
     enum class SyncTransportOperation : std::uint8_t {
-        Pull,
-        Push,
-        HttpPost,
-        WebSocketMessage
+        Pull = 0,
+        Push = 1,
+        HttpPost = 2,
+        WebSocketMessage = 3,
+        LogicalRecovery = 4
     };
 
     /// \brief Result returned by a transport policy.
@@ -177,6 +178,12 @@ namespace sync {
             return SyncTransportDecision::allow();
         }
 
+        virtual SyncTransportDecision check_logical_recovery(
+                const LogicalRecoveryRequest& request) {
+            (void)request;
+            return SyncTransportDecision::allow();
+        }
+
         virtual SyncTransportDecision check_http_post(
                 const std::string& target,
                 const std::string& content_type,
@@ -266,6 +273,13 @@ namespace sync {
             return check_node_and_db(request.sender,
                                      request.db_id,
                                      "sync sender is not allowed");
+        }
+
+        SyncTransportDecision check_logical_recovery(
+                const LogicalRecoveryRequest& request) override {
+            return check_node_and_db(request.requester,
+                                     request.db_id,
+                                     "sync requester is not allowed");
         }
 
     private:
@@ -928,18 +942,22 @@ namespace sync {
         FixedBudgetSyncTransportPolicy(
                 std::uint64_t pull_budget,
                 std::uint64_t push_budget,
-                std::uint64_t http_post_budget = unlimited_budget())
+                std::uint64_t http_post_budget = unlimited_budget(),
+                std::uint64_t logical_recovery_budget = unlimited_budget())
             : m_pull_remaining(pull_budget),
               m_push_remaining(push_budget),
-              m_http_post_remaining(http_post_budget) {}
+              m_http_post_remaining(http_post_budget),
+              m_logical_recovery_remaining(logical_recovery_budget) {}
 
         void reset(std::uint64_t pull_budget,
                    std::uint64_t push_budget,
-                   std::uint64_t http_post_budget = unlimited_budget()) {
+                   std::uint64_t http_post_budget = unlimited_budget(),
+                   std::uint64_t logical_recovery_budget = unlimited_budget()) {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_pull_remaining = pull_budget;
             m_push_remaining = push_budget;
             m_http_post_remaining = http_post_budget;
+            m_logical_recovery_remaining = logical_recovery_budget;
         }
 
         SyncTransportDecision check_pull(
@@ -952,6 +970,13 @@ namespace sync {
                 const PushRequest& request) override {
             (void)request;
             return consume(m_push_remaining, "sync push rate limit exceeded");
+        }
+
+        SyncTransportDecision check_logical_recovery(
+                const LogicalRecoveryRequest& request) override {
+            (void)request;
+            return consume(m_logical_recovery_remaining,
+                           "sync logical recovery rate limit exceeded");
         }
 
         SyncTransportDecision check_http_post(
@@ -983,6 +1008,7 @@ namespace sync {
         std::uint64_t m_pull_remaining;
         std::uint64_t m_push_remaining;
         std::uint64_t m_http_post_remaining;
+        std::uint64_t m_logical_recovery_remaining;
     };
 
     /// \brief Runs several policies in insertion order.
@@ -1013,6 +1039,18 @@ namespace sync {
             for (std::size_t i = 0; i < m_policies.size(); ++i) {
                 const SyncTransportDecision decision =
                     m_policies[i]->check_push(request);
+                if (!decision.allowed) {
+                    return decision;
+                }
+            }
+            return SyncTransportDecision::allow();
+        }
+
+        SyncTransportDecision check_logical_recovery(
+                const LogicalRecoveryRequest& request) override {
+            for (std::size_t i = 0; i < m_policies.size(); ++i) {
+                const SyncTransportDecision decision =
+                    m_policies[i]->check_logical_recovery(request);
                 if (!decision.allowed) {
                     return decision;
                 }
@@ -1069,6 +1107,7 @@ namespace sync {
     struct SyncTransportMetricsSnapshot {
         std::uint64_t pull_calls = 0;
         std::uint64_t push_calls = 0;
+        std::uint64_t logical_recovery_calls = 0;
         std::uint64_t http_post_calls = 0;
         std::uint64_t rejected_calls = 0;
         std::uint64_t failed_calls = 0;
@@ -1103,6 +1142,13 @@ namespace sync {
         virtual void on_sync_transport_push_result(
                 const PushRequest& request,
                 const PushResponse& response) {
+            (void)request;
+            (void)response;
+        }
+
+        virtual void on_sync_transport_logical_recovery_result(
+                const LogicalRecoveryRequest& request,
+                const LogicalRecoveryResponse& response) {
             (void)request;
             (void)response;
         }
@@ -1180,6 +1226,17 @@ namespace sync {
                 ++m_snapshot.failed_calls;
             }
             m_snapshot.pushed_batches += request.batches.size();
+        }
+
+        void on_sync_transport_logical_recovery_result(
+                const LogicalRecoveryRequest& request,
+                const LogicalRecoveryResponse& response) override {
+            (void)request;
+            std::lock_guard<std::mutex> lock(m_mutex);
+            ++m_snapshot.logical_recovery_calls;
+            if (!response.ok) {
+                ++m_snapshot.failed_calls;
+            }
         }
 
         void on_sync_transport_http_request(
@@ -1431,13 +1488,43 @@ namespace sync {
 
         LogicalRecoveryResponse logical_recovery(
                 const LogicalRecoveryRequest& request) override {
-            return m_next.logical_recovery(request);
+            return logical_recovery_with_cancel(request, nullptr);
         }
 
         LogicalRecoveryResponse logical_recovery_with_cancel(
                 const LogicalRecoveryRequest& request,
                 const CancellationToken* cancel_token = nullptr) override {
-            return m_next.logical_recovery_with_cancel(request, cancel_token);
+            if (m_policy != nullptr) {
+                const SyncTransportDecision decision =
+                    m_policy->check_logical_recovery(request);
+                if (!decision.allowed) {
+                    detail::notify_transport_rejected(
+                        m_observer, SyncTransportOperation::LogicalRecovery,
+                        decision.error);
+                    LogicalRecoveryResponse response;
+                    response.ok = false;
+                    response.error = reject_message(
+                        decision, "logical recovery rejected");
+                    return response;
+                }
+            }
+
+            try {
+                const LogicalRecoveryResponse response =
+                    m_next.logical_recovery_with_cancel(request, cancel_token);
+                notify_logical_recovery_result(request, response);
+                return response;
+            } catch (const std::exception& e) {
+                detail::notify_transport_exception(
+                    m_observer, SyncTransportOperation::LogicalRecovery,
+                    e.what());
+                throw;
+            } catch (...) {
+                detail::notify_transport_exception(
+                    m_observer, SyncTransportOperation::LogicalRecovery,
+                    "unknown logical recovery exception");
+                throw;
+            }
         }
 
     private:
@@ -1465,6 +1552,18 @@ namespace sync {
             }
             try {
                 m_observer->on_sync_transport_push_result(request, response);
+            } catch (...) {}
+        }
+
+        void notify_logical_recovery_result(
+                const LogicalRecoveryRequest& request,
+                const LogicalRecoveryResponse& response) const {
+            if (m_observer == nullptr) {
+                return;
+            }
+            try {
+                m_observer->on_sync_transport_logical_recovery_result(
+                    request, response);
             } catch (...) {}
         }
 
