@@ -118,12 +118,16 @@ local state отклоняется. Broker timestamp может быть ком�
 timestamps необходим upstream sequence или deterministic tuple. Wall-clock
 writer-а и packet-receipt time не являются authority.
 
-Этот register v1 намеренно исключает обычные raw `KeyValueTable` writes,
-`clear`, bulk/range operations, logical identity remapping, другие table types
-и full-snapshot bootstrap. Не смешивайте обычный raw capture с LWW engine: он
-отклоняет unversioned incoming operations. Tombstones сохраняются; для их
-compaction требуется отдельно определённый replica horizon. Зарезервируйте ещё
-один MDBX DBI slot для `_mdbxc_identity_index` в `Config::max_dbs`.
+Этот register v1 durable-помечает свой DBI в `_mdbxc_versioned_dbis`. Каждый
+replica должен сконструировать adapter до приёма revisioned batches. Прямые raw
+`KeyValueTable` writes, `clear` и bulk/range mutations для этого DBI fail closed;
+используйте вместо них point operations adapter-а. Другие, unregistered DBI
+могут использовать ordinary raw capture на том же LWW engine. Unversioned
+incoming operations для registered DBI и revisioned operations для normal DBI
+отклоняются. Full snapshots могут включать только unregistered DBI. Tombstones
+сохраняются; для их compaction требуется отдельно определённый replica horizon.
+Зарезервируйте два дополнительных MDBX DBI slots для `_mdbxc_identity_index` и
+`_mdbxc_versioned_dbis` в `Config::max_dbs`.
 
 ## Поддерживаемые пути таблиц
 

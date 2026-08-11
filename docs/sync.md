@@ -119,11 +119,14 @@ non-empty application-owned version that is compared lexicographically, then
 by origin `NodeId`. The version remains outside the user value and a durable
 sidecar tombstone prevents an older put from resurrecting a delete.
 
-This mode is not generic raw replication: use only the versioned adapter on an
-LWW connection. Ordinary raw operations, clear/bulk/range changes, logical
-identity remapping, other table types, and full snapshot recovery are rejected
-or unsupported. Choose an upstream sequence or other canonical authority;
-node wall-clock time is not an authority. See
+This mode is not generic conflict resolution. `VersionedKeyValueTable` durably
+registers only its DBI; every replica must construct the adapter before it
+receives revisioned operations. A registered DBI accepts only adapter-emitted
+point put/delete changes and rejects direct raw, clear, bulk, and range writes.
+Ordinary raw DBIs can coexist on the same LWW engine and continue to accept
+unversioned raw operations. Full snapshots may use a manifest of ordinary DBIs,
+but cannot include a registered DBI. Choose an upstream sequence or other
+canonical authority; node wall-clock time is not an authority. See
 [deployment patterns](sync-deployment-patterns.md) for the operational model.
 
 ## Transport And Operations

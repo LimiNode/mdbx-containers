@@ -34,6 +34,7 @@ namespace mdbxc {
 
     namespace sync {
         class ISyncCaptureSink;
+        class ISyncDbiWritePolicy;
         class ISyncApplyObserver;
         class SyncCaptureScope;
         class SyncEngine;
@@ -71,6 +72,7 @@ namespace mdbxc {
         friend class TableSequence;
 #   if MDBXC_SYNC_ENABLED
         friend class sync::SyncCaptureScope;
+        friend class sync::SyncEngine;
 #   endif
     public:
 
@@ -332,6 +334,11 @@ namespace mdbxc {
         bool sync_capture_suppressed(MDBX_txn* txn) const;
         void ensure_sync_capture_txn_supported(MDBX_txn* txn,
                                                const char* context) const;
+        void attach_sync_dbi_write_policy(sync::ISyncDbiWritePolicy* policy);
+        void detach_sync_dbi_write_policy(sync::ISyncDbiWritePolicy* policy);
+        void validate_sync_dbi_write(MDBX_txn* txn,
+                                     const std::string& dbi_name,
+                                     sync::ChangeOpType op_type);
         struct SyncApplyObserverState;
 
         struct SyncApplyObserverCallback {
@@ -382,6 +389,7 @@ namespace mdbxc {
         };
 
         sync::ISyncCaptureSink* m_sync_capture = nullptr;
+        sync::ISyncDbiWritePolicy* m_sync_dbi_write_policy = nullptr;
         std::uint64_t m_sync_capture_token = 0;
         std::uint64_t m_next_sync_capture_token = 0;
         MDBX_txn* m_sync_capture_failed_txn = nullptr;

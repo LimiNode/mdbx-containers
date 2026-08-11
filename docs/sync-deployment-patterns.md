@@ -119,12 +119,16 @@ reusing it for different local state is rejected. A broker timestamp may be one
 component, but an upstream sequence or deterministic tuple must resolve timestamp
 ties. Writer wall-clock and packet-receipt time are not suitable authorities.
 
-This v1 register intentionally excludes normal raw `KeyValueTable` writes,
-`clear`, bulk/range operations, logical identity remapping, other table types,
-and full-snapshot bootstrap. Do not mix ordinary raw capture with an LWW engine:
-it rejects unversioned incoming operations. Tombstones are retained; compaction
-needs a separately specified replica horizon. Reserve one additional MDBX DBI
-slot for `_mdbxc_identity_index` in `Config::max_dbs`.
+This v1 register durably marks its DBI in `_mdbxc_versioned_dbis`. Every replica
+must construct the adapter before it receives revisioned batches. Direct raw
+`KeyValueTable` writes, `clear`, and bulk/range mutations against that DBI fail
+closed; use the adapter's point operations instead. Other, unregistered DBIs
+may use ordinary raw capture on the same LWW engine. Unversioned incoming
+operations targeting a registered DBI and revisioned operations targeting a
+normal DBI are rejected. Full snapshots can include only unregistered DBIs.
+Tombstones are retained; compaction needs a separately specified replica
+horizon. Reserve two additional MDBX DBI slots for `_mdbxc_identity_index` and
+`_mdbxc_versioned_dbis` in `Config::max_dbs`.
 
 ## Supported Table Paths
 

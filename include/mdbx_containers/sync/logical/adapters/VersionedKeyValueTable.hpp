@@ -37,7 +37,9 @@ namespace sync {
         VersionedKeyValueTable(
                 KeyValueTable<KeyT, ValueT, Options>& table,
                 ThreadLocalChangeAccumulator& capture)
-            : m_table(table), m_capture(capture) {}
+            : m_table(table), m_capture(capture) {
+            register_table();
+        }
 
         /// \brief Upserts a value when its source version wins.
         /// \param key User key to update.
@@ -123,6 +125,20 @@ namespace sync {
         }
 
     private:
+        void register_table() {
+            std::shared_ptr<Connection> connection = m_table.connection();
+            auto txn = connection->transaction(TransactionMode::WRITABLE);
+            VersionedDbiStore registry(connection->env_handle());
+            if (!registry.contains(txn.handle(), m_table.dbi_name())) {
+                if (!m_table.empty(txn.handle())) {
+                    throw std::invalid_argument(
+                        "VersionedKeyValueTable can register only an empty table");
+                }
+                (void)registry.register_dbi(txn.handle(), m_table.dbi_name());
+            }
+            txn.commit();
+        }
+
         std::vector<std::uint8_t> encode_key(const KeyT& key) const {
             SerializeScratch scratch;
             const MDBX_val value = serialize_key<Options::safe_integer_key>(key, scratch);

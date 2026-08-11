@@ -187,6 +187,44 @@ namespace mdbxc {
         return m_sync_capture;
     }
 
+    inline void Connection::attach_sync_dbi_write_policy(
+            sync::ISyncDbiWritePolicy* policy) {
+        if (policy == nullptr) {
+            throw std::invalid_argument(
+                "Connection::attach_sync_dbi_write_policy policy cannot be null");
+        }
+        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        m_sync_dbi_write_policy = policy;
+    }
+
+    inline void Connection::detach_sync_dbi_write_policy(
+            sync::ISyncDbiWritePolicy* policy) {
+        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        if (m_sync_dbi_write_policy == policy) {
+            m_sync_dbi_write_policy = nullptr;
+        }
+    }
+
+    inline void Connection::validate_sync_dbi_write(
+            MDBX_txn* txn,
+            const std::string& dbi_name,
+            sync::ChangeOpType op_type) {
+        sync::ISyncDbiWritePolicy* policy = nullptr;
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            policy = m_sync_dbi_write_policy;
+        }
+        if (policy == nullptr) {
+            return;
+        }
+        try {
+            policy->validate_sync_dbi_write(txn, dbi_name, op_type);
+        } catch (...) {
+            mark_sync_capture_failed(txn);
+            throw;
+        }
+    }
+
     inline Connection::SyncCaptureSuppressionScope::
     SyncCaptureSuppressionScope(Connection& connection, MDBX_txn* txn)
         : m_connection(&connection),

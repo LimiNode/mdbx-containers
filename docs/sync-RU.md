@@ -125,11 +125,14 @@ put/delete-операция несёт непустимую application-owned ve
 вне user value, а durable sidecar tombstone не позволяет старому put воскресить
 delete.
 
-Это не generic raw replication: для LWW connection используйте только
-versioned adapter. Обычные raw-операции, clear/bulk/range changes, logical
-identity remapping, другие table types и full-snapshot recovery отклоняются или
-не поддерживаются. Выберите upstream sequence либо другую canonical authority;
-wall-clock узла authority не является. Operational model приведён в
+Это не generic conflict resolution. `VersionedKeyValueTable` durable-регистрирует
+только свой DBI; каждый replica должен сконструировать adapter до приёма
+revisioned operations. Registered DBI принимает только adapter-emitted point
+put/delete changes и отклоняет direct raw, clear, bulk и range writes. Обычные
+raw DBI могут сосуществовать на том же LWW engine и принимать unversioned raw
+operations. Full snapshots могут использовать manifest обычных DBI, но не могут
+включать registered DBI. Выберите upstream sequence либо другую canonical
+authority; wall-clock узла authority не является. Operational model приведён в
 [deployment patterns](sync-deployment-patterns-RU.md).
 
 ## Транспорт и эксплуатация

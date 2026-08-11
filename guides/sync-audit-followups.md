@@ -19,8 +19,10 @@ into small PRs so behavior, storage format, and build hygiene remain reviewable.
   `ConflictPolicy::LastWriterWins` cannot be selected until the apply semantics
   exist.
 - Current status: narrow LWW v1 is now available through
-  `VersionedKeyValueTable` with application-provided source versions. The
-  historical PR #155 statement remains applicable to ordinary raw operations.
+  `VersionedKeyValueTable` with application-provided source versions. Its DBI
+  is durably registered and fail-closed for direct raw writes; ordinary raw
+  DBIs remain supported on the same engine. The historical PR #155 statement
+  remains applicable to ordinary raw operations without a versioned contract.
 - PR #156 renamed the changelog pull internals enough to clarify that empty
   cursors replay retained changelog history rather than exporting a database
   snapshot.

@@ -61,6 +61,8 @@ namespace sync {
         ReservedDbiName,          ///< Incoming ChangeOp targets an internal DBI name.
         MissingLwwRevision,       ///< LWW operation lacks a non-empty source revision.
         UnsupportedLwwOperation,  ///< LWW accepts only raw put/delete without identity remapping.
+        LwwPolicyDisabled,        ///< A registered LWW DBI requires LastWriterWins policy.
+        UnexpectedLwwRevision,    ///< A normal DBI received source-version metadata.
     };
 
     /// \brief Detailed result for callers that need conflict diagnostics.
@@ -115,7 +117,8 @@ namespace sync {
     };
 
     /// \brief Pull/push/apply coordinator bound to a single \c Connection.
-    class SyncEngine : public ILogicalDeliveryOutbox {
+    class SyncEngine : public ILogicalDeliveryOutbox,
+                       private ISyncDbiWritePolicy {
         struct PullOrigin {
             NodeId origin;
             std::uint64_t last_seq;
@@ -177,6 +180,15 @@ namespace sync {
                 : std::runtime_error(message) {}
         };
 
+        class FullSnapshotVersionedDbiUnsupported : public std::runtime_error {
+        public:
+            explicit FullSnapshotVersionedDbiUnsupported(
+                    const std::string& dbi_name)
+                : std::runtime_error(
+                    "full snapshot does not support registered versioned DBI: " +
+                    dbi_name) {}
+        };
+
         struct FullSnapshotImportSession {
             enum class ReplacementState {
                 NotSeen,
@@ -212,11 +224,11 @@ namespace sync {
               m_policy(policy),
               m_full_snapshot_options(full_snapshot_options) {
             validate_full_snapshot_export_options(m_full_snapshot_options);
-            if (m_policy == ConflictPolicy::LastWriterWins &&
-                full_snapshot_export_is_configured(m_full_snapshot_options)) {
-                throw std::invalid_argument(
-                    "LastWriterWins does not support full snapshot export");
-            }
+            m_conn->attach_sync_dbi_write_policy(this);
+        }
+
+        ~SyncEngine() {
+            m_conn->detach_sync_dbi_write_policy(this);
         }
 
         /// \brief Initialises the local \c node_id and \c db_uuid.
@@ -274,11 +286,6 @@ namespace sync {
         void set_full_snapshot_export_options(
                 const FullSnapshotExportOptions& options) {
             validate_full_snapshot_export_options(options);
-            if (m_policy == ConflictPolicy::LastWriterWins &&
-                full_snapshot_export_is_configured(options)) {
-                throw std::invalid_argument(
-                    "LastWriterWins does not support full snapshot export");
-            }
             std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
             m_full_snapshot_options = options;
             m_full_snapshot_sessions.clear();
@@ -314,8 +321,8 @@ namespace sync {
         /// inventory and bootstraps the applied cursor from its source tail.
         FullSnapshotImportResult apply_full_snapshot_chunk(
                 const FullSnapshotChunk& chunk) {
-            reject_lww_full_snapshot_import();
             FullSnapshotCodec::validate(chunk);
+            reject_versioned_full_snapshot_manifest(chunk.manifest);
             FullSnapshotImportResult result;
             Connection::SyncApplyNotification notification;
             bool notification_ready = false;
@@ -344,8 +351,8 @@ namespace sync {
         FullSnapshotImportResult apply_logical_recovery_chunk(
                 const FullSnapshotChunk& chunk,
                 const LogicalRecoveryBaseline* baseline = nullptr) {
-            reject_lww_full_snapshot_import();
             FullSnapshotCodec::validate(chunk);
+            reject_versioned_full_snapshot_manifest(chunk.manifest);
             if (chunk.has_more ? baseline != nullptr : baseline == nullptr) {
                 throw std::invalid_argument(
                     "logical recovery baseline must accompany only the final page");
@@ -1254,8 +1261,10 @@ namespace sync {
                 outcome.conflict_reason = ApplyConflictReason::SequenceGap;
                 return outcome;
             }
-            if (m_policy == ConflictPolicy::LastWriterWins &&
-                !validate_lww_batch(batch, &outcome)) {
+            VersionedDbiStore versioned_dbis(m_conn->env_handle());
+            std::vector<bool> versioned_ops;
+            if (!validate_versioned_dbi_batch(
+                    txn, batch, versioned_dbis, versioned_ops, &outcome)) {
                 return outcome;
             }
             std::vector<BatchDbiFlags> batch_dbis;
@@ -1266,11 +1275,13 @@ namespace sync {
                 return outcome;
             }
             IdentityIndexStore identity_index(m_conn->env_handle());
-            if (m_policy == ConflictPolicy::LastWriterWins) {
+            if (std::find(versioned_ops.begin(), versioned_ops.end(), true) !=
+                versioned_ops.end()) {
                 identity_index.open(txn);
             }
-            for (const ChangeOp& op : batch.ops) {
-                if (m_policy == ConflictPolicy::LastWriterWins) {
+            for (std::size_t i = 0u; i < batch.ops.size(); ++i) {
+                const ChangeOp& op = batch.ops[i];
+                if (versioned_ops[i]) {
                     apply_lww_one_op(txn, op, batch.origin_node_id,
                                      batch.seq, dbi_cache, identity_index);
                 } else {
@@ -1301,6 +1312,10 @@ namespace sync {
                     return "missing_lww_revision";
                 case ApplyConflictReason::UnsupportedLwwOperation:
                     return "unsupported_lww_operation";
+                case ApplyConflictReason::LwwPolicyDisabled:
+                    return "lww_policy_disabled";
+                case ApplyConflictReason::UnexpectedLwwRevision:
+                    return "unexpected_lww_revision";
             }
             return "unknown";
         }
@@ -1778,6 +1793,24 @@ namespace sync {
             }
         }
 
+        void reject_versioned_full_snapshot_manifest(
+                MDBX_txn* txn,
+                const std::vector<FullSnapshotManifestEntry>& manifest) const {
+            VersionedDbiStore registry(m_conn->env_handle());
+            for (std::size_t i = 0u; i < manifest.size(); ++i) {
+                if (registry.contains(txn, manifest[i].dbi_name)) {
+                    throw FullSnapshotVersionedDbiUnsupported(
+                        manifest[i].dbi_name);
+                }
+            }
+        }
+
+        void reject_versioned_full_snapshot_manifest(
+                const std::vector<FullSnapshotManifestEntry>& manifest) const {
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            reject_versioned_full_snapshot_manifest(txn.handle(), manifest);
+        }
+
         void collect_logical_recovery_baseline(
                 MDBX_txn* txn,
                 FullSnapshotSession& session,
@@ -2219,6 +2252,8 @@ namespace sync {
                     FullSnapshotScope::CompleteUserDatabase
                 ? enumerate_user_snapshot_manifest(txn.handle())
                 : options.manifest;
+            reject_versioned_full_snapshot_manifest(
+                txn.handle(), session->manifest);
             if (session->replacement_scope ==
                     FullSnapshotScope::CompleteUserDatabase &&
                 session->manifest.empty()) {
@@ -2404,12 +2439,6 @@ namespace sync {
                 LogicalRecoveryBaseline* final_baseline = nullptr,
                 const CancellationToken* cancel_token = nullptr) {
             PullResponse out;
-            if (m_policy == ConflictPolicy::LastWriterWins) {
-                out.ok = false;
-                out.error = "LastWriterWins does not support full snapshots";
-                out.error_code = SyncResponseErrorCode::UnsupportedFullSnapshot;
-                return out;
-            }
             if (cancel_token != nullptr &&
                 cancel_token->is_cancellation_requested()) {
                 out.ok = false;
@@ -2488,6 +2517,13 @@ namespace sync {
                     out.error = e.what();
                     out.error_code =
                         SyncResponseErrorCode::SnapshotLogicalStateUnsupported;
+                    return out;
+                } catch (const FullSnapshotVersionedDbiUnsupported& e) {
+                    std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
+                    --m_full_snapshot_creating;
+                    out.ok = false;
+                    out.error = e.what();
+                    out.error_code = SyncResponseErrorCode::UnsupportedFullSnapshot;
                     return out;
                 } catch (const std::length_error& e) {
                     std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
@@ -3663,12 +3699,43 @@ namespace sync {
             }
         }
 
-        static bool validate_lww_batch(const ChangeBatch& batch,
-                                       ApplyOutcome* outcome) {
+        bool validate_versioned_dbi_batch(
+                MDBX_txn* txn,
+                const ChangeBatch& batch,
+                VersionedDbiStore& registry,
+                std::vector<bool>& versioned_ops,
+                ApplyOutcome* outcome) const {
+            versioned_ops.clear();
+            versioned_ops.reserve(batch.ops.size());
             for (std::size_t i = 0u; i < batch.ops.size(); ++i) {
                 const ChangeOp& op = batch.ops[i];
-                if ((op.op_flags & OP_HAS_REVISION_KEY) == 0 ||
-                    op.revision_key.empty()) {
+                const bool is_versioned = registry.contains(txn, op.dbi_name);
+                versioned_ops.push_back(is_versioned);
+                const bool has_revision =
+                    (op.op_flags & OP_HAS_REVISION_KEY) != 0 ||
+                    !op.revision_key.empty();
+                if (!is_versioned) {
+                    if (!has_revision) {
+                        continue;
+                    }
+                    if (outcome != nullptr) {
+                        outcome->result = ApplyResult::Conflict;
+                        outcome->conflict_reason =
+                            ApplyConflictReason::UnexpectedLwwRevision;
+                        outcome->dbi_name = op.dbi_name;
+                    }
+                    return false;
+                }
+                if (m_policy != ConflictPolicy::LastWriterWins) {
+                    if (outcome != nullptr) {
+                        outcome->result = ApplyResult::Conflict;
+                        outcome->conflict_reason =
+                            ApplyConflictReason::LwwPolicyDisabled;
+                        outcome->dbi_name = op.dbi_name;
+                    }
+                    return false;
+                }
+                if (!has_revision || op.revision_key.empty()) {
                     if (outcome != nullptr) {
                         outcome->result = ApplyResult::Conflict;
                         outcome->conflict_reason =
@@ -3692,10 +3759,15 @@ namespace sync {
             return true;
         }
 
-        void reject_lww_full_snapshot_import() const {
-            if (m_policy == ConflictPolicy::LastWriterWins) {
+        void validate_sync_dbi_write(
+                MDBX_txn* txn,
+                const std::string& dbi_name,
+                ChangeOpType) override {
+            VersionedDbiStore registry(m_conn->env_handle());
+            if (registry.contains(txn, dbi_name)) {
                 throw std::logic_error(
-                    "LastWriterWins does not support full snapshot import");
+                    "registered source-version-wins DBI must be mutated through "
+                    "VersionedKeyValueTable");
             }
         }
 

@@ -87,8 +87,9 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   round-trip and fail-closed duplicate, schema, malformed-payload, and
   capture-rollback cases.
 - `ConflictPolicy::Reject` is the default. Narrow `ConflictPolicy::LastWriterWins`
-  v1 accepts only revisioned raw `Put`/`Delete` operations emitted by
-  `VersionedKeyValueTable`. It orders non-empty application source-version
+  v1 applies to DBIs durably registered by `VersionedKeyValueTable`. Registered
+  DBIs accept only revisioned raw `Put`/`Delete` operations; ordinary DBIs keep
+  raw sync on the same engine. It orders non-empty application source-version
   bytes lexicographically, then origin `NodeId`, and persists winner/tombstone
   markers in `_mdbxc_identity_index` with the user mutation.
 - `SyncWorker` background pull/apply lifecycle, cooperative cancellation
@@ -1116,6 +1117,17 @@ and `SyncEngine` atomically write the source version, origin, and tombstone with
 the user mutation. Incoming LWW batches may not carry a different
 `identity_key`. Tombstones are not compacted by v1; real removal requires a
 separately specified replica horizon.
+
+### `_mdbxc_versioned_dbis` (VersionedDbiStore) — LWW v1 contract registry
+
+Each key is one non-reserved user DBI name with an empty value. Constructing a
+`VersionedKeyValueTable` registers an empty user DBI in the same environment;
+every replica must make the same registration before it receives revisioned
+operations. The registration makes direct raw writes, clear, and bulk/range
+mutations fail closed through `Connection`'s write policy. It also determines
+apply semantics per operation: a registered DBI requires `LastWriterWins` and
+revisioned point put/delete; an unregistered DBI rejects revision metadata and
+uses ordinary raw apply. Full snapshot manifests cannot include registered DBIs.
 
 ### `_mdbxc_sync_schema` (SchemaRegistryStore) — logical adapter marker
 
