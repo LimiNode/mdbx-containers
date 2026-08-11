@@ -13,5 +13,6 @@
 #include "vector/VectorStore.hpp"
 #include "vector/VectorCollectionDescriptor.hpp"
 #include "vector/VectorCollection.hpp"
+#include "vector/VectorExactScan.hpp"
 
 #endif // MDBX_CONTAINERS_HEADER_VECTOR_HPP_INCLUDED

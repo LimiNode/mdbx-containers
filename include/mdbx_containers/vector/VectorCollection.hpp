@@ -15,6 +15,8 @@
 
 namespace mdbxc {
 
+    class VectorExactScan;
+
     /// \brief Persistent vector records governed by an immutable descriptor.
     /// \details This storage foundation deliberately has no search index. It
     /// preserves caller-owned opaque record ids and validates the collection
@@ -77,6 +79,8 @@ namespace mdbxc {
         const VectorCollectionDescriptor& descriptor() const noexcept;
 
     private:
+        friend class VectorExactScan;
+
         typedef KeyValueTable<std::string, Embedding> RecordsTable;
 
         VectorCollectionDescriptor m_descriptor;
