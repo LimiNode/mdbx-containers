@@ -25,6 +25,7 @@
 #include "logical/stores/LogicalOutboxStore.hpp"
 #include "logical/logical_schema_validation.hpp"
 #include "logical/logical_recovery.hpp"
+#include "logical/LogicalRecoveryProtocol.hpp"
 #include "logical/ILogicalRecoveryPeer.hpp"
 #endif
 

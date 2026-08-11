@@ -300,6 +300,48 @@ private:
     mdbxc::sync::SyncEngine& m_remote;
 };
 
+class SnapshotRequiredLogicalRecoveryDelegatingPeer
+    : public mdbxc::sync::ISyncPeer {
+public:
+    explicit SnapshotRequiredLogicalRecoveryDelegatingPeer(
+            mdbxc::sync::ISyncPeer& recovery_peer)
+        : m_recovery_peer(recovery_peer) {}
+
+    mdbxc::sync::PullResponse pull(
+            const mdbxc::sync::PullRequest& request) override {
+        (void)request;
+        mdbxc::sync::PullResponse out;
+        out.ok = false;
+        out.error = "retained raw history is unavailable";
+        out.error_code = mdbxc::sync::SyncResponseErrorCode::SnapshotRequired;
+        return out;
+    }
+
+    mdbxc::sync::PushResponse push(
+            const mdbxc::sync::PushRequest& request) override {
+        (void)request;
+        return mdbxc::sync::PushResponse();
+    }
+
+    bool supports_logical_recovery() const override {
+        return m_recovery_peer.supports_logical_recovery();
+    }
+
+    mdbxc::sync::LogicalRecoveryResponse logical_recovery(
+            const mdbxc::sync::LogicalRecoveryRequest& request) override {
+        return m_recovery_peer.logical_recovery(request);
+    }
+
+    mdbxc::sync::LogicalRecoveryResponse logical_recovery_with_cancel(
+            const mdbxc::sync::LogicalRecoveryRequest& request,
+            const mdbxc::sync::CancellationToken* cancel_token = nullptr) override {
+        return m_recovery_peer.logical_recovery_with_cancel(request, cancel_token);
+    }
+
+private:
+    mdbxc::sync::ISyncPeer& m_recovery_peer;
+};
+
 class BlockingPeer : public mdbxc::sync::ISyncPeer {
 public:
     explicit BlockingPeer(const mdbxc::sync::PullResponse& response)
@@ -3107,11 +3149,12 @@ void test_worker_recovers_logical_fresh_replica() {
     }
 
     SnapshotRequiredLogicalRecoveryPeer peer(source);
+    sync::SyncPeerMiddleware wrapped_peer(peer);
     sync::SyncWorkerOptions options;
     options.enable_logical_recovery_fallback = true;
     options.max_bytes = 8192u;
     options.max_single_batch_bytes = 8192u;
-    sync::SyncWorker worker(replica, peer, options);
+    sync::SyncWorker worker(replica, wrapped_peer, options);
     const sync::SyncWorkerRoundResult result = worker.run_once();
     if (!result.ok || result.pages_pulled != 1u ||
         kv_or_throw(replica_conn, replica_documents, std::string("recovered"),
@@ -3125,6 +3168,95 @@ void test_worker_recovers_logical_fresh_replica() {
         if (order.last_applied(txn.handle(), source_node) != 1u) {
             throw std::runtime_error(
                 "worker logical recovery did not restore sender frontier");
+        }
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
+void test_worker_recovers_logical_fresh_replica_over_http_transport() {
+    using namespace mdbxc;
+    typedef sync::KeyValueLogicalStringCodec<std::string> StringCodec;
+    typedef sync::KeyValueTableLogicalAdapter<
+        std::string, std::string, StringCodec, StringCodec> LogicalAdapter;
+
+    const std::string source_path =
+        "test_worker_http_logical_recovery_source.mdbx";
+    const std::string replica_path =
+        "test_worker_http_logical_recovery_replica.mdbx";
+    const std::string schema_id = "app.worker.http_logical_recovery.v1";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xB0);
+    const sync::NodeId replica_node = make_node(0xC0);
+    const sync::DbId db_id = make_node(0xE0);
+    sync::FullSnapshotExportOptions snapshot_options;
+    snapshot_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
+    snapshot_options.max_materialized_operations = 32u;
+    snapshot_options.max_materialized_bytes = 8192u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::SyncEngine source(
+        source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    sync::SyncEngine replica(replica_conn);
+    source.initialize_local_identity(source_node, db_id);
+    replica.initialize_local_identity(replica_node, db_id);
+
+    KeyValueTable<std::string, std::string> source_documents(
+        source_conn, "documents");
+    KeyValueTable<std::string, std::string> replica_documents(
+        replica_conn, "documents");
+    LogicalAdapter source_adapter(source_documents, schema_id);
+    LogicalAdapter replica_adapter(replica_documents, schema_id);
+    sync::LogicalSchemaRecord record;
+    record.dbi_name = "documents";
+    record.kind = sync::LogicalTableKind::KeyValue;
+    record.schema_version = 1u;
+    record.dbi_names.push_back("documents");
+    source.initialize_logical_adapter_schema(source_adapter, record);
+    source.register_logical_adapter(source_adapter);
+    replica.register_logical_adapter(replica_adapter);
+    {
+        std::unique_ptr<LogicalAdapter::LogicalCaptureSession> session =
+            source_adapter.begin_capture_session();
+        session->insert_or_assign("recovered", "over-http");
+        (void)session->commit_to_outbox(source, db_id, replica_node);
+    }
+
+    sync::HttpBearerNodeIdentityPolicy identity;
+    identity.allow_token_for_node("replica-token", replica_node);
+    identity.allow_db_id_for_token("replica-token", db_id);
+    sync::HttpSyncServer source_server(source);
+    sync::HttpSyncServerMiddleware guarded_server(source_server, &identity);
+    ContextHttpClient client(guarded_server, "replica-token", "127.0.0.1");
+    sync::HttpSyncPeer network_recovery_peer(client);
+    SnapshotRequiredLogicalRecoveryDelegatingPeer peer(network_recovery_peer);
+    sync::SyncPeerMiddleware wrapped_peer(peer);
+    sync::SyncWorkerOptions options;
+    options.enable_logical_recovery_fallback = true;
+    options.max_bytes = 8192u;
+    options.max_single_batch_bytes = 8192u;
+    sync::SyncWorker worker(replica, wrapped_peer, options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+
+    if (!result.ok || result.pages_pulled != 1u ||
+        kv_or_throw(replica_conn, replica_documents, std::string("recovered"),
+                    "worker HTTP logical recovery value") != "over-http") {
+        throw std::runtime_error(
+            "worker did not recover a logical fresh replica over HTTP");
+    }
+    {
+        auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
+        sync::LogicalDeliveryOrderStore order(replica_conn->env_handle());
+        if (order.last_applied(txn.handle(), source_node) != 1u) {
+            throw std::runtime_error(
+                "worker HTTP logical recovery did not restore sender frontier");
         }
     }
 
@@ -3232,6 +3364,8 @@ int main() {
           &test_worker_preserves_outbox_after_unavailable_or_retryable_logical_delivery },
         { "test_worker_recovers_logical_fresh_replica",
           &test_worker_recovers_logical_fresh_replica },
+        { "test_worker_recovers_logical_fresh_replica_over_http_transport",
+          &test_worker_recovers_logical_fresh_replica_over_http_transport },
         { "test_worker_rejects_logical_complete_snapshot_fallback",
           &test_worker_rejects_logical_complete_snapshot_fallback },
         { "test_worker_run_once_drains_paginated_pull",

@@ -74,6 +74,12 @@ public:
             std::memcmp(&binary_message[0],
                         mdbxc::sync::LogicalDeliveryProtocolCodec::magic(),
                         mdbxc::sync::LogicalDeliveryProtocolCodec::magic_size()) == 0;
+        m_last_was_logical = m_last_was_logical ||
+            (binary_message.size() >=
+                mdbxc::sync::LogicalRecoveryProtocolCodec::magic_size() &&
+             std::memcmp(&binary_message[0],
+                         mdbxc::sync::LogicalRecoveryProtocolCodec::magic(),
+                         mdbxc::sync::LogicalRecoveryProtocolCodec::magic_size()) == 0);
         if (!m_last_was_logical) {
             m_last_type =
                 mdbxc::sync::TransportMessageCodec::peek_message_type(
@@ -242,6 +248,22 @@ void test_websocket_server_rejects_response_messages() {
     require_true(caught,
                  "WebSocket server must reject response messages");
 
+    mdbxc::sync::LogicalRecoveryResponse recovery_response;
+    recovery_response.ok = false;
+    recovery_response.error = "client response";
+    const std::vector<std::uint8_t> logical_response =
+        mdbxc::sync::LogicalRecoveryProtocolCodec::encode_response(
+            recovery_response);
+    caught = false;
+    try {
+        (void)server.handle_binary_message(logical_response);
+    } catch (const std::runtime_error& e) {
+        caught = std::string(e.what()).find("response message") !=
+                 std::string::npos;
+    }
+    require_true(caught,
+                 "WebSocket server must reject logical recovery responses");
+
     db->disconnect();
     cleanup(path);
 }
@@ -378,6 +400,30 @@ void test_websocket_authenticated_node_policy() {
     require_true(!decision.allowed && decision.status_code == 1008,
                  "WebSocket sender mismatch was not rejected");
 
+    mdbxc::sync::LogicalRecoveryRequest recovery;
+    recovery.requester = node_a;
+    recovery.db_id = db_a;
+    context.binary_message =
+        mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(recovery);
+    decision = policy.check_websocket_message(context);
+    require_true(decision.allowed,
+                 "matching WebSocket logical recovery requester was rejected");
+
+    recovery.db_id = db_b;
+    context.binary_message =
+        mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(recovery);
+    decision = policy.check_websocket_message(context);
+    require_true(!decision.allowed && decision.status_code == 1008,
+                 "WebSocket logical recovery db_id mismatch was not rejected");
+
+    recovery.requester = node_b;
+    recovery.db_id = db_a;
+    context.binary_message =
+        mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(recovery);
+    decision = policy.check_websocket_message(context);
+    require_true(!decision.allowed && decision.status_code == 1008,
+                 "WebSocket logical recovery requester mismatch was not rejected");
+
     context.has_authenticated_node = false;
     push.sender = node_a;
     context.binary_message =
@@ -508,6 +554,45 @@ void test_websocket_server_middleware_preserves_close_code() {
                  "WebSocket policy rejection was counted as exception");
 }
 
+void test_websocket_peer_logical_recovery_route() {
+    const std::string source_path = "test_websocket_logical_recovery_source.mdbx";
+    cleanup(source_path);
+
+    std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
+    mdbxc::sync::FullSnapshotExportOptions options;
+    options.replacement_scope =
+        mdbxc::sync::FullSnapshotScope::CompleteUserDatabase;
+    mdbxc::sync::SyncEngine engine(
+        source, mdbxc::sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(make_node(0x81), make_node(0x91));
+    mdbxc::KeyValueTable<int, std::string> source_values(source, "values");
+    source_values.insert_or_assign(1, "recovery-value");
+    mdbxc::sync::WebSocketSyncServer server(engine);
+    LoopbackWebSocketChannel channel(server);
+    mdbxc::sync::WebSocketSyncPeer peer(channel);
+
+    mdbxc::sync::LogicalRecoveryRequest request;
+    request.requester = make_node(0xA1);
+    request.db_id = make_node(0x91);
+    mdbxc::sync::CancellationSource cancellation;
+    const mdbxc::sync::CancellationToken token = cancellation.token();
+    const mdbxc::sync::LogicalRecoveryResponse response =
+        peer.logical_recovery_with_cancel(request, &token);
+
+    require_true(peer.supports_logical_recovery(),
+                 "WebSocket peer did not advertise logical recovery");
+    require_true(response.ok && response.has_baseline &&
+                     !response.snapshot_chunk.has_more,
+                 "WebSocket logical recovery success response mismatch");
+    require_true(channel.last_was_logical(),
+                 "WebSocket logical recovery did not use logical wire family");
+    require_true(channel.last_token_cancellable(),
+                 "WebSocket logical recovery did not receive cancellation token");
+
+    source->disconnect();
+    cleanup(source_path);
+}
+
 } // namespace
 
 int main() {
@@ -519,5 +604,6 @@ int main() {
     test_websocket_authenticated_node_policy_rejects_invalid_body();
     test_websocket_server_middleware_rejects_spoofed_identity();
     test_websocket_server_middleware_preserves_close_code();
+    test_websocket_peer_logical_recovery_route();
     return 0;
 }

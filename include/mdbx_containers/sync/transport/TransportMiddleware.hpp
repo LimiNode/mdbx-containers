@@ -374,7 +374,8 @@ namespace sync {
     /// \brief Binds HTTP bearer tokens to sync \c NodeId values.
     /// \details This policy enforces the production-facing identity contract:
     /// the authenticated bearer principal must match
-    /// \c PullRequest::requester for pull and \c PushRequest::sender for push.
+    /// \c PullRequest::requester for pull, \c PushRequest::sender for push,
+    /// and \c LogicalRecoveryRequest::requester for logical recovery.
     /// Optional per-token DB access rules validate \c db_id before dispatch.
     /// Token bindings default to \c SyncDbAccess::any(); calling
     /// \c allow_db_id_for_token() switches that token to a restricted list.
@@ -460,6 +461,9 @@ namespace sync {
             if (request.target == HttpSyncRoutes::push_target()) {
                 return check_push_identity(request.body, binding);
             }
+            if (request.target == HttpSyncRoutes::logical_recovery_target()) {
+                return check_logical_recovery_identity(request.body, binding);
+            }
             return SyncTransportDecision::allow();
         }
 
@@ -522,6 +526,25 @@ namespace sync {
             }
         }
 
+        SyncTransportDecision check_logical_recovery_identity(
+                const std::vector<std::uint8_t>& body,
+                const Binding& binding) const {
+            try {
+                const LogicalRecoveryRequest request =
+                    LogicalRecoveryProtocolCodec::decode_request(body, &m_bounds);
+                if (request.requester != binding.node_id) {
+                    return SyncTransportDecision::reject(
+                        "logical recovery requester does not match authenticated node",
+                        403);
+                }
+                return check_db(binding, request.db_id);
+            } catch (const std::length_error& e) {
+                return SyncTransportDecision::reject(e.what(), 413);
+            } catch (const std::exception& e) {
+                return SyncTransportDecision::reject(e.what(), 400);
+            }
+        }
+
         static SyncTransportDecision check_db(const Binding& binding,
                                               const DbId& db_id) {
             if (!binding.db_access.allows_db_id(db_id)) {
@@ -561,6 +584,9 @@ namespace sync {
             }
 
             try {
+                if (is_logical_recovery_message(request.binary_message)) {
+                    return check_logical_recovery_identity(request);
+                }
                 const TransportMessageType type =
                     TransportMessageCodec::peek_message_type(
                         request.binary_message, &m_bounds);
@@ -585,6 +611,13 @@ namespace sync {
         }
 
     private:
+        static bool is_logical_recovery_message(
+                const std::vector<std::uint8_t>& message) {
+            return message.size() >= LogicalRecoveryProtocolCodec::magic_size() &&
+                std::memcmp(&message[0], LogicalRecoveryProtocolCodec::magic(),
+                            LogicalRecoveryProtocolCodec::magic_size()) == 0;
+        }
+
         SyncTransportDecision check_pull_identity(
                 const WebSocketSyncRequestContext& context) const {
             const PullRequest request =
@@ -606,6 +639,27 @@ namespace sync {
             if (request.sender != context.authenticated_node) {
                 return SyncTransportDecision::reject(
                     "sync sender does not match authenticated WebSocket node",
+                    1008);
+            }
+            return check_db(context.db_access, request.db_id);
+        }
+
+        SyncTransportDecision check_logical_recovery_identity(
+                const WebSocketSyncRequestContext& context) const {
+            const LogicalRecoveryProtocolCodec::MessageType type =
+                LogicalRecoveryProtocolCodec::peek_message_type(
+                    context.binary_message, &m_bounds);
+            if (type != LogicalRecoveryProtocolCodec::MessageType::Request) {
+                return SyncTransportDecision::reject(
+                    "sync WebSocket server received logical recovery response message",
+                    1008);
+            }
+            const LogicalRecoveryRequest request =
+                LogicalRecoveryProtocolCodec::decode_request(
+                    context.binary_message, &m_bounds);
+            if (request.requester != context.authenticated_node) {
+                return SyncTransportDecision::reject(
+                    "logical recovery requester does not match authenticated WebSocket node",
                     1008);
             }
             return check_db(context.db_access, request.db_id);
@@ -1326,6 +1380,64 @@ namespace sync {
         void request_cancel() override {
             detail::notify_transport_cancel_requested(m_observer);
             m_next.request_cancel();
+        }
+
+        bool supports_logical_delivery() const override {
+            return m_next.supports_logical_delivery();
+        }
+
+        LogicalDeliveryHello logical_delivery_hello() override {
+            return m_next.logical_delivery_hello();
+        }
+
+        LogicalDeliveryHello logical_delivery_hello_with_cancel(
+                const CancellationToken* cancel_token = nullptr) override {
+            return m_next.logical_delivery_hello_with_cancel(cancel_token);
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_delivery(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) override {
+            return m_next.deliver_ordered_logical_delivery(envelope, bounds);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_delivery_with_cancel(
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            return m_next.deliver_ordered_logical_delivery_with_cancel(
+                envelope, bounds, cancel_token);
+        }
+
+        LogicalDeliveryAcknowledgement deliver_ordered_logical_request(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr) override {
+            return m_next.deliver_ordered_logical_request(request, bounds);
+        }
+
+        LogicalDeliveryAcknowledgement
+        deliver_ordered_logical_request_with_cancel(
+                const LogicalDeliveryRequest& request,
+                const CodecBounds* bounds = nullptr,
+                const CancellationToken* cancel_token = nullptr) override {
+            return m_next.deliver_ordered_logical_request_with_cancel(
+                request, bounds, cancel_token);
+        }
+
+        bool supports_logical_recovery() const override {
+            return m_next.supports_logical_recovery();
+        }
+
+        LogicalRecoveryResponse logical_recovery(
+                const LogicalRecoveryRequest& request) override {
+            return m_next.logical_recovery(request);
+        }
+
+        LogicalRecoveryResponse logical_recovery_with_cancel(
+                const LogicalRecoveryRequest& request,
+                const CancellationToken* cancel_token = nullptr) override {
+            return m_next.logical_recovery_with_cancel(request, cancel_token);
         }
 
     private:

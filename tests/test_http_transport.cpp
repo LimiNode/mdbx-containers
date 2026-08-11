@@ -268,6 +268,11 @@ void test_http_server_status_mapping() {
     require_true(response.status_code == 400,
                  "malformed logical delivery body must be rejected");
 
+    request.target = mdbxc::sync::HttpSyncRoutes::logical_recovery_target();
+    response = server.handle(request);
+    require_true(response.status_code == 400,
+                 "malformed logical recovery body must be rejected");
+
     mdbxc::sync::CodecBounds bounds;
     bounds.max_transport_message_bytes = 16;
     mdbxc::sync::HttpSyncServer bounded_server(engine, bounds);
@@ -355,6 +360,76 @@ void test_http_peer_rejects_transport_error() {
                  "HTTP peer Retry-After hint mismatch");
 }
 
+void test_http_peer_logical_recovery_route() {
+    const std::string source_path = "test_http_logical_recovery_source.mdbx";
+    cleanup(source_path);
+
+    std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
+    mdbxc::sync::FullSnapshotExportOptions options;
+    options.replacement_scope =
+        mdbxc::sync::FullSnapshotScope::CompleteUserDatabase;
+    mdbxc::sync::SyncEngine engine(
+        source, mdbxc::sync::ConflictPolicy::Reject, options);
+    engine.initialize_local_identity(make_node(0x81), make_node(0x91));
+    mdbxc::KeyValueTable<int, std::string> source_values(source, "values");
+    source_values.insert_or_assign(1, "recovery-value");
+    mdbxc::sync::HttpSyncServer server(engine);
+    LoopbackHttpClient client(server);
+    mdbxc::sync::HttpSyncPeer peer(client);
+
+    mdbxc::sync::LogicalRecoveryRequest request;
+    request.requester = make_node(0xA1);
+    request.db_id = make_node(0x91);
+    mdbxc::sync::CancellationSource cancellation;
+    const mdbxc::sync::CancellationToken token = cancellation.token();
+    const mdbxc::sync::LogicalRecoveryResponse response =
+        peer.logical_recovery_with_cancel(request, &token);
+
+    require_true(peer.supports_logical_recovery(),
+                 "HTTP peer did not advertise logical recovery");
+    require_true(response.ok && response.has_baseline &&
+                     !response.snapshot_chunk.has_more,
+                 "HTTP logical recovery success response mismatch");
+    require_true(client.last_target() ==
+                     mdbxc::sync::HttpSyncRoutes::logical_recovery_target(),
+                 "HTTP logical recovery target mismatch");
+    require_true(client.last_token_cancellable(),
+                 "HTTP logical recovery did not receive cancellation token");
+
+    source->disconnect();
+    cleanup(source_path);
+}
+
+void test_http_logical_recovery_execution_error_is_server_error() {
+    const std::string source_path = "test_http_logical_recovery_error.mdbx";
+    cleanup(source_path);
+
+    std::shared_ptr<mdbxc::Connection> source = open_db(source_path);
+    const mdbxc::sync::DbId db_id = make_node(0x92);
+    mdbxc::sync::SyncEngine engine(source);
+    engine.initialize_local_identity(make_node(0x82), db_id);
+    mdbxc::sync::CodecBounds bounds;
+    bounds.max_error_len = 1u;
+    mdbxc::sync::HttpSyncServer server(engine, bounds);
+
+    mdbxc::sync::LogicalRecoveryRequest recovery;
+    recovery.requester = make_node(0xA2);
+    recovery.db_id = db_id;
+    mdbxc::sync::HttpSyncRequest request;
+    request.method = mdbxc::sync::HttpSyncRoutes::method_post();
+    request.target = mdbxc::sync::HttpSyncRoutes::logical_recovery_target();
+    request.content_type = mdbxc::sync::HttpSyncRoutes::content_type();
+    request.body = mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(
+        recovery);
+    const mdbxc::sync::HttpSyncResponse response = server.handle(request);
+
+    source->disconnect();
+    cleanup(source_path);
+
+    require_true(response.status_code == 500u,
+                 "logical recovery execution error was classified as HTTP 400");
+}
+
 } // namespace
 
 int main() {
@@ -362,5 +437,7 @@ int main() {
     test_http_server_status_mapping();
     test_http_peer_rejects_transport_error();
     test_http_peer_delivers_ordered_logical_outbox();
+    test_http_peer_logical_recovery_route();
+    test_http_logical_recovery_execution_error_is_server_error();
     return 0;
 }

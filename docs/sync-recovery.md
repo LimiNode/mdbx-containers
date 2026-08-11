@@ -77,9 +77,11 @@ dedicated `LogicalRecoveryRequest` / `LogicalRecoveryResponse` peer contract;
 it does not change raw `PullRequest`, `FullSnapshotChunk`, or the raw complete
 snapshot guard.
 
-The current transport-neutral implementation is available through
-`DirectSyncPeer`. HTTP and WebSocket bindings are intentionally not treated as
-logical-recovery capable until they implement the same separate wire contract.
+`DirectSyncPeer`, `HttpSyncPeer`, and `WebSocketSyncPeer` implement the same
+separate logical-recovery wire contract. Its request includes both the
+requester node and target `DbId`; the source rejects a mismatched database
+before materializing a snapshot. HTTP bearer and WebSocket session identity
+policies apply their existing per-principal DB access rule to that `DbId`.
 
 The source captures one stable read baseline consisting of:
 

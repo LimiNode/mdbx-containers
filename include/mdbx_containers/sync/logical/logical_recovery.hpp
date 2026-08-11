@@ -44,6 +44,8 @@ namespace sync {
     /// state guard.
     struct LogicalRecoveryRequest {
         NodeId requester{};
+        /// \brief Database identity authorized for recovery.
+        DbId db_id{};
         std::string snapshot_id;
         std::string continuation;
         std::uint64_t max_bytes = 4ULL * 1024ULL * 1024ULL;

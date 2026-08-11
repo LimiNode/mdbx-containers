@@ -860,6 +860,7 @@ namespace sync {
             FullSnapshotImportResetGuard reset_guard(m_engine);
             LogicalRecoveryRequest request;
             request.requester = incremental_request.requester;
+            request.db_id = incremental_request.db_id;
             request.max_bytes = incremental_request.max_bytes;
             request.max_single_batch_bytes =
                 incremental_request.max_single_batch_bytes;

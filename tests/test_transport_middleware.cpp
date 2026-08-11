@@ -52,7 +52,12 @@ std::shared_ptr<mdbxc::Connection> open_db(const std::string& path) {
 
 class RecordingPeer : public mdbxc::sync::ISyncPeer {
 public:
-    RecordingPeer() : m_pull_count(0), m_push_count(0), m_cancel_count(0) {}
+    RecordingPeer()
+        : m_pull_count(0),
+          m_push_count(0),
+          m_cancel_count(0),
+          m_logical_recovery_count(0),
+          m_logical_recovery_token_cancellable(false) {}
 
     mdbxc::sync::PullResponse pull(
             const mdbxc::sync::PullRequest& request) override {
@@ -77,16 +82,49 @@ public:
         ++m_cancel_count;
     }
 
+    bool supports_logical_delivery() const override { return true; }
+
+    bool supports_logical_recovery() const override { return true; }
+
+    mdbxc::sync::LogicalRecoveryResponse logical_recovery(
+            const mdbxc::sync::LogicalRecoveryRequest& request) override {
+        return logical_recovery_with_cancel(request, nullptr);
+    }
+
+    mdbxc::sync::LogicalRecoveryResponse logical_recovery_with_cancel(
+            const mdbxc::sync::LogicalRecoveryRequest& request,
+            const mdbxc::sync::CancellationToken* cancel_token = nullptr) override {
+        ++m_logical_recovery_count;
+        m_last_logical_recovery = request;
+        m_logical_recovery_token_cancellable =
+            cancel_token != nullptr && cancel_token->can_be_cancelled();
+        mdbxc::sync::LogicalRecoveryResponse response;
+        response.ok = false;
+        response.error = "recorded logical recovery";
+        response.error_code =
+            mdbxc::sync::SyncResponseErrorCode::SnapshotNotConfigured;
+        return response;
+    }
+
     std::size_t pull_count() const { return m_pull_count; }
     std::size_t push_count() const { return m_push_count; }
     std::size_t cancel_count() const { return m_cancel_count; }
+    std::size_t logical_recovery_count() const {
+        return m_logical_recovery_count;
+    }
+    bool logical_recovery_token_cancellable() const {
+        return m_logical_recovery_token_cancellable;
+    }
 
 private:
     std::size_t m_pull_count;
     std::size_t m_push_count;
     std::size_t m_cancel_count;
+    std::size_t m_logical_recovery_count;
+    bool m_logical_recovery_token_cancellable;
     mdbxc::sync::PullRequest m_last_pull;
     mdbxc::sync::PushRequest m_last_push;
+    mdbxc::sync::LogicalRecoveryRequest m_last_logical_recovery;
 };
 
 class RecordingHttpClient : public mdbxc::sync::IHttpSyncClient {
@@ -241,6 +279,29 @@ void test_peer_middleware_allows_limits_and_observes() {
                  "pulled batch metric mismatch");
     require_true(snapshot.pushed_batches == 1u,
                  "pushed batch metric mismatch");
+}
+
+void test_peer_middleware_forwards_logical_capabilities() {
+    RecordingPeer peer;
+    mdbxc::sync::SyncPeerMiddleware wrapped(peer);
+    require_true(wrapped.supports_logical_delivery(),
+                 "peer middleware lost logical delivery capability");
+    require_true(wrapped.supports_logical_recovery(),
+                 "peer middleware lost logical recovery capability");
+
+    mdbxc::sync::LogicalRecoveryRequest request;
+    request.requester = make_node(0x33);
+    request.db_id = make_node(0xD3);
+    mdbxc::sync::CancellationSource cancellation;
+    const mdbxc::sync::CancellationToken token = cancellation.token();
+    const mdbxc::sync::LogicalRecoveryResponse response =
+        wrapped.logical_recovery_with_cancel(request, &token);
+
+    require_true(!response.ok, "recording logical recovery unexpectedly succeeded");
+    require_true(peer.logical_recovery_count() == 1u,
+                 "peer middleware did not forward logical recovery");
+    require_true(peer.logical_recovery_token_cancellable(),
+                 "peer middleware did not preserve logical recovery cancellation");
 }
 
 void test_transport_trace_context_helpers() {
@@ -609,10 +670,32 @@ void test_http_bearer_node_identity_policy() {
     require_true(!decision.allowed && decision.status_code == 403,
                  "sender mismatch was not rejected");
 
+    mdbxc::sync::LogicalRecoveryRequest recovery;
+    recovery.requester = node_a;
+    recovery.db_id = db_a;
+    request.target = mdbxc::sync::HttpSyncRoutes::logical_recovery_target();
+    request.body = mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(
+        recovery);
+    decision = policy.check_http_request(request);
+    require_true(decision.allowed,
+                 "matching logical recovery requester was rejected");
+
+    recovery.db_id = db_b;
+    request.body = mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(
+        recovery);
+    decision = policy.check_http_request(request);
+    require_true(!decision.allowed && decision.status_code == 403,
+                 "logical recovery db_id mismatch was not rejected");
+
+    recovery.requester = node_b;
+    recovery.db_id = db_a;
+    request.body = mdbxc::sync::LogicalRecoveryProtocolCodec::encode_request(
+        recovery);
+    decision = policy.check_http_request(request);
+    require_true(!decision.allowed && decision.status_code == 403,
+                 "logical recovery requester mismatch was not rejected");
+
     request.headers.clear();
-    push.sender = node_a;
-    request.body = mdbxc::sync::TransportMessageCodec::encode_push_request(
-        push);
     decision = policy.check_http_request(request);
     require_true(!decision.allowed && decision.status_code == 401,
                  "missing bearer identity was not rejected");
@@ -949,6 +1032,7 @@ void test_http_server_middleware_copies_rejection_headers() {
 
 int main() {
     test_peer_middleware_allows_limits_and_observes();
+    test_peer_middleware_forwards_logical_capabilities();
     test_transport_trace_context_helpers();
     test_transport_observer_receives_request_context();
     test_observer_exceptions_are_swallowed();
