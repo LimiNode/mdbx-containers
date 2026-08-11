@@ -90,6 +90,13 @@
   atomic local batch. Read/search calls are not captured. A separate
   `SyncWorker` plus an `ISyncPeer` transport moves committed batches between
   nodes.
+- `ConflictPolicy::LastWriterWins` has a narrow source-version-wins path for
+  mutable `KeyValueTable` registers. Use `VersionedKeyValueTable` for point
+  `insert_or_assign` and `erase`, providing a non-empty canonical source
+  version for each operation. The version is sync metadata; a durable sidecar
+  retains versioned tombstones. Ordinary raw operations, bulk/range/clear,
+  other table types, and full snapshot recovery are intentionally outside this
+  mode. See [deployment patterns](docs/sync-deployment-patterns.md).
 - When sync capture is attached, mutating supported table calls must use
   connection-managed transactions (`mdbx_containers::Transaction` or
   `Connection::begin()` / `commit()`). Caller-created raw writable

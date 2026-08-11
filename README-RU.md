@@ -119,6 +119,13 @@
   поддерживаемых таблиц, становится одним атомарным локальным batch.
   Read/search-вызовы не захватываются. Отдельный `SyncWorker` плюс транспорт
   `ISyncPeer` переносят закоммиченные batches между узлами.
+- `ConflictPolicy::LastWriterWins` имеет узкий путь source-version-wins для
+  mutable-регистров `KeyValueTable`. Используйте `VersionedKeyValueTable` для
+  точечных `insert_or_assign` и `erase`, передавая непустимую каноническую
+  source version в каждую операцию. Version остаётся sync-метаданными, а
+  durable sidecar хранит versioned tombstones. Обычные raw-операции,
+  bulk/range/clear, другие типы таблиц и восстановление через full snapshot
+  намеренно не входят в этот режим. См. [deployment patterns](docs/sync-deployment-patterns-RU.md).
 - При активном sync capture мутирующие вызовы поддерживаемых таблиц должны
   использовать транзакции, созданные через `mdbx_containers::Transaction` или
   `Connection::begin()` / `commit()`. Caller-created raw writable `MDBX_txn*`

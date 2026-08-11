@@ -3592,22 +3592,177 @@ void test_engine_handle_push_wrong_db_id() {
     cleanup(p);
 }
 
-void test_engine_rejects_last_writer_wins_policy() {
+void test_engine_last_writer_wins_versioned_key_value() {
     using namespace mdbxc;
-    const std::string p = "test_engine_lww_policy.mdbx";
-    cleanup(p);
+    const std::string source_path = "test_engine_lww_source.mdbx";
+    const std::string receiver_path = "test_engine_lww_receiver.mdbx";
+    cleanup(source_path);
+    cleanup(receiver_path);
 
-    auto conn = open_env(p);
-    expect_invalid_argument("SyncEngine LastWriterWins policy",
-                            [&conn]() {
-                                sync::SyncEngine engine(
-                                    conn,
-                                    sync::ConflictPolicy::LastWriterWins);
-                                (void)engine;
+    const sync::NodeId source_node = make_node(0x20);
+    const sync::NodeId receiver_node = make_node(0x70);
+    const sync::DbId db_id = make_node(0xB0);
+    const std::vector<std::uint8_t> version_10 = { 0u, 10u };
+    const std::vector<std::uint8_t> version_20 = { 0u, 20u };
+    const std::vector<std::uint8_t> version_30 = { 0u, 30u };
+
+    auto source_conn = open_env(source_path);
+    sync::SyncEngine source_engine(
+        source_conn, sync::ConflictPolicy::LastWriterWins);
+    source_engine.initialize_local_identity(source_node, db_id);
+    sync::ThreadLocalChangeAccumulator source_capture(source_conn);
+    source_conn->attach_sync_capture(&source_capture);
+
+    KeyValueTable<int, int> source_table(
+        source_conn, "bars");
+    sync::VersionedKeyValueTable<int, int> source(
+        source_table, source_capture);
+    if (source.insert_or_assign(1, 10, version_10) !=
+        sync::VersionedWriteResult::Applied) {
+        throw std::runtime_error("initial versioned write was not applied");
+    }
+    if (source.insert_or_assign(1, 9, std::vector<std::uint8_t>{ 0u, 9u }) !=
+        sync::VersionedWriteResult::Ignored) {
+        throw std::runtime_error("older local versioned write was not ignored");
+    }
+    expect_invalid_argument("VersionedKeyValueTable duplicate source version",
+                            [&source, &version_10]() {
+                                source.insert_or_assign(1, 11, version_10);
                             });
+    if (kv_or_throw(source_conn, source_table, 1,
+                    "source LWW value") != 10u) {
+        throw std::runtime_error("ignored local version changed source value");
+    }
+    if (source.erase(1, version_30) != sync::VersionedWriteResult::Applied) {
+        throw std::runtime_error("versioned delete was not applied");
+    }
+    source_conn->detach_sync_capture();
 
-    conn->disconnect();
-    cleanup(p);
+    sync::PullRequest pull;
+    pull.requester = receiver_node;
+    pull.db_id = db_id;
+    const sync::PullResponse changes = source_engine.handle_pull(pull);
+    if (!changes.ok || changes.batches.size() != 2u ||
+        changes.batches[0].ops.size() != 1u ||
+        (changes.batches[0].ops[0].op_flags & sync::OP_HAS_REVISION_KEY) == 0 ||
+        changes.batches[0].ops[0].revision_key != version_10 ||
+        changes.batches[0].ops[0].dbi_flags !=
+            static_cast<std::uint32_t>(MDBX_INTEGERKEY)) {
+        throw std::runtime_error("versioned source changelog did not preserve LWW metadata");
+    }
+    sync::PullRequest snapshot_pull = pull;
+    snapshot_pull.request_full_snapshot = true;
+    const sync::PullResponse snapshot = source_engine.handle_pull(snapshot_pull);
+    if (snapshot.ok ||
+        snapshot.error_code != sync::SyncResponseErrorCode::UnsupportedFullSnapshot ||
+        snapshot.error_retryable) {
+        throw std::runtime_error("LWW full snapshot request was not rejected");
+    }
+
+    auto receiver_conn = open_env(receiver_path);
+    sync::SyncEngine receiver_engine(
+        receiver_conn, sync::ConflictPolicy::LastWriterWins);
+    receiver_engine.initialize_local_identity(receiver_node, db_id);
+    sync::PushRequest push;
+    push.sender = source_node;
+    push.db_id = db_id;
+    push.batches = changes.batches;
+    const sync::PushResponse pushed = receiver_engine.handle_push(push);
+    if (!pushed.ok) {
+        throw std::runtime_error("versioned LWW push failed: " + pushed.error);
+    }
+
+    KeyValueTable<int, int> receiver_table(
+        receiver_conn, "bars");
+    if (kv_has(receiver_conn, receiver_table, 1)) {
+        throw std::runtime_error("LWW tombstone did not remove receiver value");
+    }
+
+    sync::ChangeBatch stale_put;
+    stale_put.origin_node_id = make_node(0x30);
+    stale_put.seq = 1u;
+    sync::ChangeOp stale_op;
+    stale_op.op_type = sync::ChangeOpType::Put;
+    stale_op.dbi_name = "bars";
+    stale_op.dbi_flags = changes.batches[0].ops[0].dbi_flags;
+    assign_int_key(stale_op.storage_key, 1);
+    assign_int_value(stale_op.value, 10);
+    stale_op.op_flags = sync::OP_HAS_REVISION_KEY;
+    stale_op.revision_key = version_10;
+    stale_put.ops.push_back(stale_op);
+    {
+        auto txn = receiver_conn->transaction(TransactionMode::WRITABLE);
+        if (receiver_engine.apply_batch(txn.handle(), stale_put) !=
+            sync::ApplyResult::Applied) {
+            throw std::runtime_error("stale versioned put was not accepted as a no-op");
+        }
+        txn.commit();
+    }
+    if (kv_has(receiver_conn, receiver_table, 1)) {
+        throw std::runtime_error("stale put resurrected a tombstoned receiver value");
+    }
+
+    const sync::NodeId lower_origin = make_node(0x40);
+    const sync::NodeId higher_origin = make_node(0x50);
+    sync::ChangeBatch lower;
+    lower.origin_node_id = lower_origin;
+    lower.seq = 1u;
+    sync::ChangeOp lower_op;
+    lower_op.op_type = sync::ChangeOpType::Put;
+    lower_op.dbi_name = "bars";
+    lower_op.dbi_flags = changes.batches[0].ops[0].dbi_flags;
+    assign_int_key(lower_op.storage_key, 2);
+    assign_int_value(lower_op.value, 1);
+    lower_op.op_flags = sync::OP_HAS_REVISION_KEY;
+    lower_op.revision_key = version_20;
+    lower.ops.push_back(lower_op);
+    sync::ChangeBatch higher = lower;
+    higher.origin_node_id = higher_origin;
+    assign_int_value(higher.ops[0].value, 2);
+    {
+        auto txn = receiver_conn->transaction(TransactionMode::WRITABLE);
+        if (receiver_engine.apply_batch(txn.handle(), lower) !=
+                sync::ApplyResult::Applied ||
+            receiver_engine.apply_batch(txn.handle(), higher) !=
+                sync::ApplyResult::Applied) {
+            throw std::runtime_error("equal-version LWW operations did not apply");
+        }
+        txn.commit();
+    }
+    if (kv_or_throw(receiver_conn, receiver_table, 2,
+                    "LWW origin tie-break value") != 2u) {
+        throw std::runtime_error("LWW did not use NodeId as equal-version tie-breaker");
+    }
+
+    sync::ChangeBatch unversioned;
+    unversioned.origin_node_id = make_node(0x60);
+    unversioned.seq = 1u;
+    sync::ChangeOp unversioned_op;
+    unversioned_op.op_type = sync::ChangeOpType::Put;
+    unversioned_op.dbi_name = "bars";
+    unversioned_op.dbi_flags = changes.batches[0].ops[0].dbi_flags;
+    assign_int_key(unversioned_op.storage_key, 3);
+    assign_int_value(unversioned_op.value, 3);
+    unversioned.ops.push_back(unversioned_op);
+    {
+        auto txn = receiver_conn->transaction(TransactionMode::WRITABLE);
+        const sync::ApplyOutcome outcome =
+            receiver_engine.apply_batch_ex(txn.handle(), unversioned);
+        if (outcome.result != sync::ApplyResult::Conflict ||
+            outcome.conflict_reason != sync::ApplyConflictReason::MissingLwwRevision ||
+            outcome.dbi_name != "bars") {
+            throw std::runtime_error("unversioned LWW batch returned wrong conflict");
+        }
+        txn.rollback();
+    }
+    if (kv_has(receiver_conn, receiver_table, 3)) {
+        throw std::runtime_error("rejected unversioned LWW batch changed receiver value");
+    }
+
+    source_conn->disconnect();
+    receiver_conn->disconnect();
+    cleanup(source_path);
+    cleanup(receiver_path);
 }
 
 void test_engine_handle_pull_pagination_has_more() {
@@ -4019,8 +4174,8 @@ int main() {
         { "test_engine_pull_rejects_oversized_single_batch",
           &test_engine_pull_rejects_oversized_single_batch },
         { "test_engine_handle_push_wrong_db_id",&test_engine_handle_push_wrong_db_id },
-        { "test_engine_rejects_last_writer_wins_policy",
-          &test_engine_rejects_last_writer_wins_policy },
+        { "test_engine_last_writer_wins_versioned_key_value",
+          &test_engine_last_writer_wins_versioned_key_value },
         { "test_engine_handle_pull_pagination", &test_engine_handle_pull_pagination_has_more },
         { "test_engine_handle_pull_multi_origin",&test_engine_handle_pull_multi_origin_pagination },
         { "test_engine_handle_pull_legacy_origin_index",&test_engine_handle_pull_legacy_changelog_without_origin_index },

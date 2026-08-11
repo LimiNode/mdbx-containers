@@ -14,10 +14,13 @@
 #if MDBXC_SYNC_ENABLED
 #include <mdbx_containers/tables.hpp>
 #include <mdbx_containers/vector.hpp>
+#include "capture.hpp"
+#include "storage.hpp"
 #include "logical.hpp"
 #include "logical/adapters/detail/blob_payload.hpp"
 #include "logical/adapters/detail/captured_logical_transaction.hpp"
 #include "logical/adapters/KeyValueTableLogicalAdapter.hpp"
+#include "logical/adapters/VersionedKeyValueTable.hpp"
 #include "logical/adapters/KeyTableLogicalAdapter.hpp"
 #include "logical/adapters/KeyMultiValueTableLogicalAdapter.hpp"
 #include "logical/adapters/KeyOrderedMultiValueTableLogicalAdapter.hpp"

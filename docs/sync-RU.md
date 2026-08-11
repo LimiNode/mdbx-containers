@@ -17,6 +17,7 @@ English version: [sync.md](sync.md).
 | Задача | Режим | Точки входа |
 | --- | --- | --- |
 | Реплицировать обычные записи таблиц между копиями БД | Raw-репликация | `ThreadLocalChangeAccumulator`, `SyncCaptureScope`, `SyncWorker`, `ISyncPeer` |
+| Разрешать один mutable key по upstream source version | Узкий LWW register | `ConflictPolicy::LastWriterWins`, `VersionedKeyValueTable` |
 | Реплицировать таблицу через явную типизированную схему приложения | Logical frames | Logical adapter таблицы, `LogicalChangeFrameCodec`, `SyncEngine::apply_logical_frame_bytes()` |
 | Сохранить одну авторитетную упорядоченную историю и безопасно повторять её доставку | Ordered logical delivery | Durable outbox, logical-capable `ISyncPeer`, `SyncWorkerOptions::enable_logical_delivery` |
 | Восстановить свежую raw-реплику после удаления нужной истории из changelog | Full snapshot recovery | `SyncWorkerOptions::enable_full_snapshot_fallback`, `CompleteUserDatabase` |
@@ -110,15 +111,26 @@ pre-commit hook. Read-only handles вызывающего кода остают�
 | Семейство таблиц | Raw-статус | Важная граница |
 | --- | --- | --- |
 | `KeyValueTable`, `KeyTable`, `ValueTable`, `SequenceTable` | Поддерживается | Операции захватываются как физические изменения DBI. |
+| `VersionedKeyValueTable` | Узкий LWW v1 adapter | Только точечные versioned put/delete для source-version-wins register. |
 | `VectorStore` | Поддерживается через owned tables | Raw-репликация обновляет четыре underlying DBI; уже открытые экземпляры лениво пересобирают in-memory index после remote apply. |
 | `KeyMultiValueTable` | Не реплицируется как raw | Используйте явный logical adapter, если подходит его documented typed contract. |
 | `KeyOrderedMultiValueTable` | Не реплицируется как raw | Для поддерживаемых схем используйте ordered logical delivery. |
 | `AnyValueTable`, `HashedKeyValueStore` | Отложено | Контракта raw capture пока нет. |
 
-Raw-репликация сохраняет contract операций на уровне storage. Это не общая
-система conflict resolution. Текущий engine отклоняет sequence gaps и не даёт
-last-writer-wins policy для конкурентных изменений приложения одних и тех же
-логических данных.
+Raw-репликация сохраняет contract операций на уровне storage и отклоняет
+sequence gaps. Узкое исключение для concurrent writes — register
+`VersionedKeyValueTable`: с `ConflictPolicy::LastWriterWins` каждая точечная
+put/delete-операция несёт непустимую application-owned version, которая
+сравнивается лексикографически, затем по `NodeId` origin-а. Version остаётся
+вне user value, а durable sidecar tombstone не позволяет старому put воскресить
+delete.
+
+Это не generic raw replication: для LWW connection используйте только
+versioned adapter. Обычные raw-операции, clear/bulk/range changes, logical
+identity remapping, другие table types и full-snapshot recovery отклоняются или
+не поддерживаются. Выберите upstream sequence либо другую canonical authority;
+wall-clock узла authority не является. Operational model приведён в
+[deployment patterns](sync-deployment-patterns-RU.md).
 
 ## Транспорт и эксплуатация
 

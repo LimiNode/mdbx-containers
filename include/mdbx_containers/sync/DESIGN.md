@@ -86,9 +86,11 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   separate logical-adapter regression covers VectorStore add/erase/clear
   round-trip and fail-closed duplicate, schema, malformed-payload, and
   capture-rollback cases.
-- `ConflictPolicy::Reject` is the default. `ConflictPolicy::LastWriterWins`
-  is declared for future logical-key conflict resolution; `SyncEngine`
-  rejects it until a reliable conflict authority exists.
+- `ConflictPolicy::Reject` is the default. Narrow `ConflictPolicy::LastWriterWins`
+  v1 accepts only revisioned raw `Put`/`Delete` operations emitted by
+  `VersionedKeyValueTable`. It orders non-empty application source-version
+  bytes lexicographically, then origin `NodeId`, and persists winner/tombstone
+  markers in `_mdbxc_identity_index` with the user mutation.
 - `SyncWorker` background pull/apply lifecycle, cooperative cancellation
   tokens, best-effort peer cancellation hook, and focused worker tests.
 - Manual hub-style benchmark (`sync_tick_hub_benchmark`) plus opt-in and
@@ -981,10 +983,10 @@ anchors, see the
 - Specialized table types not listed in the implemented scope are not treated
   as sync-covered without explicit wire-format design and round-trip tests.
 - Automatic remap of physical `storage_key` from logical `identity_key`.
-- HLC or other production authority for logical-key `LastWriterWins`.
-  `time_unix_ns` is metadata only, not a reliable conflict authority. The
-  current apply path does not maintain enough identity-index conflict state to
-  use `LastWriterWins`, so `SyncEngine` rejects that policy.
+- HLC or another general production authority for logical-key conflict
+  resolution. `time_unix_ns` remains metadata only. The narrow LWW v1 uses an
+  application-owned source version for `VersionedKeyValueTable` point writes;
+  it is not a generic resolver for raw tables or logical identities.
 - `Custom` conflict resolver — schema-level callback; deferred until the
   first real consumer needs it.
 - Production-grade deployment wrappers for concrete socket-bound HTTP and
@@ -1095,7 +1097,7 @@ normal background-sync loop or per-pull hot path.
 missing batches arrive. If `incoming.seq <= last`, the batch is a redundant
 replay and is skipped.
 
-### `_mdbxc_identity_index` (IdentityIndexStore) — declared in v0.1, write path deferred
+### `_mdbxc_identity_index` (IdentityIndexStore) — LWW v1 sidecar
 
 | | |
 |---|---|
@@ -1109,7 +1111,11 @@ back to a physical `storage_key` without re-reading the user table.
 
 `IDENTITY_TOMBSTONE` flag bit marks deleted logical records while keeping
 the row readable for older incoming batches that still reference the key.
-Real removal is explicit via `erase()`.
+For LWW v1 the index key is the physical `storage_key`: `VersionedKeyValueTable`
+and `SyncEngine` atomically write the source version, origin, and tombstone with
+the user mutation. Incoming LWW batches may not carry a different
+`identity_key`. Tombstones are not compacted by v1; real removal requires a
+separately specified replica horizon.
 
 ### `_mdbxc_sync_schema` (SchemaRegistryStore) — logical adapter marker
 

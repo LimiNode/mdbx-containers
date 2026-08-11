@@ -18,6 +18,9 @@ into small PRs so behavior, storage format, and build hygiene remain reviewable.
   `PullRequest::request_full_snapshot=true` is rejected, and
   `ConflictPolicy::LastWriterWins` cannot be selected until the apply semantics
   exist.
+- Current status: narrow LWW v1 is now available through
+  `VersionedKeyValueTable` with application-provided source versions. The
+  historical PR #155 statement remains applicable to ordinary raw operations.
 - PR #156 renamed the changelog pull internals enough to clarify that empty
   cursors replay retained changelog history rather than exporting a database
   snapshot.

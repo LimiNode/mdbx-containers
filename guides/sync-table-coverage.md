@@ -18,6 +18,7 @@ can dispatch that outbox through a logical-capable peer after a raw round drains
 | Table wrapper | v0.1 status | Captured operations | Apply semantics | Main tests |
 | --- | --- | --- | --- | --- |
 | `KeyValueTable<K, V>` | Supported | `Put`, `Delete`, `ClearTable`; point writes, bulk writes, range erase, and clear paths are implemented. | Raw key/value bytes are replayed into a destination DBI opened with captured DBI flags. | `test_sync_capture`, `test_sync_replication`, `test_sync_engine` |
+| `VersionedKeyValueTable<K, V>` | Narrow LWW v1 adapter | Only point `insert_or_assign` and `erase`, each with a non-empty application source version. | With `ConflictPolicy::LastWriterWins`, source-version bytes order competing operations; equal versions use origin `NodeId`; durable sidecar tombstones prevent stale puts from resurrecting deletes. | `test_sync_engine` |
 | `KeyTable<K>` | Supported | `Put`, `Delete`, `ClearTable`; insert, erase, range erase, and clear paths are implemented. | Raw key bytes are replayed with empty values. | `test_sync_capture`, `test_sync_engine`, `test_sync_replication` |
 | `ValueTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; set, insert, update, erase, and clear paths are implemented. | The singleton physical key and serialized value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
 | `SequenceTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; append, `insert_or_assign`, erase, and clear paths are implemented. | Stable `uint64_t` sequence keys and value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
@@ -42,6 +43,16 @@ calls. Attach capture to the writing connection, preferably through
 The captured DBI name, DBI flags, physical key bytes, and value bytes must
 remain sufficient to open or validate the destination DBI and replay the
 operation without table-specific decoding.
+
+`VersionedKeyValueTable` is deliberately outside that general raw contract. It
+owns one automatic write transaction per point operation, suppresses ordinary
+capture for the table mutation, and emits one revisioned raw `ChangeOp`. It
+requires initialized sync identity and an attached `ThreadLocalChangeAccumulator`.
+All peers using `ConflictPolicy::LastWriterWins` accept only these revisioned
+`Put`/`Delete` operations; `ClearTable`, ranges, bulk operations, identity
+remapping, other table families, and full snapshots are excluded. Its durable
+`_mdbxc_identity_index` sidecar consumes one additional named DBI and retains
+delete tombstones.
 
 Logical table sync is still a reserved extension. The scaffolding added for it
 has three separate pieces that must not be treated as support by themselves:

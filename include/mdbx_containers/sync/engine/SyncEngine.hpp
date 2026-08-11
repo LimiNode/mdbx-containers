@@ -59,6 +59,8 @@ namespace sync {
         InconsistentBatchDbiFlags,///< One batch carries contradictory flags for one DBI.
         ExistingDbiFlagsMismatch, ///< Existing destination DBI rejects captured flags.
         ReservedDbiName,          ///< Incoming ChangeOp targets an internal DBI name.
+        MissingLwwRevision,       ///< LWW operation lacks a non-empty source revision.
+        UnsupportedLwwOperation,  ///< LWW accepts only raw put/delete without identity remapping.
     };
 
     /// \brief Detailed result for callers that need conflict diagnostics.
@@ -209,11 +211,12 @@ namespace sync {
             : m_conn(std::move(conn)),
               m_policy(policy),
               m_full_snapshot_options(full_snapshot_options) {
-            if (m_policy == ConflictPolicy::LastWriterWins) {
-                throw std::invalid_argument(
-                    "ConflictPolicy::LastWriterWins is not implemented");
-            }
             validate_full_snapshot_export_options(m_full_snapshot_options);
+            if (m_policy == ConflictPolicy::LastWriterWins &&
+                full_snapshot_export_is_configured(m_full_snapshot_options)) {
+                throw std::invalid_argument(
+                    "LastWriterWins does not support full snapshot export");
+            }
         }
 
         /// \brief Initialises the local \c node_id and \c db_uuid.
@@ -271,6 +274,11 @@ namespace sync {
         void set_full_snapshot_export_options(
                 const FullSnapshotExportOptions& options) {
             validate_full_snapshot_export_options(options);
+            if (m_policy == ConflictPolicy::LastWriterWins &&
+                full_snapshot_export_is_configured(options)) {
+                throw std::invalid_argument(
+                    "LastWriterWins does not support full snapshot export");
+            }
             std::lock_guard<std::mutex> lock(m_full_snapshot_mutex);
             m_full_snapshot_options = options;
             m_full_snapshot_sessions.clear();
@@ -306,6 +314,7 @@ namespace sync {
         /// inventory and bootstraps the applied cursor from its source tail.
         FullSnapshotImportResult apply_full_snapshot_chunk(
                 const FullSnapshotChunk& chunk) {
+            reject_lww_full_snapshot_import();
             FullSnapshotCodec::validate(chunk);
             FullSnapshotImportResult result;
             Connection::SyncApplyNotification notification;
@@ -335,6 +344,7 @@ namespace sync {
         FullSnapshotImportResult apply_logical_recovery_chunk(
                 const FullSnapshotChunk& chunk,
                 const LogicalRecoveryBaseline* baseline = nullptr) {
+            reject_lww_full_snapshot_import();
             FullSnapshotCodec::validate(chunk);
             if (chunk.has_more ? baseline != nullptr : baseline == nullptr) {
                 throw std::invalid_argument(
@@ -1244,6 +1254,10 @@ namespace sync {
                 outcome.conflict_reason = ApplyConflictReason::SequenceGap;
                 return outcome;
             }
+            if (m_policy == ConflictPolicy::LastWriterWins &&
+                !validate_lww_batch(batch, &outcome)) {
+                return outcome;
+            }
             std::vector<BatchDbiFlags> batch_dbis;
             if (!collect_batch_dbi_flags(batch, batch_dbis, &outcome)) return outcome;
 
@@ -1251,8 +1265,17 @@ namespace sync {
             if (!preflight_batch_user_dbis(txn, batch_dbis, dbi_cache, &outcome)) {
                 return outcome;
             }
+            IdentityIndexStore identity_index(m_conn->env_handle());
+            if (m_policy == ConflictPolicy::LastWriterWins) {
+                identity_index.open(txn);
+            }
             for (const ChangeOp& op : batch.ops) {
-                apply_one_op(txn, op, dbi_cache);
+                if (m_policy == ConflictPolicy::LastWriterWins) {
+                    apply_lww_one_op(txn, op, batch.origin_node_id,
+                                     batch.seq, dbi_cache, identity_index);
+                } else {
+                    apply_one_op(txn, op, dbi_cache);
+                }
             }
             applied.set_last_applied_seq(txn, batch.origin_node_id, batch.seq);
             outcome.result = ApplyResult::Applied;
@@ -1274,6 +1297,10 @@ namespace sync {
                     return "existing_dbi_flags_mismatch";
                 case ApplyConflictReason::ReservedDbiName:
                     return "reserved_dbi_name";
+                case ApplyConflictReason::MissingLwwRevision:
+                    return "missing_lww_revision";
+                case ApplyConflictReason::UnsupportedLwwOperation:
+                    return "unsupported_lww_operation";
             }
             return "unknown";
         }
@@ -2377,6 +2404,12 @@ namespace sync {
                 LogicalRecoveryBaseline* final_baseline = nullptr,
                 const CancellationToken* cancel_token = nullptr) {
             PullResponse out;
+            if (m_policy == ConflictPolicy::LastWriterWins) {
+                out.ok = false;
+                out.error = "LastWriterWins does not support full snapshots";
+                out.error_code = SyncResponseErrorCode::UnsupportedFullSnapshot;
+                return out;
+            }
             if (cancel_token != nullptr &&
                 cancel_token->is_cancellation_requested()) {
                 out.ok = false;
@@ -3600,6 +3633,70 @@ namespace sync {
             check_mdbx(rc, "SyncEngine: failed to open user DBI '" + name + "'");
             cache[name] = dbi;
             return dbi;
+        }
+
+        static void apply_lww_one_op(
+                MDBX_txn* txn,
+                const ChangeOp& op,
+                const NodeId& origin,
+                std::uint64_t sequence,
+                std::unordered_map<std::string, MDBX_dbi>& cache,
+                IdentityIndexStore& identity_index) {
+            IdentityIndexValue current;
+            if (identity_index.get(txn, op.dbi_name, op.storage_key, current)) {
+                if (op.revision_key < current.revision_key) return;
+                if (op.revision_key == current.revision_key &&
+                    compare_node_id(origin, current.origin_node_id) <= 0) {
+                    return;
+                }
+            }
+            apply_one_op(txn, op, cache);
+            IdentityIndexValue marker;
+            marker.storage_key = op.storage_key;
+            marker.origin_node_id = origin;
+            marker.seq = sequence;
+            marker.revision_key = op.revision_key;
+            if (op.op_type == ChangeOpType::Delete) {
+                identity_index.tombstone(txn, op.dbi_name, op.storage_key, marker);
+            } else {
+                identity_index.put(txn, op.dbi_name, op.storage_key, marker);
+            }
+        }
+
+        static bool validate_lww_batch(const ChangeBatch& batch,
+                                       ApplyOutcome* outcome) {
+            for (std::size_t i = 0u; i < batch.ops.size(); ++i) {
+                const ChangeOp& op = batch.ops[i];
+                if ((op.op_flags & OP_HAS_REVISION_KEY) == 0 ||
+                    op.revision_key.empty()) {
+                    if (outcome != nullptr) {
+                        outcome->result = ApplyResult::Conflict;
+                        outcome->conflict_reason =
+                            ApplyConflictReason::MissingLwwRevision;
+                        outcome->dbi_name = op.dbi_name;
+                    }
+                    return false;
+                }
+                if ((op.op_flags & OP_HAS_IDENTITY_KEY) != 0 ||
+                    (op.op_type != ChangeOpType::Put &&
+                     op.op_type != ChangeOpType::Delete)) {
+                    if (outcome != nullptr) {
+                        outcome->result = ApplyResult::Conflict;
+                        outcome->conflict_reason =
+                            ApplyConflictReason::UnsupportedLwwOperation;
+                        outcome->dbi_name = op.dbi_name;
+                    }
+                    return false;
+                }
+            }
+            return true;
+        }
+
+        void reject_lww_full_snapshot_import() const {
+            if (m_policy == ConflictPolicy::LastWriterWins) {
+                throw std::logic_error(
+                    "LastWriterWins does not support full snapshot import");
+            }
         }
 
         static void apply_one_op(MDBX_txn* txn,
