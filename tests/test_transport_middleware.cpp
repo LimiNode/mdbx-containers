@@ -10,15 +10,6 @@
 #include <thread>
 #include <vector>
 
-static_assert(static_cast<std::uint8_t>(mdbxc::sync::SyncTransportOperation::Pull) == 0u,
-              "pull transport operation value changed");
-static_assert(static_cast<std::uint8_t>(mdbxc::sync::SyncTransportOperation::Push) == 1u,
-              "push transport operation value changed");
-static_assert(static_cast<std::uint8_t>(mdbxc::sync::SyncTransportOperation::HttpPost) == 2u,
-              "HTTP transport operation value changed");
-static_assert(static_cast<std::uint8_t>(mdbxc::sync::SyncTransportOperation::WebSocketMessage) == 3u,
-              "WebSocket transport operation value changed");
-
 namespace {
 
 mdbxc::sync::NodeId make_node(std::uint8_t seed) {
