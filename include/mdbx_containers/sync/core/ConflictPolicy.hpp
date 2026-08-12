@@ -12,9 +12,13 @@ namespace sync {
     enum class ConflictPolicy {
         /// \brief Reject the incoming change; surface an error to the caller.
         Reject,
-        /// \brief Reserved for future timestamp/version based resolution.
-        /// \details v0.1 \c SyncEngine rejects this policy because raw batch
-        /// apply does not yet have a reliable logical-key conflict authority.
+        /// \brief Applies the greatest application-provided source version.
+        /// \details Narrow v1 support applies to DBIs registered by
+        /// \c VersionedKeyValueTable. Those DBIs accept only revisioned raw
+        /// \c Put and \c Delete operations. Ordinary DBIs keep raw sync on
+        /// the same engine. Source version bytes are compared lexicographically,
+        /// then \c NodeId breaks an equal-version tie deterministically.
+        /// It is not wall-clock LWW.
         LastWriterWins,
     };
 

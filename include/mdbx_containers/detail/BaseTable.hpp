@@ -184,6 +184,8 @@ namespace mdbxc {
 #       if MDBXC_SYNC_ENABLED
             m_connection->ensure_sync_capture_txn_supported(
                 checked, "BaseTable external transaction");
+            m_connection->ensure_sync_dbi_external_txn_supported(
+                checked, m_name, "BaseTable external transaction");
 #       endif
             return checked;
         }
@@ -223,6 +225,7 @@ namespace mdbxc {
                        const std::vector<std::uint8_t>& storage_key,
                        const std::vector<std::uint8_t>& value) const {
             if (m_connection->is_read_only()) return;
+            m_connection->validate_sync_dbi_write(txn, m_name, op_type);
             if (m_connection->sync_capture_suppressed(txn)) return;
             sync::ISyncCaptureSink* sink = m_connection->sync_capture();
             if (sink == nullptr) return;

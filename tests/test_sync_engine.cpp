@@ -3592,22 +3592,438 @@ void test_engine_handle_push_wrong_db_id() {
     cleanup(p);
 }
 
-void test_engine_rejects_last_writer_wins_policy() {
+void test_engine_last_writer_wins_versioned_key_value() {
     using namespace mdbxc;
-    const std::string p = "test_engine_lww_policy.mdbx";
-    cleanup(p);
+    const std::string source_path = "test_engine_lww_source.mdbx";
+    const std::string receiver_path = "test_engine_lww_receiver.mdbx";
+    cleanup(source_path);
+    cleanup(receiver_path);
 
-    auto conn = open_env(p);
-    expect_invalid_argument("SyncEngine LastWriterWins policy",
-                            [&conn]() {
-                                sync::SyncEngine engine(
-                                    conn,
-                                    sync::ConflictPolicy::LastWriterWins);
-                                (void)engine;
+    const sync::NodeId source_node = make_node(0x20);
+    const sync::NodeId receiver_node = make_node(0x70);
+    const sync::DbId db_id = make_node(0xB0);
+    const std::vector<std::uint8_t> version_10 = { 0u, 10u };
+    const std::vector<std::uint8_t> version_20 = { 0u, 20u };
+    const std::vector<std::uint8_t> version_30 = { 0u, 30u };
+
+    auto source_conn = open_env(source_path);
+    sync::SyncEngine source_engine(
+        source_conn, sync::ConflictPolicy::LastWriterWins);
+    source_engine.initialize_local_identity(source_node, db_id);
+    sync::ThreadLocalChangeAccumulator source_capture(source_conn);
+    source_conn->attach_sync_capture(&source_capture);
+
+    KeyValueTable<int, int> source_table(
+        source_conn, "bars");
+    KeyValueTable<int, int> source_trades(
+        source_conn, "trades");
+    sync::VersionedKeyValueTable<int, int> source(
+        source_table, source_capture);
+    if (source.insert_or_assign(1, 10, version_10) !=
+        sync::VersionedWriteResult::Applied) {
+        throw std::runtime_error("initial versioned write was not applied");
+    }
+    if (source.insert_or_assign(1, 9, std::vector<std::uint8_t>{ 0u, 9u }) !=
+        sync::VersionedWriteResult::Ignored) {
+        throw std::runtime_error("older local versioned write was not ignored");
+    }
+    typedef sync::KeyValueTableLogicalAdapter<
+        int,
+        int,
+        sync::KeyValueLogicalInt32Codec<int>,
+        sync::KeyValueLogicalInt32Codec<int> > IntLogicalAdapter;
+    sync::LogicalSchemaRecord logical_record;
+    logical_record.dbi_name = source_table.dbi_name();
+    logical_record.kind = sync::LogicalTableKind::KeyValue;
+    logical_record.schema_version = 1u;
+    logical_record.dbi_names.push_back(source_table.dbi_name());
+    source_engine.register_logical_schema(
+        "test.versioned_bars.v1", logical_record);
+    IntLogicalAdapter logical_adapter(source_table, "test.versioned_bars.v1");
+    const sync::LogicalChange logical_change =
+        logical_adapter.make_upsert(1, 11);
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        const sync::LogicalApplyResult logical_result =
+            logical_adapter.apply(txn.handle(), logical_change);
+        if (logical_result.ok) {
+            throw std::runtime_error("logical apply accepted registered versioned DBI");
+        }
+        txn.rollback();
+    }
+    if (kv_or_throw(source_conn, source_table, 1,
+                    "logical LWW guard source value") != 10u) {
+        throw std::runtime_error("logical apply changed registered versioned DBI");
+    }
+    std::unique_ptr<IntLogicalAdapter::LogicalCaptureSession> logical_session =
+        logical_adapter.begin_capture_session();
+    bool rejected_logical_capture = false;
+    try {
+        logical_session->insert_or_assign(1, 12);
+    } catch (const std::logic_error&) {
+        rejected_logical_capture = true;
+    }
+    if (!rejected_logical_capture ||
+        kv_or_throw(source_conn, source_table, 1,
+                    "logical capture LWW guard source value") != 10u) {
+        throw std::runtime_error("logical capture changed registered versioned DBI");
+    }
+    source_conn->detach_sync_capture();
+    bool rejected_direct_write = false;
+    try {
+        source_table.insert_or_assign(4, 40);
+    } catch (const std::logic_error&) {
+        rejected_direct_write = true;
+    }
+    if (!rejected_direct_write || kv_has(source_conn, source_table, 4)) {
+        throw std::runtime_error("direct versioned-table write was not rolled back");
+    }
+    auto direct_write_txn = source_conn->transaction(TransactionMode::WRITABLE);
+    bool rejected_manual_write = false;
+    try {
+        source_table.insert_or_assign(4, 40, direct_write_txn.handle());
+    } catch (const std::logic_error&) {
+        rejected_manual_write = true;
+    }
+    bool rejected_manual_commit = false;
+    try {
+        direct_write_txn.commit();
+    } catch (const std::logic_error&) {
+        rejected_manual_commit = true;
+    }
+    direct_write_txn.rollback();
+    if (!rejected_manual_write || !rejected_manual_commit ||
+        kv_has(source_conn, source_table, 4)) {
+        throw std::runtime_error("manual direct versioned-table write reached commit");
+    }
+    bool rejected_clear = false;
+    try {
+        source_table.clear();
+    } catch (const std::logic_error&) {
+        rejected_clear = true;
+    }
+    if (!rejected_clear || !kv_has(source_conn, source_table, 1)) {
+        throw std::runtime_error("direct versioned-table clear was not rolled back");
+    }
+    bool rejected_range_erase = false;
+    try {
+        (void)source_table.erase_range(1, 1);
+    } catch (const std::logic_error&) {
+        rejected_range_erase = true;
+    }
+    if (!rejected_range_erase || !kv_has(source_conn, source_table, 1)) {
+        throw std::runtime_error("direct versioned-table range erase was not rolled back");
+    }
+    source_conn->attach_sync_capture(&source_capture);
+    expect_invalid_argument("VersionedKeyValueTable duplicate source version",
+                            [&source, &version_10]() {
+                                source.insert_or_assign(1, 11, version_10);
                             });
+    if (kv_or_throw(source_conn, source_table, 1,
+                    "source LWW value") != 10u) {
+        throw std::runtime_error("ignored local version changed source value");
+    }
+    if (source.erase(1, version_30) != sync::VersionedWriteResult::Applied) {
+        throw std::runtime_error("versioned delete was not applied");
+    }
+    source_trades.insert_or_assign(5, 50);
+    source_conn->detach_sync_capture();
 
+    sync::PullRequest pull;
+    pull.requester = receiver_node;
+    pull.db_id = db_id;
+    const sync::PullResponse changes = source_engine.handle_pull(pull);
+    if (!changes.ok || changes.batches.size() != 3u ||
+        changes.batches[0].ops.size() != 1u ||
+        (changes.batches[0].ops[0].op_flags & sync::OP_HAS_REVISION_KEY) == 0 ||
+        changes.batches[0].ops[0].revision_key != version_10 ||
+        changes.batches[0].ops[0].dbi_flags !=
+            static_cast<std::uint32_t>(MDBX_INTEGERKEY)) {
+        throw std::runtime_error("versioned source changelog did not preserve LWW metadata");
+    }
+    if (changes.batches[2].ops.size() != 1u ||
+        changes.batches[2].ops[0].dbi_name != "trades" ||
+        (changes.batches[2].ops[0].op_flags & sync::OP_HAS_REVISION_KEY) != 0) {
+        throw std::runtime_error("normal DBI operation was not captured as raw sync");
+    }
+    sync::FullSnapshotExportOptions raw_snapshot_options;
+    sync::FullSnapshotManifestEntry raw_snapshot_entry;
+    raw_snapshot_entry.dbi_name = "trades";
+    raw_snapshot_entry.dbi_flags = changes.batches[2].ops[0].dbi_flags;
+    raw_snapshot_options.manifest.push_back(raw_snapshot_entry);
+    source_engine.set_full_snapshot_export_options(raw_snapshot_options);
+    sync::PullRequest snapshot_pull = pull;
+    snapshot_pull.request_full_snapshot = true;
+    const sync::PullResponse raw_snapshot = source_engine.handle_pull(snapshot_pull);
+    if (!raw_snapshot.ok || !raw_snapshot.is_full_snapshot ||
+        raw_snapshot.snapshot_chunk.manifest.size() != 1u ||
+        raw_snapshot.snapshot_chunk.manifest[0].dbi_name != "trades") {
+        throw std::runtime_error("raw-only snapshot was rejected by an LWW engine");
+    }
+    sync::FullSnapshotExportOptions versioned_snapshot_options;
+    sync::FullSnapshotManifestEntry versioned_snapshot_entry;
+    versioned_snapshot_entry.dbi_name = "bars";
+    versioned_snapshot_entry.dbi_flags = changes.batches[0].ops[0].dbi_flags;
+    versioned_snapshot_options.manifest.push_back(versioned_snapshot_entry);
+    source_engine.set_full_snapshot_export_options(versioned_snapshot_options);
+    const sync::PullResponse versioned_snapshot =
+        source_engine.handle_pull(snapshot_pull);
+    if (versioned_snapshot.ok ||
+        versioned_snapshot.error_code !=
+            sync::SyncResponseErrorCode::UnsupportedFullSnapshot ||
+        versioned_snapshot.error_retryable) {
+        throw std::runtime_error("snapshot of registered versioned DBI was accepted");
+    }
+
+    auto receiver_conn = open_env(receiver_path);
+    sync::SyncEngine receiver_engine(
+        receiver_conn, sync::ConflictPolicy::LastWriterWins);
+    receiver_engine.initialize_local_identity(receiver_node, db_id);
+    sync::ThreadLocalChangeAccumulator receiver_capture(receiver_conn);
+    KeyValueTable<int, int> receiver_table(
+        receiver_conn, "bars");
+    KeyValueTable<int, int> receiver_trades(
+        receiver_conn, "trades");
+    sync::VersionedKeyValueTable<int, int> receiver(
+        receiver_table, receiver_capture);
+    sync::FullSnapshotChunk versioned_import = raw_snapshot.snapshot_chunk;
+    versioned_import.manifest[0].dbi_name = "bars";
+    versioned_import.manifest[0].dbi_flags = changes.batches[0].ops[0].dbi_flags;
+    for (std::size_t i = 0u; i < versioned_import.batch.ops.size(); ++i) {
+        versioned_import.batch.ops[i].dbi_name = "bars";
+        versioned_import.batch.ops[i].dbi_flags =
+            changes.batches[0].ops[0].dbi_flags;
+    }
+    bool rejected_versioned_import = false;
+    try {
+        (void)receiver_engine.apply_full_snapshot_chunk(versioned_import);
+    } catch (const std::runtime_error&) {
+        rejected_versioned_import = true;
+    }
+    if (!rejected_versioned_import) {
+        throw std::runtime_error("snapshot import accepted registered versioned DBI");
+    }
+    sync::PushRequest push;
+    push.sender = source_node;
+    push.db_id = db_id;
+    push.batches = changes.batches;
+    const sync::PushResponse pushed = receiver_engine.handle_push(push);
+    if (!pushed.ok) {
+        throw std::runtime_error("versioned LWW push failed: " + pushed.error);
+    }
+
+    if (kv_has(receiver_conn, receiver_table, 1)) {
+        throw std::runtime_error("LWW tombstone did not remove receiver value");
+    }
+    if (kv_or_throw(receiver_conn, receiver_trades, 5,
+                    "mixed raw trade value") != 50u) {
+        throw std::runtime_error("normal DBI did not replicate with versioned DBI");
+    }
+
+    sync::ChangeBatch stale_put;
+    stale_put.origin_node_id = make_node(0x30);
+    stale_put.seq = 1u;
+    sync::ChangeOp stale_op;
+    stale_op.op_type = sync::ChangeOpType::Put;
+    stale_op.dbi_name = "bars";
+    stale_op.dbi_flags = changes.batches[0].ops[0].dbi_flags;
+    assign_int_key(stale_op.storage_key, 1);
+    assign_int_value(stale_op.value, 10);
+    stale_op.op_flags = sync::OP_HAS_REVISION_KEY;
+    stale_op.revision_key = version_10;
+    stale_put.ops.push_back(stale_op);
+    {
+        auto txn = receiver_conn->transaction(TransactionMode::WRITABLE);
+        if (receiver_engine.apply_batch(txn.handle(), stale_put) !=
+            sync::ApplyResult::Applied) {
+            throw std::runtime_error("stale versioned put was not accepted as a no-op");
+        }
+        txn.commit();
+    }
+    if (kv_has(receiver_conn, receiver_table, 1)) {
+        throw std::runtime_error("stale put resurrected a tombstoned receiver value");
+    }
+
+    const sync::NodeId lower_origin = make_node(0x40);
+    const sync::NodeId higher_origin = make_node(0x50);
+    sync::ChangeBatch lower;
+    lower.origin_node_id = lower_origin;
+    lower.seq = 1u;
+    sync::ChangeOp lower_op;
+    lower_op.op_type = sync::ChangeOpType::Put;
+    lower_op.dbi_name = "bars";
+    lower_op.dbi_flags = changes.batches[0].ops[0].dbi_flags;
+    assign_int_key(lower_op.storage_key, 2);
+    assign_int_value(lower_op.value, 1);
+    lower_op.op_flags = sync::OP_HAS_REVISION_KEY;
+    lower_op.revision_key = version_20;
+    lower.ops.push_back(lower_op);
+    sync::ChangeBatch higher = lower;
+    higher.origin_node_id = higher_origin;
+    assign_int_value(higher.ops[0].value, 2);
+    {
+        auto txn = receiver_conn->transaction(TransactionMode::WRITABLE);
+        if (receiver_engine.apply_batch(txn.handle(), lower) !=
+                sync::ApplyResult::Applied ||
+            receiver_engine.apply_batch(txn.handle(), higher) !=
+                sync::ApplyResult::Applied) {
+            throw std::runtime_error("equal-version LWW operations did not apply");
+        }
+        txn.commit();
+    }
+    if (kv_or_throw(receiver_conn, receiver_table, 2,
+                    "LWW origin tie-break value") != 2u) {
+        throw std::runtime_error("LWW did not use NodeId as equal-version tie-breaker");
+    }
+
+    sync::ChangeBatch unversioned;
+    unversioned.origin_node_id = make_node(0x60);
+    unversioned.seq = 1u;
+    sync::ChangeOp unversioned_op;
+    unversioned_op.op_type = sync::ChangeOpType::Put;
+    unversioned_op.dbi_name = "bars";
+    unversioned_op.dbi_flags = changes.batches[0].ops[0].dbi_flags;
+    assign_int_key(unversioned_op.storage_key, 3);
+    assign_int_value(unversioned_op.value, 3);
+    unversioned.ops.push_back(unversioned_op);
+    {
+        auto txn = receiver_conn->transaction(TransactionMode::WRITABLE);
+        const sync::ApplyOutcome outcome =
+            receiver_engine.apply_batch_ex(txn.handle(), unversioned);
+        if (outcome.result != sync::ApplyResult::Conflict ||
+            outcome.conflict_reason != sync::ApplyConflictReason::MissingLwwRevision ||
+            outcome.dbi_name != "bars") {
+            throw std::runtime_error("unversioned LWW batch returned wrong conflict");
+        }
+        txn.rollback();
+    }
+    if (kv_has(receiver_conn, receiver_table, 3)) {
+        throw std::runtime_error("rejected unversioned LWW batch changed receiver value");
+    }
+
+    sync::ChangeBatch revisioned_normal;
+    revisioned_normal.origin_node_id = make_node(0x61);
+    revisioned_normal.seq = 1u;
+    sync::ChangeOp revisioned_normal_op;
+    revisioned_normal_op.op_type = sync::ChangeOpType::Put;
+    revisioned_normal_op.dbi_name = "trades";
+    revisioned_normal_op.dbi_flags = changes.batches[2].ops[0].dbi_flags;
+    assign_int_key(revisioned_normal_op.storage_key, 6);
+    assign_int_value(revisioned_normal_op.value, 60);
+    revisioned_normal_op.op_flags = sync::OP_HAS_REVISION_KEY;
+    revisioned_normal_op.revision_key = version_20;
+    revisioned_normal.ops.push_back(revisioned_normal_op);
+    {
+        auto txn = receiver_conn->transaction(TransactionMode::WRITABLE);
+        const sync::ApplyOutcome outcome = receiver_engine.apply_batch_ex(
+            txn.handle(), revisioned_normal);
+        if (outcome.result != sync::ApplyResult::Conflict ||
+            outcome.conflict_reason !=
+                sync::ApplyConflictReason::UnexpectedLwwRevision ||
+            outcome.dbi_name != "trades") {
+            throw std::runtime_error("revisioned normal DBI batch returned wrong conflict");
+        }
+        txn.rollback();
+    }
+    if (kv_has(receiver_conn, receiver_trades, 6)) {
+        throw std::runtime_error("rejected revisioned normal batch changed receiver value");
+    }
+
+    source_conn->disconnect();
+    receiver_conn->disconnect();
+    cleanup(source_path);
+    cleanup(receiver_path);
+}
+
+void test_versioned_dbi_guard_survives_engine_lifetime() {
+    using namespace mdbxc;
+    const std::string path = "test_versioned_dbi_guard_lifetime.mdbx";
+    cleanup(path);
+    const sync::NodeId node = make_node(0x71);
+    const sync::DbId db_id = make_node(0xC1);
+    const std::vector<std::uint8_t> version = { 0u, 1u };
+
+    std::shared_ptr<Connection> conn = open_env(path);
+    {
+        KeyValueTable<int, int> bars(conn, "bars");
+        sync::ThreadLocalChangeAccumulator capture(conn);
+        {
+            sync::SyncEngine first_engine(
+                conn, sync::ConflictPolicy::LastWriterWins);
+            first_engine.initialize_local_identity(node, db_id);
+            sync::SyncEngine second_engine(
+                conn, sync::ConflictPolicy::LastWriterWins);
+            conn->attach_sync_capture(&capture);
+            sync::VersionedKeyValueTable<int, int> versioned(bars, capture);
+            if (versioned.insert_or_assign(1, 10, version) !=
+                sync::VersionedWriteResult::Applied) {
+                throw std::runtime_error("initial lifetime-guard write was not applied");
+            }
+            conn->detach_sync_capture();
+        }
+        bool rejected_after_engine_destruction = false;
+        try {
+            bars.insert_or_assign(1, 11);
+        } catch (const std::logic_error&) {
+            rejected_after_engine_destruction = true;
+        }
+        if (!rejected_after_engine_destruction ||
+            kv_or_throw(conn, bars, 1, "post-engine versioned value") != 10u) {
+            throw std::runtime_error(
+                "registered DBI was mutable after SyncEngine destruction");
+        }
+
+        KeyValueTable<int, int> trades(conn, "trades");
+        MDBX_txn* raw_trades_txn = nullptr;
+        check_mdbx(mdbx_txn_begin(conn->env_handle(), nullptr,
+                                  MDBX_TXN_READWRITE, &raw_trades_txn),
+                   "failed to begin raw trades transaction");
+        trades.insert_or_assign(1, 20, raw_trades_txn);
+        check_mdbx(mdbx_txn_commit(raw_trades_txn),
+                   "failed to commit raw trades transaction");
+        if (kv_or_throw(conn, trades, 1, "raw transaction value") != 20u) {
+            throw std::runtime_error(
+                "raw transaction write to ordinary DBI was rejected");
+        }
+
+        MDBX_txn* raw_bars_txn = nullptr;
+        check_mdbx(mdbx_txn_begin(conn->env_handle(), nullptr,
+                                  MDBX_TXN_READWRITE, &raw_bars_txn),
+                   "failed to begin raw versioned transaction");
+        bool rejected_raw_versioned_write = false;
+        try {
+            bars.insert_or_assign(1, 11, raw_bars_txn);
+        } catch (const std::logic_error&) {
+            rejected_raw_versioned_write = true;
+        }
+        check_mdbx(mdbx_txn_commit(raw_bars_txn),
+                   "failed to commit rejected raw versioned transaction");
+        if (!rejected_raw_versioned_write ||
+            kv_or_throw(conn, bars, 1, "raw versioned value") != 10u) {
+            throw std::runtime_error(
+                "raw transaction write bypassed versioned DBI guard");
+        }
+    }
     conn->disconnect();
-    cleanup(p);
+    conn.reset();
+
+    std::shared_ptr<Connection> reopened = open_env(path);
+    {
+        KeyValueTable<int, int> bars(reopened, "bars");
+        bool rejected_before_engine_creation = false;
+        try {
+            bars.insert_or_assign(1, 12);
+        } catch (const std::logic_error&) {
+            rejected_before_engine_creation = true;
+        }
+        if (!rejected_before_engine_creation ||
+            kv_or_throw(reopened, bars, 1, "reopened versioned value") != 10u) {
+            throw std::runtime_error(
+                "durable versioned DBI guard did not survive reopen");
+        }
+    }
+    reopened->disconnect();
+    cleanup(path);
 }
 
 void test_engine_handle_pull_pagination_has_more() {
@@ -4019,8 +4435,10 @@ int main() {
         { "test_engine_pull_rejects_oversized_single_batch",
           &test_engine_pull_rejects_oversized_single_batch },
         { "test_engine_handle_push_wrong_db_id",&test_engine_handle_push_wrong_db_id },
-        { "test_engine_rejects_last_writer_wins_policy",
-          &test_engine_rejects_last_writer_wins_policy },
+        { "test_engine_last_writer_wins_versioned_key_value",
+          &test_engine_last_writer_wins_versioned_key_value },
+        { "test_versioned_dbi_guard_survives_engine_lifetime",
+          &test_versioned_dbi_guard_survives_engine_lifetime },
         { "test_engine_handle_pull_pagination", &test_engine_handle_pull_pagination_has_more },
         { "test_engine_handle_pull_multi_origin",&test_engine_handle_pull_multi_origin_pagination },
         { "test_engine_handle_pull_legacy_origin_index",&test_engine_handle_pull_legacy_changelog_without_origin_index },

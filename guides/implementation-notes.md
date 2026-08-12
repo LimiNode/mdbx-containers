@@ -208,10 +208,17 @@ Operational rules:
 - The four stores each have an `ensure_open()` guard on every public
   method. Calling a method before `open()` throws `std::logic_error` rather
   than silently writing to DBI 0. Do not weaken this guard.
-- `ConflictPolicy::Reject` is the v0.1 default. `LastWriterWins` is declared
-  for future logical-key conflict resolution, but `SyncEngine` rejects it until
-  timestamp/version-based apply semantics exist. `time_unix_ns` is metadata,
-  not a reliable conflict authority. `Custom` is deferred to v0.2.
+- `ConflictPolicy::Reject` is the v0.1 default. Narrow
+  `ConflictPolicy::LastWriterWins` v1 applies only to DBIs durably registered
+  by `VersionedKeyValueTable`. Registered DBIs accept only revisioned
+  `Put`/`Delete` operations; direct raw writes, clear, and bulk/range paths
+  fail closed through a durable registry lookup in `Connection`, independent
+  of `SyncEngine` lifetime and capture suppression. Other DBIs retain ordinary
+  raw capture on the same engine. The
+  `_mdbxc_identity_index` sidecar keeps source version and delete tombstones,
+  while `_mdbxc_versioned_dbis` records the contract. Full snapshots may not
+  include a registered DBI. `time_unix_ns` remains metadata, not a reliable
+  conflict authority. `Custom` is deferred to v0.2.
 - `PullRequest::request_full_snapshot=true` starts an explicit source session
   when snapshot export is configured. `ManifestOnly` requires a non-empty
   explicit `FullSnapshotExportOptions::manifest`; without one the source

@@ -16,6 +16,7 @@ Russian version: [sync-RU.md](sync-RU.md).
 | Need | Mode | Entry points |
 | --- | --- | --- |
 | Replicate ordinary table writes between database copies | Raw replication | `ThreadLocalChangeAccumulator`, `SyncCaptureScope`, `SyncWorker`, `ISyncPeer` |
+| Resolve one mutable key by an upstream source version | Narrow LWW register | `ConflictPolicy::LastWriterWins`, `VersionedKeyValueTable` |
 | Replicate a table through an explicit typed application schema | Logical frames | A table logical adapter, `LogicalChangeFrameCodec`, `SyncEngine::apply_logical_frame_bytes()` |
 | Preserve one authoritative ordered history and retry its delivery safely | Ordered logical delivery | Durable outbox, logical-capable `ISyncPeer`, `SyncWorkerOptions::enable_logical_delivery` |
 | Rebuild a fresh raw replica after changelog retention removed needed history | Full snapshot recovery | `SyncWorkerOptions::enable_full_snapshot_fallback`, `CompleteUserDatabase` |
@@ -111,9 +112,22 @@ and snapshots.
 | `AnyValueTable`, `HashedKeyValueStore` | Deferred | No raw capture contract exists. |
 
 Raw replication preserves the storage-level operation contract. It is not a
-general conflict-resolution system. The current engine rejects sequence gaps
-and does not provide a last-writer-wins policy for concurrent application
-writes to the same logical data.
+general conflict-resolution system. It rejects sequence gaps. The only
+concurrent-write exception is the narrow `VersionedKeyValueTable` register:
+with `ConflictPolicy::LastWriterWins`, each point put/delete carries a
+non-empty application-owned version that is compared lexicographically, then
+by origin `NodeId`. The version remains outside the user value and a durable
+sidecar tombstone prevents an older put from resurrecting a delete.
+
+This mode is not generic conflict resolution. `VersionedKeyValueTable` durably
+registers only its DBI; every replica must construct the adapter before it
+receives revisioned operations. A registered DBI accepts only adapter-emitted
+point put/delete changes and rejects direct raw, clear, bulk, and range writes.
+Ordinary raw DBIs can coexist on the same LWW engine and continue to accept
+unversioned raw operations. Full snapshots may use a manifest of ordinary DBIs,
+but cannot include a registered DBI. Choose an upstream sequence or other
+canonical authority; node wall-clock time is not an authority. See
+[deployment patterns](sync-deployment-patterns.md) for the operational model.
 
 ## Transport And Operations
 

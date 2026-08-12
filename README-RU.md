@@ -119,6 +119,16 @@
   поддерживаемых таблиц, становится одним атомарным локальным batch.
   Read/search-вызовы не захватываются. Отдельный `SyncWorker` плюс транспорт
   `ISyncPeer` переносят закоммиченные batches между узлами.
+- `ConflictPolicy::LastWriterWins` имеет узкий путь source-version-wins для
+  mutable-регистров `KeyValueTable`. Используйте `VersionedKeyValueTable` для
+  точечных `insert_or_assign` и `erase`, передавая непустимую каноническую
+  source version в каждую операцию. Конструктор durable-регистрирует этот DBI;
+  каждый replica должен зарегистрировать ту же таблицу до приёма её batches.
+  Registered DBI отклоняет прямые raw writes, clear, bulk и range mutations.
+  Обычные raw DBI могут сосуществовать на том же engine. Version остаётся
+  sync-метаданными, а durable sidecars хранят versioned tombstones и
+  registrations. Full snapshots могут охватывать только raw-only manifest,
+  но не registered DBI. См. [deployment patterns](docs/sync-deployment-patterns-RU.md).
 - При активном sync capture мутирующие вызовы поддерживаемых таблиц должны
   использовать транзакции, созданные через `mdbx_containers::Transaction` или
   `Connection::begin()` / `commit()`. Caller-created raw writable `MDBX_txn*`

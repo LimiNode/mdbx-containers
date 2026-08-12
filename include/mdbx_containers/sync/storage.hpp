@@ -15,6 +15,7 @@
 #include "stores/OriginIndexStore.hpp"
 #include "stores/ChangeLogStore.hpp"
 #include "stores/IdentityIndexStore.hpp"
+#include "stores/VersionedDbiStore.hpp"
 #endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_STORAGE_HPP_INCLUDED

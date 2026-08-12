@@ -18,6 +18,7 @@ can dispatch that outbox through a logical-capable peer after a raw round drains
 | Table wrapper | v0.1 status | Captured operations | Apply semantics | Main tests |
 | --- | --- | --- | --- | --- |
 | `KeyValueTable<K, V>` | Supported | `Put`, `Delete`, `ClearTable`; point writes, bulk writes, range erase, and clear paths are implemented. | Raw key/value bytes are replayed into a destination DBI opened with captured DBI flags. | `test_sync_capture`, `test_sync_replication`, `test_sync_engine` |
+| `VersionedKeyValueTable<K, V>` | Narrow LWW v1 adapter | Only point `insert_or_assign` and `erase`, each with a non-empty application source version. | Durably registers its DBI; with `ConflictPolicy::LastWriterWins`, source-version bytes order competing operations and equal versions use origin `NodeId`. Tombstones prevent stale puts from resurrecting deletes. | `test_sync_engine` |
 | `KeyTable<K>` | Supported | `Put`, `Delete`, `ClearTable`; insert, erase, range erase, and clear paths are implemented. | Raw key bytes are replayed with empty values. | `test_sync_capture`, `test_sync_engine`, `test_sync_replication` |
 | `ValueTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; set, insert, update, erase, and clear paths are implemented. | The singleton physical key and serialized value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
 | `SequenceTable<V>` | Supported | `Put`, `Delete`, `ClearTable`; append, `insert_or_assign`, erase, and clear paths are implemented. | Stable `uint64_t` sequence keys and value bytes are replayed. | `test_sync_capture`, `test_sync_replication` |
@@ -42,6 +43,20 @@ calls. Attach capture to the writing connection, preferably through
 The captured DBI name, DBI flags, physical key bytes, and value bytes must
 remain sufficient to open or validate the destination DBI and replay the
 operation without table-specific decoding.
+
+`VersionedKeyValueTable` is deliberately outside that general raw contract. It
+owns one automatic write transaction per point operation, suppresses ordinary
+capture for the table mutation, and emits one revisioned raw `ChangeOp`. It
+requires initialized sync identity and an attached `ThreadLocalChangeAccumulator`.
+The adapter durably registers its DBI in `_mdbxc_versioned_dbis`. Registered
+DBIs accept only these revisioned `Put`/`Delete` operations; `ClearTable`,
+ranges, bulk operations, direct raw writes, and generic logical-table writes
+fail closed. The durable `Connection` lookup remains active without a live
+`SyncEngine` and is not bypassed by capture suppression. Other table DBIs
+continue under their ordinary raw contracts on the same LWW engine. Full
+snapshots may not include a registered DBI. The registry and
+`_mdbxc_identity_index` consume two additional named DBIs; the index retains
+delete tombstones.
 
 Logical table sync is still a reserved extension. The scaffolding added for it
 has three separate pieces that must not be treated as support by themselves:

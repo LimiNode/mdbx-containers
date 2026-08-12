@@ -5,11 +5,12 @@ Sync в `mdbx-containers` поддерживает multi-origin transport: ре�
 `NodeId`. Это делает несколько пишущих узлов практичными, когда их записи не
 конкурируют за одну logical record.
 
-При этом система пока не задаёт concurrent conflict resolution для двух
-writers, меняющих один logical key. В v0.1 по умолчанию используется
-`ConflictPolicy::Reject`; `LastWriterWins` зарезервирован для будущего дизайна
-и отклоняется `SyncEngine`. Поэтому поддержка нескольких origins не является
-контрактом last-writer-wins или CRDT.
+По умолчанию в v0.1 остаётся `ConflictPolicy::Reject`. Для одного узкого случая
+mutable register доступен `ConflictPolicy::LastWriterWins` вместе с
+`VersionedKeyValueTable`: он сравнивает application-provided source-version
+bytes, а не wall-clock узла. У всех остальных raw-путей concurrent
+conflict-resolution semantics по-прежнему нет. Multi-origin transport не
+является generic CRDT-контрактом.
 
 English version: [sync-deployment-patterns.md](sync-deployment-patterns.md).
 
@@ -48,6 +49,7 @@ updates одной mutable record.
 | Несколько nodes создают uniquely identified immutable records | Практичная multi-writer topology |
 | Два nodes одновременно меняют один logical key | Нет определённой conflict-resolution semantics |
 | Один node удаляет, а другой пишет тот же logical key | Нет гарантированной convergence semantics |
+| Versioned `KeyValueTable` put/erase с source authority | Узкий source-version-wins register |
 | Независимые вызовы `SequenceTable::append()` | Только single-writer; appenders надо сериализовать внешне |
 | Destructive multi-writer операции `KeyMultiValueTable` | Нужен один writer или application-level causal serialization |
 
@@ -102,17 +104,30 @@ coverage, collector lag или source divergence.
 ### Mutable bars и snapshots
 
 Open bar, latest quote или upstream snapshot не являются immutable event. Два
-collectors могут законно увидеть разные состояния одного key. У текущего raw
-sync нет source-version-wins поведения для этого случая: используйте одного
-authoritative projector-а или application-level serialization, пока не появится
-versioned conflict policy.
+collectors могут законно увидеть разные состояния одного key. Для этого узкого
+случая настройте у всех участников `ConflictPolicy::LastWriterWins` и пишите
+только через `VersionedKeyValueTable<K, V>`. Его `insert_or_assign` и `erase`
+принимают непустимую canonical source-version byte sequence. Version является
+sync-метаданными, а не частью `V`; получатель durable хранит победителя и
+delete tombstone в `_mdbxc_identity_index` в той же транзакции, что и user data.
 
-Нужный будущий primitive — versioned register: put или delete несёт
-application-provided source-authoritative version, отдельную от user value, а
-получатель атомарно оставляет наибольшую version и deletion tombstones. Broker
-timestamp может быть одним из компонентов, но при равных timestamps нужен source
-sequence либо другой deterministic tie-breaker. Wall-clock time writer-а и время
-приёма пакета не подходят как authority.
+Побеждает лексикографически наибольшая source version; при равных versions
+детерминированный tie-break выполняется по `NodeId` origin-а. Одна version должна
+описывать одно состояние одного source: её повторное использование для другого
+local state отклоняется. Broker timestamp может быть компонентом, но при равных
+timestamps необходим upstream sequence или deterministic tuple. Wall-clock
+writer-а и packet-receipt time не являются authority.
+
+Этот register v1 durable-помечает свой DBI в `_mdbxc_versioned_dbis`. Каждый
+replica должен сконструировать adapter до приёма revisioned batches. Прямые raw
+`KeyValueTable` writes, `clear` и bulk/range mutations для этого DBI fail closed;
+используйте вместо них point operations adapter-а. Другие, unregistered DBI
+могут использовать ordinary raw capture на том же LWW engine. Unversioned
+incoming operations для registered DBI и revisioned operations для normal DBI
+отклоняются. Full snapshots могут включать только unregistered DBI. Tombstones
+сохраняются; для их compaction требуется отдельно определённый replica horizon.
+Зарезервируйте два дополнительных MDBX DBI slots для `_mdbxc_identity_index` и
+`_mdbxc_versioned_dbis` в `Config::max_dbs`.
 
 ## Поддерживаемые пути таблиц
 

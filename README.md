@@ -90,6 +90,15 @@
   atomic local batch. Read/search calls are not captured. A separate
   `SyncWorker` plus an `ISyncPeer` transport moves committed batches between
   nodes.
+- `ConflictPolicy::LastWriterWins` has a narrow source-version-wins path for
+  mutable `KeyValueTable` registers. Use `VersionedKeyValueTable` for point
+  `insert_or_assign` and `erase`, providing a non-empty canonical source
+  version for each operation. Construction durably registers that DBI; every
+  replica must register the same table before receiving its batches. Registered
+  DBIs reject direct raw writes, clear, bulk, and range mutations. Normal raw
+  DBIs can coexist on the same engine. The version is sync metadata; durable
+  sidecars retain versioned tombstones and registrations. Full snapshots may
+  cover raw-only manifests, never a registered DBI. See [deployment patterns](docs/sync-deployment-patterns.md).
 - When sync capture is attached, mutating supported table calls must use
   connection-managed transactions (`mdbx_containers::Transaction` or
   `Connection::begin()` / `commit()`). Caller-created raw writable

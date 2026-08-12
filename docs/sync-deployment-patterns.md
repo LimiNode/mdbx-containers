@@ -5,11 +5,12 @@ committed change histories from multiple durable `NodeId` origins. This makes
 several writer nodes practical when their writes do not compete for the same
 logical record.
 
-It does **not** currently define concurrent conflict resolution for two writers
-that mutate the same logical key. `ConflictPolicy::Reject` is the v0.1 default;
-`LastWriterWins` is reserved for a future design and is rejected by
-`SyncEngine`. Transport support for multiple origins is therefore not a
-last-writer-wins or CRDT contract.
+`ConflictPolicy::Reject` remains the default. For one narrow mutable-register
+case, `ConflictPolicy::LastWriterWins` is available with
+`VersionedKeyValueTable`: it compares application-provided source-version bytes,
+not node wall-clock time. Every other raw table path still has no concurrent
+conflict-resolution semantics. Multi-origin transport is not a generic CRDT
+contract.
 
 Russian version: [sync-deployment-patterns-RU.md](sync-deployment-patterns-RU.md).
 
@@ -48,6 +49,7 @@ record wins.
 | Multiple nodes create uniquely identified immutable records | Practical multi-writer topology |
 | Two nodes concurrently mutate one logical key | No defined conflict-resolution semantics |
 | One node erases while another writes the same logical key | No guaranteed convergence semantics |
+| Versioned `KeyValueTable` put/erase with source authority | Narrow source-version-wins register |
 | Independent `SequenceTable::append()` calls | Single-writer only; serialize appenders externally |
 | Destructive multi-writer `KeyMultiValueTable` operations | Require one writer or application-level causal serialization |
 
@@ -103,17 +105,30 @@ coverage, collector lag, or source divergence.
 ### Mutable Bars And Snapshots
 
 An open bar, latest quote, or upstream snapshot is not an immutable event. Two
-collectors may legitimately observe different states for one key. Current raw
-sync has no source-version-wins behavior for this case; use one authoritative
-projector or application-level serialization until a versioned conflict policy
-is implemented.
+collectors may legitimately observe different states for one key. For this
+narrow case, configure every participant with
+`ConflictPolicy::LastWriterWins` and write only through
+`VersionedKeyValueTable<K, V>`. Its `insert_or_assign` and `erase` each take a
+non-empty, canonical source-version byte sequence. The version is sync metadata,
+not part of `V`; the receiver durably keeps the winner and a delete tombstone in
+`_mdbxc_identity_index` in the same transaction as user data.
 
-The required future primitive is a versioned register: a put or delete carries
-an application-provided, source-authoritative version separate from the user
-value, and a receiver atomically retains the greatest version plus deletion
-tombstones. A broker timestamp can be one component, but a source sequence or
-another deterministic tie-breaker is needed when timestamps are equal. Writer
-wall-clock time and packet-receipt time are not suitable authorities.
+The winner is the lexicographically greatest source version; equal versions are
+resolved by origin `NodeId`. A version must describe one state for one source:
+reusing it for different local state is rejected. A broker timestamp may be one
+component, but an upstream sequence or deterministic tuple must resolve timestamp
+ties. Writer wall-clock and packet-receipt time are not suitable authorities.
+
+This v1 register durably marks its DBI in `_mdbxc_versioned_dbis`. Every replica
+must construct the adapter before it receives revisioned batches. Direct raw
+`KeyValueTable` writes, `clear`, and bulk/range mutations against that DBI fail
+closed; use the adapter's point operations instead. Other, unregistered DBIs
+may use ordinary raw capture on the same LWW engine. Unversioned incoming
+operations targeting a registered DBI and revisioned operations targeting a
+normal DBI are rejected. Full snapshots can include only unregistered DBIs.
+Tombstones are retained; compaction needs a separately specified replica
+horizon. Reserve two additional MDBX DBI slots for `_mdbxc_identity_index` and
+`_mdbxc_versioned_dbis` in `Config::max_dbs`.
 
 ## Supported Table Paths
 
@@ -147,10 +162,10 @@ one of two explicit models:
 - deduplicate by `(exchange, symbol, exchange_event_id)` when the exchange
   provides a stable event identity.
 
-Do not make collectors concurrently overwrite mutable records such as
-`latest_quote["BTCUSDT"]` or an in-progress OHLCV candle. Treat latest quotes,
-candles, and similar aggregates as derived state: rebuild them from immutable
-ticks and trades, or assign one authoritative projector for each derived key.
+Do not use ordinary raw capture for concurrent mutable records such as
+`latest_quote["BTCUSDT"]` or an in-progress OHLCV candle. Either rebuild them
+from immutable ticks and trades, assign one authoritative projector, or use the
+narrow versioned register with an exchange-authoritative source version.
 
 ```text
 collector A ── immutable events ──┐
@@ -199,6 +214,8 @@ Before enabling sync for a dataset, define:
 - the logical identity of every replicated record and which writer owns it;
 - whether a record is immutable, or which application authority serializes its
   mutations and deletions;
+- for a versioned register, the canonical source-version encoding and its
+  upstream authority, including timestamp tie-breaking;
 - the rebuild or ownership strategy for derived state;
 - the table-specific sync path from the
   [coverage matrix](../guides/sync-table-coverage.md).
