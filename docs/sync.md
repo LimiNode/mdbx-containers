@@ -153,6 +153,8 @@ Useful runnable starting points:
 
 ## Next Reading
 
+- [Deployment patterns](sync-deployment-patterns.md): data models and writer
+  ownership for multi-origin datasets.
 - [Logical and ordered delivery](sync-logical.md): typed schemas, adapter
   capture, ordered outbox delivery, and concurrency boundaries.
 - [Recovery and full snapshots](sync-recovery.md): retained-history recovery,

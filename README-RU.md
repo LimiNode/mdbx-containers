@@ -169,8 +169,10 @@
   Установленный package также экспортирует CMake provider functions для этих
   готовых transport targets.
   Начните с [обзора sync](docs/sync-RU.md), затем используйте [руководство по
-  logical и ordered sync](docs/sync-logical-RU.md) либо [руководство по
-  восстановлению и full snapshots](docs/sync-recovery-RU.md) для этих путей.
+  deployment patterns](docs/sync-deployment-patterns-RU.md) для выбора
+  multi-origin data model, [руководство по logical и ordered sync](docs/sync-logical-RU.md)
+  либо [руководство по восстановлению и full snapshots](docs/sync-recovery-RU.md)
+  для этих путей.
   См. [sync transport production notes](guides/sync-transport-production.md)
   про TLS/WSS, ротацию токенов, graceful shutdown, structured logging и
   offline dependency builds. См.

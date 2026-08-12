@@ -157,6 +157,8 @@ id и HTTP/WebSocket status mapping остаются на стороне adapter
 
 ## Дальнейшее чтение
 
+- [Практические схемы развёртывания](sync-deployment-patterns-RU.md): модели
+  данных и ownership writers для multi-origin datasets.
 - [Logical и ordered delivery](sync-logical-RU.md): typed schemas, adapter
   capture, ordered outbox delivery и границы concurrency.
 - [Восстановление и full snapshots](sync-recovery-RU.md): recovery retained

@@ -141,8 +141,9 @@
   Installed packages also export CMake provider functions for these ready-made
   transport targets.
   Start with the human-facing [sync overview](docs/sync.md), then use the
-  [logical and ordered sync guide](docs/sync-logical.md) or the
-  [recovery and full snapshot guide](docs/sync-recovery.md) for those paths.
+  [deployment-pattern guide](docs/sync-deployment-patterns.md) to select a
+  multi-origin data model, the [logical and ordered sync guide](docs/sync-logical.md),
+  or the [recovery and full snapshot guide](docs/sync-recovery.md) for those paths.
   See [sync transport production notes](guides/sync-transport-production.md)
   for TLS/WSS, token rotation, graceful shutdown, structured logging, and
   offline dependency guidance. See the
