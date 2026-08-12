@@ -427,9 +427,29 @@ namespace mdbxc {
             MDBX_txn* txn,
             const std::string& dbi_name) const {
         checked_txn_env(txn, m_env, "Connection::is_sync_versioned_dbi");
+        static const char versioned_dbi_registry_name[] =
+            "_mdbxc_versioned_dbis";
+        MDBX_val registry_name = {
+            const_cast<char*>(versioned_dbi_registry_name),
+            sizeof(versioned_dbi_registry_name) - 1u
+        };
+        MDBX_dbi main_dbi = 0;
+        check_mdbx(mdbx_dbi_open(
+                       txn, nullptr, static_cast<MDBX_db_flags_t>(0),
+                       &main_dbi),
+                   "Connection failed to open main DBI");
+        MDBX_val registry_value;
+        const int registry_lookup_rc = mdbx_get(
+            txn, main_dbi, &registry_name, &registry_value);
+        if (registry_lookup_rc == MDBX_NOTFOUND) {
+            return false;
+        }
+        check_mdbx(registry_lookup_rc,
+                   "Connection failed to find versioned DBI registry");
         MDBX_dbi registry_dbi = 0;
         const int open_rc = mdbx_dbi_open(
-            txn, "_mdbxc_versioned_dbis", static_cast<MDBX_db_flags_t>(0),
+            txn, versioned_dbi_registry_name,
+            static_cast<MDBX_db_flags_t>(0),
             &registry_dbi);
         if (open_rc == MDBX_NOTFOUND) {
             return false;
