@@ -70,10 +70,12 @@ namespace sync {
                     "LogicalOutboxStore receiver already belongs to a different origin");
             }
             LogicalJournalStore journal(m_env);
-            if (!journal.has_persistent_state(txn) &&
-                has_persistent_state(txn)) {
-                throw std::logic_error(
-                    "LogicalOutboxStore legacy state cannot allocate journal entries");
+            if (!journal.is_initialized(txn)) {
+                if (has_persistent_state(txn)) {
+                    throw std::logic_error(
+                        "LogicalOutboxStore legacy state cannot allocate journal entries");
+                }
+                journal.initialize(txn);
             }
             const LogicalDeliveryEnvelope envelope = journal.append(
                 txn, destination, origin, frame, bounds);

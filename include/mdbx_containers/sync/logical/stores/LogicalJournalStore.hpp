@@ -14,6 +14,7 @@
 
 #include <mdbx.h>
 
+#include "detail/NamedDbiLookup.hpp"
 #include "../LogicalDeliveryEnvelopeCodec.hpp"
 
 namespace mdbxc {
@@ -37,6 +38,37 @@ namespace sync {
             open_for_write(txn);
         }
 
+        /// \brief Returns whether the journal has its persistent v1 layout marker.
+        /// \details This is a constant-size lookup intended for append-time
+        /// migration guards. It deliberately does not validate journal entries;
+        /// use has_persistent_state() for that deep integrity inspection.
+        bool is_initialized(MDBX_txn* txn) const {
+            txn = checked_txn(txn, "LogicalJournalStore::is_initialized");
+            if (!try_open_existing(txn)) return false;
+            return has_layout_marker(txn);
+        }
+
+        /// \brief Writes the persistent v1 layout marker if it is absent.
+        /// \details Callers must perform any migration guard before this call.
+        /// The marker and the first journal entry are committed atomically when
+        /// both operations use the same transaction.
+        void initialize(MDBX_txn* txn) {
+            txn = checked_txn(txn, "LogicalJournalStore::initialize");
+            open_for_write(txn);
+            const std::vector<std::uint8_t> key = make_layout_marker_key();
+            const std::vector<std::uint8_t> value = make_layout_marker_value();
+            MDBX_val raw_key = make_val(key);
+            MDBX_val raw_value = make_val(value);
+            const int rc = mdbx_put(txn, m_dbi, &raw_key, &raw_value,
+                                    MDBX_NOOVERWRITE);
+            if (rc == MDBX_SUCCESS) return;
+            if (rc == MDBX_KEYEXIST) {
+                (void)has_layout_marker(txn);
+                return;
+            }
+            check_mdbx(rc, "LogicalJournalStore layout marker write failed");
+        }
+
         LogicalDeliveryEnvelope append(
                 MDBX_txn* txn,
                 const DbId& destination,
@@ -46,6 +78,10 @@ namespace sync {
             txn = checked_txn(txn, "LogicalJournalStore::append");
             validate_identity(destination, origin);
             open_for_write(txn);
+            if (!has_layout_marker(txn)) {
+                throw std::logic_error(
+                    "LogicalJournalStore layout is not initialized");
+            }
             OriginMetadata metadata = read_origin_metadata(txn, destination,
                                                             origin);
             if (metadata.next_sequence ==
@@ -195,7 +231,9 @@ namespace sync {
                 MDBX_val value;
                 int rc = mdbx_cursor_get(cursor, &key, &value, MDBX_FIRST);
                 while (rc == MDBX_SUCCESS) {
-                    if (is_origin_metadata_key(key)) {
+                    if (is_layout_marker_key(key)) {
+                        decode_layout_marker(value);
+                    } else if (is_origin_metadata_key(key)) {
                         (void)decode_origin_metadata(value);
                     } else {
                         const Entry entry = decode_entry(key);
@@ -236,57 +274,17 @@ namespace sync {
             std::uint64_t sequence;
         };
 
-        struct TableLookup {
-            TableLookup(const std::string& expected_name)
-                : expected(&expected_name),
-                  found(false) {}
-
-            const std::string* expected;
-            bool found;
-        };
-
         MDBX_txn* checked_txn(MDBX_txn* txn, const char* context) const {
             return checked_txn_env(txn, m_env, context);
         }
 
         bool try_open_existing(MDBX_txn* txn) const {
-            if (!table_exists(txn)) return false;
+            if (!detail::named_dbi_exists(txn, m_dbi_name)) return false;
             const int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
                                          static_cast<MDBX_db_flags_t>(0),
                                          &m_dbi);
             check_mdbx(rc, "Failed to open LogicalJournalStore DBI");
             return true;
-        }
-
-        bool table_exists(MDBX_txn* txn) const {
-            TableLookup lookup(m_dbi_name);
-            const int rc = mdbx_enumerate_tables(
-                txn, &LogicalJournalStore::find_named_table, &lookup);
-            if (lookup.found && rc == MDBX_RESULT_TRUE) return true;
-            check_mdbx(rc, "Failed to inspect LogicalJournalStore DBI");
-            return false;
-        }
-
-        static int find_named_table(
-                void* context,
-                const MDBX_txn*,
-                const MDBX_val* name,
-                MDBX_db_flags_t,
-                const MDBX_stat*,
-                MDBX_dbi)
-#if __cplusplus >= 201703L
-                noexcept
-#endif
-                {
-            TableLookup* lookup = static_cast<TableLookup*>(context);
-            if (name != nullptr && name->iov_base != nullptr &&
-                name->iov_len == lookup->expected->size() &&
-                std::memcmp(name->iov_base, lookup->expected->data(),
-                            name->iov_len) == 0) {
-                lookup->found = true;
-                return MDBX_RESULT_TRUE;
-            }
-            return MDBX_SUCCESS;
         }
 
         void open_for_write(MDBX_txn* txn) const {
@@ -318,6 +316,20 @@ namespace sync {
             out.push_back(origin_metadata_key_kind());
             out.insert(out.end(), destination.begin(), destination.end());
             out.insert(out.end(), origin.begin(), origin.end());
+            return out;
+        }
+
+        static std::vector<std::uint8_t> make_layout_marker_key() {
+            std::vector<std::uint8_t> out;
+            out.reserve(layout_marker_key_size());
+            out.push_back(key_version());
+            out.push_back(layout_marker_key_kind());
+            return out;
+        }
+
+        static std::vector<std::uint8_t> make_layout_marker_value() {
+            std::vector<std::uint8_t> out;
+            out.push_back(layout_value_version());
             return out;
         }
 
@@ -362,6 +374,17 @@ namespace sync {
                 static_cast<const std::uint8_t*>(key.iov_base);
             return bytes[0] == key_version() &&
                    bytes[1] == origin_metadata_key_kind();
+        }
+
+        static bool is_layout_marker_key(const MDBX_val& key) {
+            if (key.iov_len != layout_marker_key_size() ||
+                key.iov_base == nullptr) {
+                return false;
+            }
+            const std::uint8_t* bytes =
+                static_cast<const std::uint8_t*>(key.iov_base);
+            return bytes[0] == key_version() &&
+                   bytes[1] == layout_marker_key_kind();
         }
 
         static Entry decode_entry(const MDBX_val& key) {
@@ -442,6 +465,31 @@ namespace sync {
             return out;
         }
 
+        bool has_layout_marker(MDBX_txn* txn) const {
+            const std::vector<std::uint8_t> key = make_layout_marker_key();
+            MDBX_val raw_key = make_val(key);
+            MDBX_val raw_value;
+            const int rc = mdbx_get(txn, m_dbi, &raw_key, &raw_value);
+            if (rc == MDBX_NOTFOUND) return false;
+            check_mdbx(rc, "LogicalJournalStore layout marker read failed");
+            decode_layout_marker(raw_value);
+            return true;
+        }
+
+        static void decode_layout_marker(const MDBX_val& value) {
+            if (value.iov_len != layout_marker_value_size() ||
+                value.iov_base == nullptr) {
+                throw std::runtime_error(
+                    "LogicalJournalStore layout marker is invalid");
+            }
+            const std::uint8_t* bytes =
+                static_cast<const std::uint8_t*>(value.iov_base);
+            if (bytes[0] != layout_value_version()) {
+                throw std::runtime_error(
+                    "Unsupported LogicalJournalStore layout version");
+            }
+        }
+
         static LogicalDeliveryEnvelope decode_value(const MDBX_val& value,
                                                     const CodecBounds* bounds) {
             if (value.iov_base == nullptr && value.iov_len != 0u) {
@@ -454,9 +502,13 @@ namespace sync {
         }
 
         static constexpr std::uint8_t key_version() { return 1u; }
+        static constexpr std::uint8_t layout_marker_key_kind() { return 0u; }
         static constexpr std::uint8_t origin_metadata_key_kind() { return 1u; }
         static constexpr std::uint8_t entry_key_kind() { return 2u; }
+        static constexpr std::uint8_t layout_value_version() { return 1u; }
         static constexpr std::uint16_t metadata_value_version() { return 1u; }
+        static constexpr std::size_t layout_marker_key_size() { return 2u; }
+        static constexpr std::size_t layout_marker_value_size() { return 1u; }
         static constexpr std::size_t metadata_key_size() {
             return 2u + DbId().size() + NodeId().size();
         }

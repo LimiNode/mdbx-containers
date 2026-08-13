@@ -1064,10 +1064,12 @@ namespace sync {
                 throw std::logic_error(
                     "SyncEngine local node identity is not initialised");
             }
-            if (!journal.has_persistent_state(txn) &&
-                outbox.has_persistent_state(txn)) {
-                throw std::logic_error(
-                    "logical journal cannot start with legacy outbox state");
+            if (!journal.is_initialized(txn)) {
+                if (outbox.has_persistent_state(txn)) {
+                    throw std::logic_error(
+                        "logical journal cannot start with legacy outbox state");
+                }
+                journal.initialize(txn);
             }
             return journal.append(txn, destination, origin, frame, bounds);
         }

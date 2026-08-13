@@ -5763,6 +5763,59 @@ void test_logical_journal_rejects_legacy_outbox_state() {
     cleanup(path);
 }
 
+void test_logical_journal_hot_append_uses_layout_marker() {
+    const std::string path = "test_logical_journal_layout_marker.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x96);
+    const mdbxc::sync::DbId local_db = make_node(0xA6);
+    const mdbxc::sync::DbId destination = make_node(0xB6);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 12;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+
+    const mdbxc::sync::LogicalDeliveryEnvelope first =
+        engine.append_logical_journal(
+            destination, make_outbox_test_frame("app.journal.marker", 1u));
+    MDBXC_TEST_ASSERT(first.origin_sequence == 1u);
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi journal_dbi = 0;
+        mdbxc::check_mdbx(mdbx_dbi_open(
+            txn.handle(), "_mdbxc_logical_journal",
+            static_cast<MDBX_db_flags_t>(0), &journal_dbi),
+            "LogicalJournalStore marker test DBI open failed");
+        std::uint8_t invalid_key_byte = 0xFFu;
+        std::uint8_t invalid_value_byte = 0u;
+        MDBX_val invalid_key = {
+            &invalid_key_byte, 1u
+        };
+        MDBX_val invalid_value = {
+            &invalid_value_byte, 1u
+        };
+        MDBXC_TEST_ASSERT(mdbx_put(
+            txn.handle(), journal_dbi, &invalid_key, &invalid_value,
+            MDBX_NOOVERWRITE) == MDBX_SUCCESS);
+        txn.commit();
+    }
+
+    const mdbxc::sync::LogicalDeliveryEnvelope second =
+        engine.append_logical_journal(
+            destination, make_outbox_test_frame("app.journal.marker", 2u));
+    MDBXC_TEST_ASSERT(second.origin_sequence == 2u);
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 2u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_logical_outbox_acknowledgement_accepts_recovered_sparse_route() {
     const std::string path = "test_logical_outbox_acknowledgement_gap.mdbx";
     cleanup(path);
@@ -6550,6 +6603,7 @@ int main() {
     test_logical_journal_separates_capture_from_routing();
     test_logical_journal_is_lazy_for_raw_sync_capacity();
     test_logical_journal_rejects_legacy_outbox_state();
+    test_logical_journal_hot_append_uses_layout_marker();
     test_logical_outbox_rejects_entries_above_default_codec_bounds();
     test_logical_outbox_acknowledgement_accepts_recovered_sparse_route();
     test_logical_outbox_acknowledgement_missing_tail_preserves_caller_transaction();

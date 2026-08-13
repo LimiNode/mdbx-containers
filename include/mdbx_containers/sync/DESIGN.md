@@ -1261,6 +1261,12 @@ deployments therefore retain their existing DBI footprint; deployments that
 publish journal-backed logical frames need one additional named-DBI slot in
 `Config::max_dbs`.
 
+The first journal append atomically writes a persistent layout-v1 marker with
+its entry. Subsequent append-time migration guards use only that constant-size
+marker lookup; they do not scan or decode the accumulated journal. The deeper
+`has_persistent_state()` inspection remains reserved for snapshot, recovery,
+and diagnostics paths where validating every durable journal record is needed.
+
 This first journal layout deliberately has no migration of pre-journal outbox
 records. A process opening an existing non-empty outbox without journal state
 fails closed before it appends a new logical frame. Operators must drain or
