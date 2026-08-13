@@ -5635,6 +5635,195 @@ void test_key_multi_value_automatic_capture_rolls_back_codec_failure() {
     cleanup(path);
 }
 
+void test_key_multi_value_automatic_capture_rejects_public_suppression() {
+    const std::string path = "test_key_multi_value_automatic_public_suppression.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x98);
+    const mdbxc::sync::DbId local_db = make_node(0xA8);
+    const mdbxc::sync::DbId destination = make_node(0xB8);
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+    mdbxc::KeyMultiValueTable<int, std::string> table(conn, "automatic_suppression");
+    IntStringMultiAdapter adapter(table, "app.automatic.suppression.v3", 3u);
+    engine.bind_key_multi_value_logical_capture(
+        adapter, destination,
+        make_key_multi_value_record("automatic_suppression", 3u));
+
+    bool write_rejected = false;
+    bool commit_rejected = false;
+    {
+        mdbxc::Transaction txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        {
+            mdbxc::Connection::SyncCaptureSuppressionScope suppress(*conn,
+                                                                      txn.handle());
+            try {
+                table.insert(1, "not-journaled", txn.handle());
+            } catch (const std::logic_error&) {
+                write_rejected = true;
+            }
+        }
+        try {
+            txn.commit();
+        } catch (const std::logic_error&) {
+            commit_rejected = true;
+        }
+    }
+    MDBXC_TEST_ASSERT(write_rejected);
+    MDBXC_TEST_ASSERT(commit_rejected);
+    MDBXC_TEST_ASSERT(table.empty());
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_multi_value_automatic_capture_rejects_legacy_session() {
+    const std::string path = "test_key_multi_value_automatic_legacy_session.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x99);
+    const mdbxc::sync::DbId local_db = make_node(0xA9);
+    const mdbxc::sync::DbId destination = make_node(0xB9);
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+    mdbxc::KeyMultiValueTable<int, std::string> table(conn, "automatic_session");
+    IntStringMultiAdapter adapter(table, "app.automatic.session.v3", 3u);
+    engine.bind_key_multi_value_logical_capture(
+        adapter, destination, make_key_multi_value_record("automatic_session", 3u));
+
+    bool rejected = false;
+    try {
+        (void)adapter.begin_capture_session();
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    MDBXC_TEST_ASSERT(rejected);
+    MDBXC_TEST_ASSERT(table.empty());
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_multi_value_automatic_capture_does_not_echo_logical_apply() {
+    const std::string path = "test_key_multi_value_automatic_apply.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x9A);
+    const mdbxc::sync::DbId local_db = make_node(0xAA);
+    const mdbxc::sync::DbId destination = make_node(0xBA);
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+    mdbxc::KeyMultiValueTable<int, std::string> table(conn, "automatic_apply");
+    IntStringMultiAdapter adapter(table, "app.automatic.apply.v3", 3u);
+    engine.bind_key_multi_value_logical_capture(
+        adapter, destination, make_key_multi_value_record("automatic_apply", 3u));
+
+    {
+        mdbxc::Transaction txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        const mdbxc::sync::LogicalApplyResult result = adapter.apply(
+            txn.handle(), adapter.make_insert_one(1, "inbound"));
+        MDBXC_TEST_ASSERT(result.ok);
+        txn.commit();
+    }
+
+    MDBXC_TEST_ASSERT(table.contains(1, "inbound"));
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_multi_value_automatic_capture_requires_rebind_after_reconnect() {
+    const std::string path = "test_key_multi_value_automatic_reconnect.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x9A);
+    const mdbxc::sync::DbId local_db = make_node(0xAA);
+    const mdbxc::sync::DbId destination = make_node(0xBA);
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    {
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, local_db);
+        mdbxc::KeyMultiValueTable<int, std::string> table(conn, "automatic_reconnect");
+        IntStringMultiAdapter adapter(table, "app.automatic.reconnect.v3", 3u);
+        engine.bind_key_multi_value_logical_capture(
+            adapter, destination,
+            make_key_multi_value_record("automatic_reconnect", 3u));
+    }
+    conn->disconnect();
+    conn->connect();
+
+    mdbxc::KeyMultiValueTable<int, std::string> reopened(conn, "automatic_reconnect");
+    bool rejected = false;
+    try {
+        reopened.insert(1, "requires-rebind");
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    MDBXC_TEST_ASSERT(rejected);
+    MDBXC_TEST_ASSERT(reopened.empty());
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_multi_value_automatic_capture_does_not_cross_reconnect_environments() {
+    const std::string path_a = "test_key_multi_value_automatic_reconnect_a.mdbx";
+    const std::string path_b = "test_key_multi_value_automatic_reconnect_b.mdbx";
+    cleanup(path_a);
+    cleanup(path_b);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x9B);
+    const mdbxc::sync::DbId local_db = make_node(0xAB);
+    const mdbxc::sync::DbId destination = make_node(0xBB);
+    mdbxc::Config cfg_a;
+    cfg_a.pathname = path_a;
+    cfg_a.max_dbs = 20;
+    cfg_a.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg_a);
+    {
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, local_db);
+        mdbxc::KeyMultiValueTable<int, std::string> table(conn, "same_name");
+        IntStringMultiAdapter adapter(table, "app.automatic.environment.v3", 3u);
+        engine.bind_key_multi_value_logical_capture(
+            adapter, destination, make_key_multi_value_record("same_name", 3u));
+    }
+    conn->disconnect();
+
+    mdbxc::Config cfg_b = cfg_a;
+    cfg_b.pathname = path_b;
+    conn->connect(cfg_b);
+    mdbxc::KeyMultiValueTable<int, std::string> unbound(conn, "same_name");
+    unbound.insert(1, "local-only");
+    MDBXC_TEST_ASSERT(unbound.contains(1, "local-only"));
+
+    conn->disconnect();
+    cleanup(path_a);
+    cleanup(path_b);
+}
+
 void test_logical_journal_separates_capture_from_routing() {
     const std::string path = "test_logical_journal_routing.mdbx";
     cleanup(path);
@@ -6708,6 +6897,11 @@ int main() {
     test_logical_outbox_persists_ordered_destination_streams();
     test_key_multi_value_automatic_capture_uses_receiver_neutral_journal();
     test_key_multi_value_automatic_capture_rolls_back_codec_failure();
+    test_key_multi_value_automatic_capture_rejects_public_suppression();
+    test_key_multi_value_automatic_capture_rejects_legacy_session();
+    test_key_multi_value_automatic_capture_does_not_echo_logical_apply();
+    test_key_multi_value_automatic_capture_requires_rebind_after_reconnect();
+    test_key_multi_value_automatic_capture_does_not_cross_reconnect_environments();
     test_logical_journal_separates_capture_from_routing();
     test_logical_journal_is_lazy_for_raw_sync_capacity();
     test_logical_journal_rejects_legacy_outbox_state();

@@ -40,6 +40,9 @@ namespace mdbxc {
         class SyncCaptureScope;
         class SyncEngine;
         class VectorStoreLogicalAdapter;
+        template<class KeyT, class ValueT, class KeyCodec,
+                 class ValueCodec, class Options>
+        class KeyMultiValueTableLogicalAdapter;
     }
 
     /// \class Connection
@@ -210,6 +213,13 @@ namespace mdbxc {
         /// \brief Returns the currently attached \c ISyncCaptureSink or \c nullptr.
         sync::ISyncCaptureSink* sync_capture() const;
 
+        /// \brief Rejects legacy typed logical sessions for a durably automatic-bound DBI.
+        /// \details This preserves the binding's single authoritative local
+        /// capture route. It is a validation operation and does not enable
+        /// capture suppression or mutation.
+        void ensure_logical_dbi_capture_session_supported(
+            MDBX_txn* txn, const std::string& dbi_name) const;
+
         /// \brief Temporarily suppresses sync capture for one writable transaction.
         /// \details Intended for incoming logical sync apply paths that must
         /// write through public table wrappers without re-publishing the same
@@ -369,6 +379,26 @@ namespace mdbxc {
         void ensure_logical_dbi_operation_supported(
             MDBX_txn* txn, const std::string& dbi_name,
             const char* operation) const;
+        void ensure_logical_dbi_capture_not_suppressed(
+            MDBX_txn* txn, const std::string& dbi_name);
+        class LogicalDbiApplySuppressionScope {
+        public:
+            LogicalDbiApplySuppressionScope(Connection& connection,
+                                             MDBX_txn* txn);
+            ~LogicalDbiApplySuppressionScope() noexcept;
+
+            LogicalDbiApplySuppressionScope(
+                const LogicalDbiApplySuppressionScope&) = delete;
+            LogicalDbiApplySuppressionScope& operator=(
+                const LogicalDbiApplySuppressionScope&) = delete;
+
+        private:
+            Connection* m_connection;
+            MDBX_txn* m_txn;
+        };
+        void begin_logical_dbi_apply_suppression(MDBX_txn* txn);
+        void end_logical_dbi_apply_suppression(MDBX_txn* txn) noexcept;
+        bool logical_dbi_apply_suppressed(MDBX_txn* txn) const;
         struct SyncApplyObserverState;
 
         struct SyncApplyObserverCallback {
@@ -397,6 +427,9 @@ namespace mdbxc {
 
         friend class sync::SyncEngine;
         friend class sync::VectorStoreLogicalAdapter;
+        template<class KeyT, class ValueT, class KeyCodec,
+                 class ValueCodec, class Options>
+        friend class sync::KeyMultiValueTableLogicalAdapter;
         friend class VectorStore;
 #           if __cplusplus >= 201703L
         using SyncApplyMutex = std::shared_mutex;
@@ -425,6 +458,7 @@ namespace mdbxc {
         std::uint64_t m_next_sync_capture_token = 0;
         MDBX_txn* m_sync_capture_failed_txn = nullptr;
         std::vector<MDBX_txn*> m_sync_capture_suppressed_txns;
+        std::vector<MDBX_txn*> m_logical_dbi_apply_suppressed_txns;
         mutable std::mutex m_sync_capture_failure_mutex;
         std::uint64_t m_next_sync_apply_observer_token = 0;
         std::uint64_t m_sync_apply_generation = 0;

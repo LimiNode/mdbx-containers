@@ -173,6 +173,9 @@ namespace sync {
                 : detail::CapturedLogicalTransaction(
                       *adapter.m_table.connection()),
                   m_adapter(adapter) {
+                adapter.m_table.connection()
+                    ->ensure_logical_dbi_capture_session_supported(
+                        m_txn.handle(), adapter.m_table.dbi_name());
                 const LogicalApplyResult marker_result =
                     validate_logical_adapter_marker(
                         m_txn.handle(),
@@ -534,6 +537,8 @@ namespace sync {
             try {
                 Connection::SyncCaptureSuppressionScope suppress_capture(
                     *m_table.connection(), txn);
+                Connection::LogicalDbiApplySuppressionScope
+                    suppress_logical_capture(*m_table.connection(), txn);
                 if (change.opcode == opcode_value(KeyMultiValueLogicalOpcode::InsertOne)) {
                     const std::pair<KeyT, ValueT> pair =
                         decode_pair(change.payload);
@@ -589,10 +594,8 @@ namespace sync {
             }
 
             const std::string& dbi_name() const override { return m_dbi_name; }
-            const std::string& schema_id() const override { return m_schema.schema_id; }
-            std::uint32_t schema_version() const override {
-                return m_schema.schema_version;
-            }
+            LogicalSchemaRef schema_ref() const override { return m_schema; }
+            const DbId& destination() const override { return m_destination; }
 
             void record_insert(MDBX_txn* txn, const void* key,
                                const void* value) override {

@@ -23,6 +23,12 @@
 namespace mdbxc {
 namespace sync {
 
+    /// \brief Durable logical dataset binding for one user DBI.
+    struct LogicalDbiBinding {
+        DbId destination;
+        LogicalSchemaRef schema;
+    };
+
     /// \brief Persistent marker for DBIs whose ordinary table API captures
     ///        receiver-neutral logical changes.
     /// \details The key is the user DBI name. The value records the destination
@@ -59,28 +65,34 @@ namespace sync {
             MDBX_val existing;
             check_mdbx(mdbx_get(txn, m_dbi, &key, &existing),
                        "LogicalDbiBindingStore read existing binding failed");
-            DbId existing_destination{};
-            LogicalSchemaRef existing_schema;
-            decode_binding(existing, existing_destination, existing_schema);
-            if (existing_destination != destination ||
-                existing_schema.schema_id != schema.schema_id ||
-                existing_schema.kind != schema.kind ||
-                existing_schema.schema_version != schema.schema_version) {
+            LogicalDbiBinding existing_binding;
+            decode_binding(existing, existing_binding);
+            if (existing_binding.destination != destination ||
+                existing_binding.schema.schema_id != schema.schema_id ||
+                existing_binding.schema.kind != schema.kind ||
+                existing_binding.schema.schema_version != schema.schema_version) {
                 throw std::runtime_error("Logical DBI binding mismatch");
             }
         }
 
         bool contains(MDBX_txn* txn, const std::string& user_dbi_name) const {
-            txn = checked_txn(txn, "LogicalDbiBindingStore::contains");
+            LogicalDbiBinding binding;
+            return get(txn, user_dbi_name, binding);
+        }
+
+        bool get(MDBX_txn* txn,
+                 const std::string& user_dbi_name,
+                 LogicalDbiBinding& out) const {
+            txn = checked_txn(txn, "LogicalDbiBindingStore::get");
             if (user_dbi_name.empty() || !open_existing(txn)) return false;
             MDBX_val key = make_name_val(user_dbi_name);
             MDBX_val value;
             const int rc = mdbx_get(txn, m_dbi, &key, &value);
             if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, "LogicalDbiBindingStore lookup failed");
-            DbId destination{};
-            LogicalSchemaRef schema;
-            decode_binding(value, destination, schema);
+            LogicalDbiBinding decoded;
+            decode_binding(value, decoded);
+            out = decoded;
             return true;
         }
 
@@ -96,10 +108,9 @@ namespace sync {
                 throw std::out_of_range("Logical DBI binding is not registered");
             }
             check_mdbx(rc, "LogicalDbiBindingStore lookup failed");
-            DbId out{};
-            LogicalSchemaRef schema;
-            decode_binding(value, out, schema);
-            return out;
+            LogicalDbiBinding binding;
+            decode_binding(value, binding);
+            return binding.destination;
         }
 
     private:
@@ -166,28 +177,28 @@ namespace sync {
         }
 
         static void decode_binding(const MDBX_val& value,
-                                   DbId& destination,
-                                   LogicalSchemaRef& schema) {
+                                   LogicalDbiBinding& binding) {
             const std::uint8_t* data =
                 static_cast<const std::uint8_t*>(value.iov_base);
             std::size_t pos = 0u;
             if (data == nullptr || value.iov_len < 1u) {
                 throw std::runtime_error("Logical DBI binding is invalid");
             }
-            schema.kind = static_cast<LogicalTableKind>(data[pos++]);
-            schema.schema_version = read_u32(data, value.iov_len, pos);
+            binding.schema.kind = static_cast<LogicalTableKind>(data[pos++]);
+            binding.schema.schema_version = read_u32(data, value.iov_len, pos);
             const std::uint32_t id_size = read_u32(data, value.iov_len, pos);
             if (id_size > value.iov_len - pos ||
-                destination.size() > value.iov_len - pos - id_size) {
+                binding.destination.size() > value.iov_len - pos - id_size) {
                 throw std::runtime_error("Logical DBI binding is truncated");
             }
-            schema.schema_id.assign(
+            binding.schema.schema_id.assign(
                 reinterpret_cast<const char*>(data + pos), id_size);
             pos += id_size;
-            std::memcpy(destination.data(), data + pos, destination.size());
-            pos += destination.size();
-            if (pos != value.iov_len || is_zero_sync_id(destination) ||
-                !is_logical_schema_ref_complete(schema)) {
+            std::memcpy(binding.destination.data(), data + pos,
+                        binding.destination.size());
+            pos += binding.destination.size();
+            if (pos != value.iov_len || is_zero_sync_id(binding.destination) ||
+                !is_logical_schema_ref_complete(binding.schema)) {
                 throw std::runtime_error("Logical DBI binding is invalid");
             }
         }

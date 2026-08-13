@@ -598,6 +598,8 @@ namespace sync {
                 if (result.ok) {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_conn, txn.handle());
+                    Connection::LogicalDbiApplySuppressionScope
+                        suppress_logical_capture(*m_conn, txn.handle());
                     result = m_logical_registry.preflight_then_apply(
                         txn.handle(), changes, false);
                 }
@@ -723,6 +725,8 @@ namespace sync {
                 if (result.ok) {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_conn, txn.handle());
+                    Connection::LogicalDbiApplySuppressionScope
+                        suppress_logical_capture(*m_conn, txn.handle());
                     result = m_logical_registry.preflight_then_apply(
                         txn.handle(), changes, false);
                 }
@@ -944,6 +948,8 @@ namespace sync {
                 {
                     Connection::SyncCaptureSuppressionScope suppress_capture(
                         *m_conn, txn.handle());
+                    Connection::LogicalDbiApplySuppressionScope
+                        suppress_logical_capture(*m_conn, txn.handle());
                     apply_result = m_logical_registry.preflight_then_apply(
                         txn.handle(), changes, true);
                 }

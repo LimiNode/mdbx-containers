@@ -12,6 +12,9 @@
 
 #include <mdbx.h>
 
+#include "../common.hpp"
+#include "../logical/LogicalChange.hpp"
+
 namespace mdbxc {
 namespace sync {
 
@@ -26,8 +29,8 @@ namespace sync {
         virtual ~ILogicalDbiCapture() = default;
 
         virtual const std::string& dbi_name() const = 0;
-        virtual const std::string& schema_id() const = 0;
-        virtual std::uint32_t schema_version() const = 0;
+        virtual LogicalSchemaRef schema_ref() const = 0;
+        virtual const DbId& destination() const = 0;
 
         virtual void record_insert(MDBX_txn* txn,
                                    const void* key,

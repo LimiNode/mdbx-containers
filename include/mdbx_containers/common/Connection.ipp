@@ -20,6 +20,7 @@
 
 #if MDBXC_SYNC_ENABLED
 #include <mdbx_containers/sync/capture/ILogicalDbiCapture.hpp>
+#include <mdbx_containers/sync/logical/stores/LogicalDbiBindingStore.hpp>
 #endif
 
 namespace mdbxc {
@@ -229,6 +230,20 @@ namespace mdbxc {
         }
     }
 
+    inline Connection::LogicalDbiApplySuppressionScope::
+    LogicalDbiApplySuppressionScope(Connection& connection, MDBX_txn* txn)
+        : m_connection(&connection),
+          m_txn(txn) {
+        m_connection->begin_logical_dbi_apply_suppression(m_txn);
+    }
+
+    inline Connection::LogicalDbiApplySuppressionScope::
+    ~LogicalDbiApplySuppressionScope() noexcept {
+        if (m_connection != nullptr) {
+            m_connection->end_logical_dbi_apply_suppression(m_txn);
+        }
+    }
+
     inline std::uint64_t Connection::sync_apply_generation() const {
         std::lock_guard<std::mutex> locker(m_mdbx_mutex);
         return m_sync_apply_generation;
@@ -387,6 +402,46 @@ namespace mdbxc {
         return false;
     }
 
+    inline void Connection::begin_logical_dbi_apply_suppression(
+            MDBX_txn* txn) {
+        if (txn == nullptr) {
+            throw std::invalid_argument(
+                "Connection logical DBI apply suppression transaction cannot be null");
+        }
+        checked_txn_env(txn, m_env,
+                        "Connection logical DBI apply suppression");
+        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        m_logical_dbi_apply_suppressed_txns.push_back(txn);
+    }
+
+    inline void Connection::end_logical_dbi_apply_suppression(
+            MDBX_txn* txn) noexcept {
+        if (txn == nullptr) return;
+        try {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            for (std::vector<MDBX_txn*>::iterator it =
+                     m_logical_dbi_apply_suppressed_txns.begin();
+                 it != m_logical_dbi_apply_suppressed_txns.end(); ++it) {
+                if (*it == txn) {
+                    m_logical_dbi_apply_suppressed_txns.erase(it);
+                    return;
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    inline bool Connection::logical_dbi_apply_suppressed(
+            MDBX_txn* txn) const {
+        if (txn == nullptr) return false;
+        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        for (std::size_t i = 0u;
+             i < m_logical_dbi_apply_suppressed_txns.size(); ++i) {
+            if (m_logical_dbi_apply_suppressed_txns[i] == txn) return true;
+        }
+        return false;
+    }
+
     inline void Connection::ensure_sync_capture_txn_supported(
             MDBX_txn* txn,
             const char* context) const {
@@ -439,6 +494,17 @@ namespace mdbxc {
             std::string(context) +
             " cannot use caller-created raw writable MDBX_txn* with a "
             "registered source-version-wins DBI; use VersionedKeyValueTable");
+    }
+
+    inline void Connection::ensure_logical_dbi_capture_session_supported(
+            MDBX_txn* txn, const std::string& dbi_name) const {
+        checked_txn_env(txn, m_env,
+                        "Connection logical capture session");
+        if (is_sync_logical_dbi(txn, dbi_name)) {
+            throw std::logic_error(
+                "registered automatic logical DBI cannot use a legacy typed "
+                "capture session");
+        }
     }
 
     inline bool Connection::is_sync_versioned_dbi(
@@ -543,8 +609,13 @@ namespace mdbxc {
         std::map<std::string, std::shared_ptr<sync::ILogicalDbiCapture>>::iterator
             it = m_logical_dbi_captures.find(capture->dbi_name());
         if (it != m_logical_dbi_captures.end()) {
-            if (it->second->schema_id() != capture->schema_id() ||
-                it->second->schema_version() != capture->schema_version()) {
+            const sync::LogicalSchemaRef existing_schema =
+                it->second->schema_ref();
+            const sync::LogicalSchemaRef new_schema = capture->schema_ref();
+            if (it->second->destination() != capture->destination() ||
+                existing_schema.schema_id != new_schema.schema_id ||
+                existing_schema.kind != new_schema.kind ||
+                existing_schema.schema_version != new_schema.schema_version) {
                 throw std::logic_error(
                     "Connection logical DBI capture schema does not match existing binding");
             }
@@ -556,6 +627,11 @@ namespace mdbxc {
     inline std::shared_ptr<sync::ILogicalDbiCapture>
     Connection::logical_dbi_capture_for(MDBX_txn* txn,
                                         const std::string& dbi_name) const {
+        sync::LogicalDbiBinding binding;
+        sync::LogicalDbiBindingStore bindings(m_env);
+        if (!bindings.get(txn, dbi_name, binding)) {
+            return std::shared_ptr<sync::ILogicalDbiCapture>();
+        }
         std::shared_ptr<sync::ILogicalDbiCapture> capture;
         {
             std::lock_guard<std::mutex> locker(m_mdbx_mutex);
@@ -563,10 +639,17 @@ namespace mdbxc {
                 const_iterator it = m_logical_dbi_captures.find(dbi_name);
             if (it != m_logical_dbi_captures.end()) capture = it->second;
         }
-        if (capture) return capture;
-        if (is_sync_logical_dbi(txn, dbi_name)) {
+        if (!capture) {
             throw std::logic_error(
                 "registered logical DBI has no active logical capture binding");
+        }
+        const sync::LogicalSchemaRef capture_schema = capture->schema_ref();
+        if (capture->destination() != binding.destination ||
+            capture_schema.schema_id != binding.schema.schema_id ||
+            capture_schema.kind != binding.schema.kind ||
+            capture_schema.schema_version != binding.schema.schema_version) {
+            throw std::logic_error(
+                "runtime logical DBI capture does not match durable binding");
         }
         return capture;
     }
@@ -640,6 +723,19 @@ namespace mdbxc {
         if (!is_sync_logical_dbi(txn, dbi_name)) return;
         throw std::logic_error(std::string("registered logical DBI does not support ") +
                                operation + "; use a supported KeyMultiValueTable mutation");
+    }
+
+    inline void Connection::ensure_logical_dbi_capture_not_suppressed(
+            MDBX_txn* txn, const std::string& dbi_name) {
+        if (!sync_capture_suppressed(txn) ||
+            logical_dbi_apply_suppressed(txn) ||
+            !is_sync_logical_dbi(txn, dbi_name)) {
+            return;
+        }
+        mark_sync_capture_failed(txn);
+        throw std::logic_error(
+            "public raw sync capture suppression cannot bypass a registered "
+            "automatic logical DBI binding");
     }
 
     inline Connection::SyncApplyNotification Connection::mark_sync_apply_committed(
@@ -879,6 +975,10 @@ namespace mdbxc {
             if (rc == MDBX_SUCCESS) {
                 m_env = nullptr;
                 m_shutdown_requested = false;
+#           if MDBXC_SYNC_ENABLED
+                m_logical_dbi_captures.clear();
+                m_logical_dbi_apply_suppressed_txns.clear();
+#           endif
             }
         }
     }

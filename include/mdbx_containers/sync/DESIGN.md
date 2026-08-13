@@ -279,8 +279,15 @@ mutation. Routing later fans that journal out with
 The binding fails closed. A process that opens a bound DBI without installing
 the matching runtime capture cannot mutate it through the wrapper, and a
 caller-created writable `MDBX_txn*` is rejected before physical mutation.
-Incoming logical apply uses capture suppression, so it does not echo incoming
-changes. The normal `erase_range()` API remains unavailable for a bound DBI
+The public raw `SyncCaptureSuppressionScope` cannot bypass this contract: a
+bound-table write while it is active fails and rolls back. Only the private
+logical-adapter apply scope suppresses automatic capture for an incoming frame;
+`SyncEngine` establishes the same scope around registry-driven apply. Legacy
+typed capture sessions are rejected for a bound DBI, so there is
+no second caller-selected outbox route. Runtime capture registrations are
+cleared after a successful `Connection::disconnect()` and rechecked against the
+current environment's durable binding before each use. The normal `erase_range()`
+API remains unavailable for a bound DBI
 because it has no caller-supplied bound; `insert`, `append`, `erase(key)`,
 `erase(key,value)`, `erase_one`, `clear`, and `reconcile` map to the existing
 schema-v3 operations.
