@@ -5629,6 +5629,140 @@ void test_logical_journal_separates_capture_from_routing() {
     cleanup(path);
 }
 
+void test_logical_journal_is_lazy_for_raw_sync_capacity() {
+    const std::string raw_path = "test_logical_journal_raw_capacity.mdbx";
+    const std::string journal_path = "test_logical_journal_lazy_create.mdbx";
+    cleanup(raw_path);
+    cleanup(journal_path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x94);
+    const mdbxc::sync::DbId local_db = make_node(0xA4);
+    const mdbxc::sync::DbId destination = make_node(0xB4);
+
+    {
+        mdbxc::Config cfg;
+        cfg.pathname = raw_path;
+        cfg.max_dbs = 9;
+        cfg.no_subdir = true;
+        std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, local_db);
+
+        mdbxc::KeyValueTable<int, int> records(conn, "raw_records");
+        mdbxc::sync::ThreadLocalChangeAccumulator capture(conn);
+        conn->attach_sync_capture(&capture);
+        records.insert_or_assign(1, 10);
+        conn->detach_sync_capture();
+
+        mdbxc::sync::PullRequest request;
+        request.requester = make_node(0xC4);
+        request.db_id = local_db;
+        const mdbxc::sync::PullResponse response = engine.handle_pull(request);
+        MDBXC_TEST_ASSERT(response.ok);
+        MDBXC_TEST_ASSERT(response.batches.size() == 1u);
+        MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+        conn->disconnect();
+    }
+
+    {
+        mdbxc::Config cfg;
+        cfg.pathname = journal_path;
+        cfg.max_dbs = 12;
+        cfg.no_subdir = true;
+        std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+        mdbxc::sync::SyncEngine engine(conn);
+        engine.initialize_local_identity(local_node, local_db);
+        MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+        const mdbxc::sync::LogicalDeliveryEnvelope envelope =
+            engine.append_logical_journal(
+                destination, make_outbox_test_frame("app.journal.lazy", 1u));
+        MDBXC_TEST_ASSERT(envelope.origin_sequence == 1u);
+        MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 1u);
+
+        conn->disconnect();
+    }
+
+    cleanup(raw_path);
+    cleanup(journal_path);
+}
+
+void test_logical_journal_rejects_legacy_outbox_state() {
+    const std::string path = "test_logical_journal_legacy_outbox.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x95);
+    const mdbxc::sync::DbId local_db = make_node(0xA5);
+    const mdbxc::sync::DbId destination = make_node(0xB5);
+    const mdbxc::sync::NodeId receiver = make_node(0xC5);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 12;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        mdbxc::sync::LogicalOutboxStore outbox(conn->env_handle());
+        const MDBX_dbi dbi = outbox.handle(txn.handle());
+        std::vector<std::uint8_t> key;
+        key.reserve(2u + destination.size() + receiver.size());
+        key.push_back(3u);
+        key.push_back(1u);
+        key.insert(key.end(), destination.begin(), destination.end());
+        key.insert(key.end(), receiver.begin(), receiver.end());
+        std::vector<std::uint8_t> value;
+        mdbxc::sync::detail::append_u16_le(value, 1u);
+        mdbxc::sync::detail::append_u64_le(value, 0u);
+        mdbxc::sync::detail::append_u64_le(value, 0u);
+        value.insert(value.end(), local_node.begin(), local_node.end());
+        MDBX_val raw_key = { key.empty() ? nullptr : &key[0], key.size() };
+        MDBX_val raw_value = {
+            value.empty() ? nullptr : &value[0], value.size()
+        };
+        MDBXC_TEST_ASSERT(mdbx_put(txn.handle(), dbi, &raw_key, &raw_value,
+                                   MDBX_UPSERT) == MDBX_SUCCESS);
+        txn.commit();
+    }
+
+    bool append_rejected = false;
+    try {
+        (void)engine.append_logical_journal(
+            destination, make_outbox_test_frame("app.journal.legacy", 1u));
+    } catch (const std::logic_error&) {
+        append_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(append_rejected);
+
+    bool enqueue_rejected = false;
+    try {
+        (void)engine.enqueue_logical_delivery(
+            destination, receiver,
+            make_outbox_test_frame("app.journal.legacy", 2u));
+    } catch (const std::logic_error&) {
+        enqueue_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(enqueue_rejected);
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        mdbxc::sync::LogicalOutboxStore outbox(conn->env_handle());
+        MDBXC_TEST_ASSERT(outbox.has_persistent_state(txn.handle()));
+        MDBXC_TEST_ASSERT(outbox.known_tail(
+            txn.handle(), destination, receiver) == 0u);
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_logical_outbox_acknowledgement_accepts_recovered_sparse_route() {
     const std::string path = "test_logical_outbox_acknowledgement_gap.mdbx";
     cleanup(path);
@@ -6414,6 +6548,8 @@ int main() {
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     test_logical_outbox_persists_ordered_destination_streams();
     test_logical_journal_separates_capture_from_routing();
+    test_logical_journal_is_lazy_for_raw_sync_capacity();
+    test_logical_journal_rejects_legacy_outbox_state();
     test_logical_outbox_rejects_entries_above_default_codec_bounds();
     test_logical_outbox_acknowledgement_accepts_recovered_sparse_route();
     test_logical_outbox_acknowledgement_missing_tail_preserves_caller_transaction();

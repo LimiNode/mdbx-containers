@@ -70,7 +70,6 @@ namespace sync {
                     "LogicalOutboxStore receiver already belongs to a different origin");
             }
             LogicalJournalStore journal(m_env);
-            journal.open(txn);
             if (!journal.has_persistent_state(txn) &&
                 has_persistent_state(txn)) {
                 throw std::logic_error(

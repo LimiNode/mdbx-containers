@@ -86,7 +86,7 @@ namespace sync {
                             std::size_t limit = 0u) const {
             txn = checked_txn(txn, "LogicalJournalStore::for_each_after");
             validate_identity(destination, origin);
-            open_existing(txn);
+            if (!try_open_existing(txn)) return;
             const OriginMetadata metadata = read_origin_metadata(txn,
                                                                   destination,
                                                                   origin);
@@ -136,7 +136,7 @@ namespace sync {
                                  const NodeId& origin) const {
             txn = checked_txn(txn, "LogicalJournalStore::known_tail");
             validate_identity(destination, origin);
-            open_existing(txn);
+            if (!try_open_existing(txn)) return 0u;
             return read_origin_metadata(txn, destination, origin).
                 next_sequence - 1u;
         }
@@ -156,7 +156,10 @@ namespace sync {
             if (bounds != nullptr) {
                 (void)LogicalDeliveryEnvelopeCodec::encode(envelope, bounds);
             }
-            open_existing(txn);
+            if (!try_open_existing(txn)) {
+                throw std::invalid_argument(
+                    "LogicalJournalStore envelope is not a journal entry");
+            }
             const std::vector<std::uint8_t> key = make_entry_key(
                 envelope.destination_db_uuid, envelope.origin_node_id,
                 envelope.origin_sequence);
@@ -182,7 +185,7 @@ namespace sync {
         bool has_persistent_state(MDBX_txn* txn,
                                   const CodecBounds* bounds = nullptr) const {
             txn = checked_txn(txn, "LogicalJournalStore::has_persistent_state");
-            open_existing(txn);
+            if (!try_open_existing(txn)) return false;
             MDBX_cursor* cursor = nullptr;
             check_mdbx(mdbx_cursor_open(txn, m_dbi, &cursor),
                        "LogicalJournalStore state cursor open failed");
@@ -233,14 +236,57 @@ namespace sync {
             std::uint64_t sequence;
         };
 
+        struct TableLookup {
+            TableLookup(const std::string& expected_name)
+                : expected(&expected_name),
+                  found(false) {}
+
+            const std::string* expected;
+            bool found;
+        };
+
         MDBX_txn* checked_txn(MDBX_txn* txn, const char* context) const {
             return checked_txn_env(txn, m_env, context);
         }
 
-        void open_existing(MDBX_txn* txn) const {
-            check_mdbx(mdbx_dbi_open(txn, m_dbi_name.c_str(),
-                                     static_cast<MDBX_db_flags_t>(0), &m_dbi),
-                       "Failed to open LogicalJournalStore DBI");
+        bool try_open_existing(MDBX_txn* txn) const {
+            if (!table_exists(txn)) return false;
+            const int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
+                                         static_cast<MDBX_db_flags_t>(0),
+                                         &m_dbi);
+            check_mdbx(rc, "Failed to open LogicalJournalStore DBI");
+            return true;
+        }
+
+        bool table_exists(MDBX_txn* txn) const {
+            TableLookup lookup(m_dbi_name);
+            const int rc = mdbx_enumerate_tables(
+                txn, &LogicalJournalStore::find_named_table, &lookup);
+            if (lookup.found && rc == MDBX_RESULT_TRUE) return true;
+            check_mdbx(rc, "Failed to inspect LogicalJournalStore DBI");
+            return false;
+        }
+
+        static int find_named_table(
+                void* context,
+                const MDBX_txn*,
+                const MDBX_val* name,
+                MDBX_db_flags_t,
+                const MDBX_stat*,
+                MDBX_dbi)
+#if __cplusplus >= 201703L
+                noexcept
+#endif
+                {
+            TableLookup* lookup = static_cast<TableLookup*>(context);
+            if (name != nullptr && name->iov_base != nullptr &&
+                name->iov_len == lookup->expected->size() &&
+                std::memcmp(name->iov_base, lookup->expected->data(),
+                            name->iov_len) == 0) {
+                lookup->found = true;
+                return MDBX_RESULT_TRUE;
+            }
+            return MDBX_SUCCESS;
         }
 
         void open_for_write(MDBX_txn* txn) const {

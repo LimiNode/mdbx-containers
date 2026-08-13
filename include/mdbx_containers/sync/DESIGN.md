@@ -1254,10 +1254,12 @@ sequence and does not automatically receive earlier frames. New fan-out code
 must instead append once and materialize the journal for every receiver from
 the desired retained prefix.
 
-`_mdbxc_logical_journal` and `_mdbxc_logical_outbox` are created during normal
-committed sync-system initialization. Deployments therefore need two additional
-named-DBI slots in `Config::max_dbs` compared with a layout that has neither
-logical journal nor outbox.
+`_mdbxc_logical_outbox` is created during normal committed sync-system
+initialization. `_mdbxc_logical_journal` is created lazily only by
+`append_logical_journal()` or legacy `enqueue_logical_delivery()`. Raw-only
+deployments therefore retain their existing DBI footprint; deployments that
+publish journal-backed logical frames need one additional named-DBI slot in
+`Config::max_dbs`.
 
 This first journal layout deliberately has no migration of pre-journal outbox
 records. A process opening an existing non-empty outbox without journal state

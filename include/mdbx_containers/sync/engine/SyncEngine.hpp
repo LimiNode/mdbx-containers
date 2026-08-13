@@ -3053,7 +3053,6 @@ namespace sync {
             SchemaRegistryStore schemas(m_conn->env_handle());
             LogicalDeliveryStore logical_delivery(m_conn->env_handle());
             LogicalDeliveryOrderStore logical_delivery_order(m_conn->env_handle());
-            LogicalJournalStore logical_journal(m_conn->env_handle());
             LogicalOutboxStore logical_outbox(m_conn->env_handle());
             meta.open(txn);
             change_log.open(txn);
@@ -3061,7 +3060,6 @@ namespace sync {
             schemas.open(txn);
             logical_delivery.open(txn);
             logical_delivery_order.open(txn);
-            logical_journal.open(txn);
             logical_outbox.open(txn);
         }
 
