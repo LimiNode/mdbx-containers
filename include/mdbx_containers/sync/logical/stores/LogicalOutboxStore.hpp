@@ -14,6 +14,7 @@
 
 #include <mdbx.h>
 
+#include "LogicalJournalStore.hpp"
 
 namespace mdbxc {
 namespace sync {
@@ -48,9 +49,9 @@ namespace sync {
         }
 
         /// \brief Appends one globally ordered event to one receiver route.
-        /// \details The generated frame id is stable for the origin event
-        /// sequence. A rollback also rolls back sequence allocation and route
-        /// state.
+        /// \details The event is first persisted in the receiver-neutral
+        /// journal, then projected onto \p receiver in the same transaction.
+        /// A rollback also rolls back sequence allocation and route state.
         LogicalDeliveryEnvelope enqueue(
                 MDBX_txn* txn,
                 const DbId& destination,
@@ -61,54 +62,99 @@ namespace sync {
             txn = checked_txn(txn, "LogicalOutboxStore::enqueue");
             validate_identity(destination, receiver, origin);
             open_for_write(txn);
-
-            OriginMetadata origin_metadata = read_origin_metadata(
-                txn, destination, origin);
-            if (origin_metadata.next_sequence ==
-                (std::numeric_limits<std::uint64_t>::max)()) {
-                throw std::overflow_error(
-                    "LogicalOutboxStore sequence exhausted");
-            }
-
-            RouteMetadata route_metadata = read_route_metadata(
+            const RouteMetadata existing_route = read_route_metadata(
                 txn, destination, receiver);
-            if (is_zero_sync_id(route_metadata.origin_node_id)) {
-                route_metadata.origin_node_id = origin;
-                route_metadata.acknowledged_through =
-                    origin_metadata.next_sequence - 1u;
-                route_metadata.known_tail =
-                    origin_metadata.next_sequence - 1u;
-            } else if (compare_node_id(route_metadata.origin_node_id, origin) != 0) {
+            if (!is_zero_sync_id(existing_route.origin_node_id) &&
+                compare_node_id(existing_route.origin_node_id, origin) != 0) {
+                throw std::invalid_argument(
+                    "LogicalOutboxStore receiver already belongs to a different origin");
+            }
+            LogicalJournalStore journal(m_env);
+            journal.open(txn);
+            if (!journal.has_persistent_state(txn) &&
+                has_persistent_state(txn)) {
+                throw std::logic_error(
+                    "LogicalOutboxStore legacy state cannot allocate journal entries");
+            }
+            const LogicalDeliveryEnvelope envelope = journal.append(
+                txn, destination, origin, frame, bounds);
+            return project(txn, receiver, envelope, bounds);
+        }
+
+        /// \brief Adds an existing journal envelope to one receiver route.
+        /// \details Projection accepts only an immutable journal entry and
+        /// preserves its assigned event identity. Repeating an already
+        /// projected envelope is a no-op only when its durable bytes are
+        /// identical. A newly created direct route may start at its first
+        /// projected sequence; journal materialization starts at sequence one.
+        LogicalDeliveryEnvelope project(
+                MDBX_txn* txn,
+                const NodeId& receiver,
+                const LogicalDeliveryEnvelope& envelope,
+                const CodecBounds* bounds = nullptr) {
+            txn = checked_txn(txn, "LogicalOutboxStore::project");
+            validate_identity(envelope.destination_db_uuid, receiver,
+                              envelope.origin_node_id);
+            if (envelope.origin_sequence == 0u) {
+                throw std::invalid_argument(
+                    "LogicalOutboxStore projected sequence is zero");
+            }
+            if (bounds != nullptr) {
+                (void)LogicalDeliveryEnvelopeCodec::encode(envelope, bounds);
+            }
+            LogicalJournalStore journal(m_env);
+            journal.verify_envelope(txn, envelope, bounds);
+            const std::vector<std::uint8_t> encoded =
+                LogicalDeliveryEnvelopeCodec::encode(envelope);
+            open_for_write(txn);
+
+            RouteMetadata metadata = read_route_metadata(
+                txn, envelope.destination_db_uuid, receiver);
+            if (is_zero_sync_id(metadata.origin_node_id)) {
+                metadata.origin_node_id = envelope.origin_node_id;
+                metadata.acknowledged_through = envelope.origin_sequence - 1u;
+                metadata.known_tail = envelope.origin_sequence - 1u;
+            } else if (compare_node_id(metadata.origin_node_id,
+                                       envelope.origin_node_id) != 0) {
                 throw std::invalid_argument(
                     "LogicalOutboxStore receiver already belongs to a different origin");
             }
 
-            LogicalDeliveryEnvelope envelope;
-            envelope.destination_db_uuid = destination;
-            envelope.origin_node_id = origin;
-            envelope.origin_sequence = origin_metadata.next_sequence;
-            envelope.frame_id = make_frame_id(origin_metadata.next_sequence);
-            envelope.frame = frame;
-            if (bounds != nullptr) {
-                (void)LogicalDeliveryEnvelopeCodec::encode(envelope, bounds);
+            if (envelope.origin_sequence <= metadata.acknowledged_through) {
+                return envelope;
             }
-            // Pending entries can be decoded by a later worker invocation
-            // without carrying a caller-specific bounds object.
-            const std::vector<std::uint8_t> encoded =
-                LogicalDeliveryEnvelopeCodec::encode(envelope);
-            const std::vector<std::uint8_t> key =
-                make_entry_key(destination, receiver,
-                               origin_metadata.next_sequence);
+            const std::vector<std::uint8_t> key = make_entry_key(
+                envelope.destination_db_uuid, receiver,
+                envelope.origin_sequence);
             MDBX_val raw_key = make_val(key);
-            MDBX_val raw_value = make_val(encoded);
+            MDBX_val raw_value;
+            if (envelope.origin_sequence <= metadata.known_tail) {
+                const int rc = mdbx_get(txn, m_dbi, &raw_key, &raw_value);
+                if (rc == MDBX_NOTFOUND) {
+                    throw std::runtime_error(
+                        "LogicalOutboxStore projected entry is missing");
+                }
+                check_mdbx(rc, "LogicalOutboxStore projected entry read failed");
+                if (raw_value.iov_len != encoded.size() ||
+                    raw_value.iov_base == nullptr ||
+                    std::memcmp(raw_value.iov_base, &encoded[0],
+                                encoded.size()) != 0) {
+                    throw std::runtime_error(
+                        "LogicalOutboxStore projected entry conflicts");
+                }
+                return envelope;
+            }
+            if (envelope.origin_sequence != metadata.known_tail + 1u) {
+                throw std::invalid_argument(
+                    "LogicalOutboxStore projected sequence has a gap");
+            }
+            raw_value = make_val(encoded);
             check_mdbx(mdbx_put(txn, m_dbi, &raw_key, &raw_value,
                                 MDBX_NOOVERWRITE),
-                       "LogicalOutboxStore enqueue failed");
-
-            ++origin_metadata.next_sequence;
-            route_metadata.known_tail = envelope.origin_sequence;
-            write_origin_metadata(txn, destination, origin, origin_metadata);
-            write_route_metadata(txn, destination, receiver, route_metadata);
+                       "LogicalOutboxStore projection failed");
+            metadata.known_tail = envelope.origin_sequence;
+            write_route_metadata(txn, envelope.destination_db_uuid, receiver,
+                                 metadata);
             return envelope;
         }
 
@@ -218,6 +264,18 @@ namespace sync {
             validate_route(destination, receiver);
             open_existing(txn);
             return read_route_metadata(txn, destination, receiver).known_tail;
+        }
+
+        /// \brief Returns the origin assigned to one receiver route.
+        /// \return Zero id when the route does not exist.
+        NodeId route_origin(MDBX_txn* txn,
+                            const DbId& destination,
+                            const NodeId& receiver) const {
+            txn = checked_txn(txn, "LogicalOutboxStore::route_origin");
+            validate_route(destination, receiver);
+            open_existing(txn);
+            return read_route_metadata(txn, destination, receiver).
+                origin_node_id;
         }
 
         /// \brief Returns whether any receiver route has pending work.

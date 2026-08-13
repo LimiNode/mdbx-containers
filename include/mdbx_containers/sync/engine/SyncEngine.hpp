@@ -1030,6 +1030,121 @@ namespace sync {
                                   bounds);
         }
 
+        /// \brief Appends one receiver-neutral local logical journal frame.
+        /// \details This records the change atomically without selecting a
+        /// delivery peer. Use materialize_logical_journal() to create one or
+        /// more receiver-specific outbox routes later.
+        LogicalDeliveryEnvelope append_logical_journal(
+                const DbId& destination,
+                const LogicalChangeFrame& frame,
+                const CodecBounds* bounds = nullptr) {
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            const LogicalDeliveryEnvelope envelope = append_logical_journal(
+                txn.handle(), destination, frame, bounds);
+            txn.commit();
+            return envelope;
+        }
+
+        /// \brief Appends one receiver-neutral frame in a caller-owned transaction.
+        /// \details This does not commit or roll back \p txn, so callers can
+        /// atomically persist their table mutation and its logical journal frame.
+        LogicalDeliveryEnvelope append_logical_journal(
+                MDBX_txn* txn,
+                const DbId& destination,
+                const LogicalChangeFrame& frame,
+                const CodecBounds* bounds = nullptr) {
+            txn = checked_external_txn(txn, "SyncEngine::append_logical_journal");
+            initialize_system_stores(txn);
+            MetaStore meta(m_conn->env_handle());
+            LogicalJournalStore journal(m_conn->env_handle());
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            meta.open(txn);
+            const NodeId origin = meta.get_node_id(txn);
+            if (is_zero_sync_id(origin)) {
+                throw std::logic_error(
+                    "SyncEngine local node identity is not initialised");
+            }
+            if (!journal.has_persistent_state(txn) &&
+                outbox.has_persistent_state(txn)) {
+                throw std::logic_error(
+                    "logical journal cannot start with legacy outbox state");
+            }
+            return journal.append(txn, destination, origin, frame, bounds);
+        }
+
+        /// \brief Projects pending local journal frames onto one receiver route.
+        /// \param destination Logical database represented by the local journal.
+        /// \param receiver Receiver node selected by routing configuration.
+        /// \param limit Maximum number of frames to project, or zero for all.
+        /// \param bounds Optional additional validation bounds.
+        /// \return Number of newly projected receiver-specific outbox entries.
+        std::size_t materialize_logical_journal(
+                const DbId& destination,
+                const NodeId& receiver,
+                std::size_t limit = 0u,
+                const CodecBounds* bounds = nullptr) {
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            const std::size_t projected = materialize_logical_journal(
+                txn.handle(), destination, receiver, limit, bounds);
+            txn.commit();
+            return projected;
+        }
+
+        /// \brief Projects local journal frames in a caller-owned transaction.
+        /// \details Projection is contiguous and idempotent for a route whose
+        /// origin is the local node. It does not commit or roll back \p txn.
+        std::size_t materialize_logical_journal(
+                MDBX_txn* txn,
+                const DbId& destination,
+                const NodeId& receiver,
+                std::size_t limit = 0u,
+                const CodecBounds* bounds = nullptr) {
+            txn = checked_external_txn(
+                txn, "SyncEngine::materialize_logical_journal");
+            initialize_system_stores(txn);
+            MetaStore meta(m_conn->env_handle());
+            LogicalJournalStore journal(m_conn->env_handle());
+            LogicalOutboxStore outbox(m_conn->env_handle());
+            meta.open(txn);
+            const NodeId origin = meta.get_node_id(txn);
+            if (is_zero_sync_id(origin)) {
+                throw std::logic_error(
+                    "SyncEngine local node identity is not initialised");
+            }
+            const NodeId route_origin = outbox.route_origin(
+                txn, destination, receiver);
+            if (!is_zero_sync_id(route_origin) &&
+                compare_node_id(route_origin, origin) != 0) {
+                throw std::logic_error(
+                    "logical journal route belongs to a different origin");
+            }
+            const std::uint64_t projected_through = outbox.known_tail(
+                txn, destination, receiver);
+            std::size_t projected = 0u;
+            journal.for_each_after(txn, destination, origin, projected_through,
+                [&outbox, txn, &receiver, bounds, &projected](
+                        const LogicalDeliveryEnvelope& envelope) {
+                    outbox.project(txn, receiver, envelope, bounds);
+                    ++projected;
+                }, bounds, limit);
+            return projected;
+        }
+
+        /// \brief Returns the highest local logical journal sequence.
+        std::uint64_t logical_journal_known_tail(
+                const DbId& destination) const {
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            MetaStore meta(m_conn->env_handle());
+            LogicalJournalStore journal(m_conn->env_handle());
+            meta.open(txn.handle());
+            const NodeId origin = meta.get_node_id(txn.handle());
+            if (is_zero_sync_id(origin)) {
+                throw std::logic_error(
+                    "SyncEngine local node identity is not initialised");
+            }
+            return journal.known_tail(txn.handle(), destination, origin);
+        }
+
         /// \brief Lists locally queued ordered deliveries for one receiver.
         std::vector<LogicalDeliveryEnvelope> pending_logical_deliveries(
                 const DbId& destination,
@@ -1770,10 +1885,12 @@ namespace sync {
                 SchemaRegistryStore schemas(m_conn->env_handle());
                 LogicalDeliveryStore delivery(m_conn->env_handle());
                 LogicalDeliveryOrderStore order(m_conn->env_handle());
+                LogicalJournalStore journal(m_conn->env_handle());
                 LogicalOutboxStore outbox(m_conn->env_handle());
                 if (schemas.has_entries(txn) ||
                     delivery.has_persistent_state(txn) ||
                     order.has_entries(txn) ||
+                    journal.has_persistent_state(txn) ||
                     outbox.has_persistent_state(txn)) {
                     throw FullSnapshotLogicalStateUnsupported();
                 }
@@ -2158,9 +2275,11 @@ namespace sync {
             SchemaRegistryStore schemas(m_conn->env_handle());
             LogicalDeliveryStore delivery(m_conn->env_handle());
             LogicalDeliveryOrderStore order(m_conn->env_handle());
+            LogicalJournalStore journal(m_conn->env_handle());
             LogicalOutboxStore outbox(m_conn->env_handle());
             if (schemas.has_entries(txn) || delivery.has_persistent_state(txn) ||
-                order.has_entries(txn) || outbox.has_persistent_state(txn)) {
+                order.has_entries(txn) || journal.has_persistent_state(txn) ||
+                outbox.has_persistent_state(txn)) {
                 throw std::logic_error(
                     "logical recovery destination has persistent logical state");
             }
@@ -2934,6 +3053,7 @@ namespace sync {
             SchemaRegistryStore schemas(m_conn->env_handle());
             LogicalDeliveryStore logical_delivery(m_conn->env_handle());
             LogicalDeliveryOrderStore logical_delivery_order(m_conn->env_handle());
+            LogicalJournalStore logical_journal(m_conn->env_handle());
             LogicalOutboxStore logical_outbox(m_conn->env_handle());
             meta.open(txn);
             change_log.open(txn);
@@ -2941,6 +3061,7 @@ namespace sync {
             schemas.open(txn);
             logical_delivery.open(txn);
             logical_delivery_order.open(txn);
+            logical_journal.open(txn);
             logical_outbox.open(txn);
         }
 
