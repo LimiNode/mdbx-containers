@@ -537,8 +537,6 @@ namespace sync {
             try {
                 Connection::SyncCaptureSuppressionScope suppress_capture(
                     *m_table.connection(), txn);
-                Connection::LogicalDbiApplySuppressionScope
-                    suppress_logical_capture(*m_table.connection(), txn);
                 if (change.opcode == opcode_value(KeyMultiValueLogicalOpcode::InsertOne)) {
                     const std::pair<KeyT, ValueT> pair =
                         decode_pair(change.payload);

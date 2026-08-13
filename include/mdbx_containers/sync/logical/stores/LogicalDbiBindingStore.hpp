@@ -14,11 +14,11 @@
 
 #include <mdbx.h>
 
-#include <mdbx_containers/common.hpp>
+#include <mdbx_containers/detail/utils.hpp>
+#include <mdbx_containers/sync/common.hpp>
 
 #include "detail/NamedDbiLookup.hpp"
 #include "../LogicalChange.hpp"
-#include "../LogicalDeliveryEnvelope.hpp"
 
 namespace mdbxc {
 namespace sync {

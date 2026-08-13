@@ -5716,8 +5716,8 @@ void test_key_multi_value_automatic_capture_rejects_legacy_session() {
     cleanup(path);
 }
 
-void test_key_multi_value_automatic_capture_does_not_echo_logical_apply() {
-    const std::string path = "test_key_multi_value_automatic_apply.mdbx";
+void test_key_multi_value_automatic_capture_rejects_direct_logical_apply() {
+    const std::string path = "test_key_multi_value_automatic_direct_apply.mdbx";
     cleanup(path);
 
     const mdbxc::sync::NodeId local_node = make_node(0x9A);
@@ -5730,19 +5730,36 @@ void test_key_multi_value_automatic_capture_does_not_echo_logical_apply() {
     std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
     mdbxc::sync::SyncEngine engine(conn);
     engine.initialize_local_identity(local_node, local_db);
-    mdbxc::KeyMultiValueTable<int, std::string> table(conn, "automatic_apply");
-    IntStringMultiAdapter adapter(table, "app.automatic.apply.v3", 3u);
+    mdbxc::KeyMultiValueTable<int, std::string> table(
+        conn, "automatic_direct_apply");
+    IntStringMultiAdapter adapter(table, "app.automatic.direct.apply.v3", 3u);
     engine.bind_key_multi_value_logical_capture(
-        adapter, destination, make_key_multi_value_record("automatic_apply", 3u));
+        adapter, destination,
+        make_key_multi_value_record("automatic_direct_apply", 3u));
 
+    bool commit_rejected = false;
     {
         mdbxc::Transaction txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
         const mdbxc::sync::LogicalApplyResult result = adapter.apply(
             txn.handle(), adapter.make_insert_one(1, "inbound"));
-        MDBXC_TEST_ASSERT(result.ok);
-        txn.commit();
+        MDBXC_TEST_ASSERT(!result.ok);
+        try {
+            txn.commit();
+        } catch (const std::logic_error&) {
+            commit_rejected = true;
+        }
     }
 
+    MDBXC_TEST_ASSERT(commit_rejected);
+    MDBXC_TEST_ASSERT(!table.contains(1, "inbound"));
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+    engine.register_logical_adapter(adapter);
+    std::vector<mdbxc::sync::LogicalChange> changes;
+    changes.push_back(adapter.make_insert_one(1, "inbound"));
+    const mdbxc::sync::LogicalApplyResult engine_result =
+        engine.apply_logical_changes(changes);
+    MDBXC_TEST_ASSERT(engine_result.ok);
     MDBXC_TEST_ASSERT(table.contains(1, "inbound"));
     MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
 
@@ -6899,7 +6916,7 @@ int main() {
     test_key_multi_value_automatic_capture_rolls_back_codec_failure();
     test_key_multi_value_automatic_capture_rejects_public_suppression();
     test_key_multi_value_automatic_capture_rejects_legacy_session();
-    test_key_multi_value_automatic_capture_does_not_echo_logical_apply();
+    test_key_multi_value_automatic_capture_rejects_direct_logical_apply();
     test_key_multi_value_automatic_capture_requires_rebind_after_reconnect();
     test_key_multi_value_automatic_capture_does_not_cross_reconnect_environments();
     test_logical_journal_separates_capture_from_routing();

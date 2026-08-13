@@ -52,6 +52,12 @@ namespace sync {
         return 0;
     }
 
+    /// \brief Returns true when \p id is all zeros.
+    inline bool is_zero_sync_id(const NodeId& id) {
+        const NodeId zero{};
+        return compare_node_id(id, zero) == 0;
+    }
+
     /// \brief Stable lexical hash of a string (FNV-1a 64).
     /// \param s Input string.
     /// \return 64-bit hash.

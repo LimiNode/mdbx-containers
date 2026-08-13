@@ -281,9 +281,9 @@ the matching runtime capture cannot mutate it through the wrapper, and a
 caller-created writable `MDBX_txn*` is rejected before physical mutation.
 The public raw `SyncCaptureSuppressionScope` cannot bypass this contract: a
 bound-table write while it is active fails and rolls back. Only the private
-logical-adapter apply scope suppresses automatic capture for an incoming frame;
-`SyncEngine` establishes the same scope around registry-driven apply. Legacy
-typed capture sessions are rejected for a bound DBI, so there is
+`SyncEngine` logical-apply scope suppresses automatic capture for an incoming
+frame. Direct public adapter apply on a bound DBI fails closed. Legacy typed
+capture sessions are rejected for a bound DBI, so there is
 no second caller-selected outbox route. Runtime capture registrations are
 cleared after a successful `Connection::disconnect()` and rechecked against the
 current environment's durable binding before each use. The normal `erase_range()`

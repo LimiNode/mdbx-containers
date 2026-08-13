@@ -40,9 +40,6 @@ namespace mdbxc {
         class SyncCaptureScope;
         class SyncEngine;
         class VectorStoreLogicalAdapter;
-        template<class KeyT, class ValueT, class KeyCodec,
-                 class ValueCodec, class Options>
-        class KeyMultiValueTableLogicalAdapter;
     }
 
     /// \class Connection
@@ -427,9 +424,6 @@ namespace mdbxc {
 
         friend class sync::SyncEngine;
         friend class sync::VectorStoreLogicalAdapter;
-        template<class KeyT, class ValueT, class KeyCodec,
-                 class ValueCodec, class Options>
-        friend class sync::KeyMultiValueTableLogicalAdapter;
         friend class VectorStore;
 #           if __cplusplus >= 201703L
         using SyncApplyMutex = std::shared_mutex;
