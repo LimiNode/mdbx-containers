@@ -24,8 +24,8 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   `MetaStore`, `ChangeLogStore`, `OriginIndexStore`, `AppliedStore`, and
   `IdentityIndexStore`. Durable logical state is separate under
   `include/mdbx_containers/sync/logical/stores/`: `SchemaRegistryStore`,
-  `LogicalDeliveryStore`, `LogicalDeliveryOrderStore`, and
-  `LogicalOutboxStore`.
+  `LogicalDeliveryStore`, `LogicalDeliveryOrderStore`, `LogicalJournalStore`,
+  and `LogicalOutboxStore`.
 - `ChangeBatchCodec` strict versioned wire format (magic, codec version,
   batch version, batch flags, then payload); rejects unknown mandatory
   flags and version mismatches at both encode and decode.
@@ -1226,25 +1226,53 @@ the numeric `origin_sequence`: it does not decide whether an envelope is an
 exact duplicate delivery identity, persist a watermark, buffer missing frames,
 or decide whether it is safe to advance one.
 
-`LogicalOutboxStore` is the sender-side durable foundation for ordered delivery.
-`SyncEngine::enqueue_logical_delivery()` persists an envelope
-in `_mdbxc_logical_outbox` and allocates a monotonic `origin_sequence` per
-destination database and origin, independent of the selected receiver. This is
-the stable logical-event identity carried by replay markers and ordered
-frontiers. Receiver routes retain only their own pending entries,
-`acknowledged_through`, and known tail. Its MDBX entry keys contain the
-destination, receiver node id, and a big-endian event-sequence suffix, so
-`pending_logical_deliveries()` reads one receiver route in numeric order. The
-generated frame id is stable for the origin event sequence, and allocating a
-frame, updating the global allocator, acknowledging a route prefix, and
-deleting acknowledged route entries are all transactional. A receiver hello
-must match the selected receiver node id before its queue can be dispatched; an
-acknowledgement can therefore advance only that receiver's durable frontier. A
-rollback neither consumes a sequence nor leaves a queue entry behind.
-`_mdbxc_logical_outbox` is created during the normal
-committed sync-system initialization lifecycle, so deployments need one
-additional named-DBI slot in `Config::max_dbs` compared with a layout that did
-not use the outbox.
+`LogicalJournalStore` is the receiver-neutral durable source for locally
+originated ordered logical frames. It stores the destination database id,
+origin node id, monotonic `origin_sequence`, stable frame id, and frame bytes
+in `_mdbxc_logical_journal`; it contains no receiver node id or acknowledgement
+state. `SyncEngine::append_logical_journal()` records one such frame atomically
+with an optional caller-owned table mutation, without selecting a peer.
+
+`LogicalOutboxStore` remains the sender-side receiver-specific delivery queue.
+`SyncEngine::materialize_logical_journal()` projects a contiguous prefix of one
+local journal stream into one selected receiver route. Projection preserves the
+journal-assigned envelope bytes and sequence, is transactional and retry-safe,
+and can be repeated independently for multiple receivers. The route owns only
+its pending entries, `acknowledged_through`, and known tail. Its MDBX entry
+keys contain the destination, receiver node id, and a big-endian event-sequence
+suffix, so `pending_logical_deliveries()` reads one route in numeric order. A
+receiver hello must match the selected receiver node id before its queue can be
+dispatched; an acknowledgement can therefore advance only that receiver's
+durable frontier. A rollback neither consumes a journal sequence nor leaves a
+projected queue entry behind.
+
+`SyncEngine::enqueue_logical_delivery()` remains source-compatible for existing
+typed capture sessions. It appends to the journal and projects the same
+envelope to its supplied receiver in one transaction. Its legacy behavior for
+a newly selected receiver is retained: that route begins at the current event
+sequence and does not automatically receive earlier frames. New fan-out code
+must instead append once and materialize the journal for every receiver from
+the desired retained prefix.
+
+`_mdbxc_logical_outbox` is created during normal committed sync-system
+initialization. `_mdbxc_logical_journal` is created lazily only by
+`append_logical_journal()` or legacy `enqueue_logical_delivery()`. Raw-only
+deployments therefore retain their existing DBI footprint; deployments that
+publish journal-backed logical frames need one additional named-DBI slot in
+`Config::max_dbs`.
+
+The first journal append atomically writes a persistent layout-v1 marker with
+its entry. Subsequent append-time migration guards use only that constant-size
+marker lookup; they do not scan or decode the accumulated journal. The deeper
+`has_persistent_state()` inspection remains reserved for snapshot, recovery,
+and diagnostics paths where validating every durable journal record is needed.
+
+This first journal layout deliberately has no migration of pre-journal outbox
+records. A process opening an existing non-empty outbox without journal state
+fails closed before it appends a new logical frame. Operators must drain or
+replace that legacy logical state with an explicit recovery plan before enabling
+journal-backed capture; silently creating a new sequence allocator could reuse
+an existing `(destination, origin, sequence)` identity.
 
 Persisted outbox entries always satisfy the library-default `CodecBounds`, so a
 later worker can decode them without carrying a caller-specific bounds object.

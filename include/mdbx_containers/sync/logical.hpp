@@ -22,6 +22,7 @@
 #include "logical/stores/SchemaRegistryStore.hpp"
 #include "logical/stores/LogicalDeliveryStore.hpp"
 #include "logical/stores/LogicalDeliveryOrderStore.hpp"
+#include "logical/stores/LogicalJournalStore.hpp"
 #include "logical/stores/LogicalOutboxStore.hpp"
 #include "logical/logical_schema_validation.hpp"
 #include "logical/logical_recovery.hpp"
