@@ -489,6 +489,55 @@ namespace sync {
             txn.commit();
         }
 
+        /// \brief Binds a KeyMultiValue logical adapter to automatic capture.
+        /// \details Ordinary supported \c KeyMultiValueTable mutations are
+        /// captured into the receiver-neutral logical journal at transaction
+        /// commit. The durable binding records \p destination and the schema
+        /// reference; delivery receivers are selected later by
+        /// \c materialize_logical_journal().
+        /// \note The connection owns the installed typed capture object; the
+        /// adapter itself is used only while creating that object.
+        template<class KeyMultiValueAdapterT>
+        void bind_key_multi_value_logical_capture(
+                const KeyMultiValueAdapterT& adapter,
+                const DbId& destination,
+                const LogicalSchemaRecord& record) {
+            const LogicalSchemaRef ref = adapter.schema_ref();
+            if (ref.kind != LogicalTableKind::KeyMultiValue ||
+                ref.schema_version != 3u ||
+                !is_logical_schema_ref_complete(ref) ||
+                record.kind != ref.kind ||
+                record.schema_version != ref.schema_version) {
+                throw std::invalid_argument(
+                    "automatic KeyMultiValue capture requires schema version 3");
+            }
+            {
+                auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+                initialize_system_stores(txn.handle());
+                SchemaRegistryStore schemas(m_conn->env_handle());
+                LogicalSchemaRecord existing;
+                if (schemas.get(txn.handle(), ref.schema_id, existing)) {
+                    schemas.register_or_verify(txn.handle(), ref.schema_id, record);
+                    adapter.verify_storage(txn.handle());
+                } else {
+                    adapter.initialize_storage(txn.handle());
+                    schemas.register_or_verify(txn.handle(), ref.schema_id, record);
+                }
+                const LogicalApplyResult marker_result =
+                    validate_logical_adapter_marker(
+                        txn.handle(), m_conn->env_handle(), adapter);
+                if (!marker_result.ok) {
+                    throw std::runtime_error(marker_result.error);
+                }
+                LogicalDbiBindingStore bindings(m_conn->env_handle());
+                bindings.register_or_verify(txn.handle(), adapter.primary_dbi(),
+                                            destination, ref);
+                txn.commit();
+            }
+            m_conn->attach_logical_dbi_capture(
+                adapter.make_automatic_capture(destination));
+        }
+
         /// \brief Migrates an existing persistent logical table schema marker.
         /// \details This is an explicit marker lifecycle operation. It does
         /// not migrate user table contents or changelog data. The current

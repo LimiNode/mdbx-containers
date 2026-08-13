@@ -242,6 +242,45 @@ namespace mdbxc {
                 throw;
             }
         }
+
+        void record_logical_insert(MDBX_txn* txn,
+                                   const void* key,
+                                   const void* value) const {
+            if (m_connection->sync_capture_suppressed(txn)) return;
+            m_connection->record_logical_dbi_insert(txn, m_name, key, value);
+        }
+
+        void record_logical_erase_key(MDBX_txn* txn, const void* key) const {
+            if (m_connection->sync_capture_suppressed(txn)) return;
+            m_connection->record_logical_dbi_erase_key(txn, m_name, key);
+        }
+
+        void record_logical_erase_all_values(MDBX_txn* txn,
+                                             const void* key,
+                                             const void* value) const {
+            if (m_connection->sync_capture_suppressed(txn)) return;
+            m_connection->record_logical_dbi_erase_all_values(
+                txn, m_name, key, value);
+        }
+
+        void record_logical_erase_one_value(MDBX_txn* txn,
+                                            const void* key,
+                                            const void* value) const {
+            if (m_connection->sync_capture_suppressed(txn)) return;
+            m_connection->record_logical_dbi_erase_one_value(
+                txn, m_name, key, value);
+        }
+
+        void record_logical_clear(MDBX_txn* txn) const {
+            if (m_connection->sync_capture_suppressed(txn)) return;
+            m_connection->record_logical_dbi_clear(txn, m_name);
+        }
+
+        void ensure_logical_operation_supported(MDBX_txn* txn,
+                                                const char* operation) const {
+            m_connection->ensure_logical_dbi_operation_supported(
+                txn, m_name, operation);
+        }
 #       endif
     };
     

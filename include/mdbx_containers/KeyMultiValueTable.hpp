@@ -796,6 +796,9 @@ namespace mdbxc {
                                 MDBX_txn* txn = nullptr) {
             std::size_t result = 0;
             with_transaction([this, &from_key, &to_key, &result](MDBX_txn* t) {
+#           if MDBXC_SYNC_ENABLED
+                ensure_logical_operation_supported(t, "unbounded erase_range()");
+#           endif
                 result = db_erase_range(from_key, to_key, t);
             }, TransactionMode::WRITABLE, txn);
             return result;
@@ -1833,7 +1836,14 @@ namespace mdbxc {
                     if (desired_it != desired.end() && kept[serialized] < desired_it->second) {
                         ++kept[serialized];
                     } else {
+                        const KeyT removed_key = deserialize_key<KeyT>(db_key);
+                        const ValueT removed_value = deserialize_value<ValueT>(
+                            strip_sequence(db_val));
                         check_mdbx(mdbx_cursor_del(cursor.get(), MDBX_CURRENT), "Failed to erase surplus record");
+#                   if MDBXC_SYNC_ENABLED
+                        record_logical_erase_one_value(
+                            txn, &removed_key, &removed_value);
+#                   endif
                     }
                 }
                 if (rc != MDBX_NOTFOUND) {
@@ -1869,6 +1879,9 @@ namespace mdbxc {
             MDBX_val db_val = make_stored_value(sequence, value, sc_value);
             check_dupsort_value_size(db_val);
             check_mdbx(mdbx_put(txn, m_dbi, &db_key, &db_val, MDBX_UPSERT), "Failed to insert multi-value record");
+#       if MDBXC_SYNC_ENABLED
+            record_logical_insert(txn, &key, &value);
+#       endif
         }
 
         void db_find(const KeyT& key, std::vector<ValueT>& values, MDBX_txn* txn) const {
@@ -1961,7 +1974,12 @@ namespace mdbxc {
             SerializeScratch sc_key;
             MDBX_val db_key = serialize_key<Options::safe_integer_key>(key, sc_key);
             int rc = mdbx_del(txn, m_dbi, &db_key, nullptr);
-            if (rc == MDBX_SUCCESS) return true;
+            if (rc == MDBX_SUCCESS) {
+#           if MDBXC_SYNC_ENABLED
+                record_logical_erase_key(txn, &key);
+#           endif
+                return true;
+            }
             if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, "Failed to erase key");
             return false;
@@ -1993,6 +2011,11 @@ namespace mdbxc {
             if (rc != MDBX_NOTFOUND) {
                 check_mdbx(rc, "Failed to scan duplicate values");
             }
+#       if MDBXC_SYNC_ENABLED
+            if (removed != 0u) {
+                record_logical_erase_all_values(txn, &key, &value);
+            }
+#       endif
             return removed;
         }
 
@@ -2016,6 +2039,9 @@ namespace mdbxc {
                 if (stored_value_matches(db_val, raw_value)) {
                     check_mdbx(mdbx_cursor_del(cursor.get(), MDBX_CURRENT),
                                "Failed to erase duplicate value");
+#               if MDBXC_SYNC_ENABLED
+                    record_logical_erase_one_value(txn, &key, &value);
+#               endif
                     return true;
                 }
                 rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_NEXT_DUP);
@@ -2028,6 +2054,9 @@ namespace mdbxc {
 
         void db_clear(MDBX_txn* txn) {
             check_mdbx(mdbx_drop(txn, m_dbi, 0), "Failed to clear table");
+#       if MDBXC_SYNC_ENABLED
+            record_logical_clear(txn);
+#       endif
         }
     };
 

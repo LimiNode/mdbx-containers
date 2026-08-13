@@ -5529,6 +5529,112 @@ void test_logical_outbox_persists_ordered_destination_streams() {
     cleanup(path);
 }
 
+void test_key_multi_value_automatic_capture_uses_receiver_neutral_journal() {
+    const std::string path = "test_key_multi_value_automatic_capture.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x96);
+    const mdbxc::sync::DbId local_db = make_node(0xA6);
+    const mdbxc::sync::DbId destination = make_node(0xB6);
+    const mdbxc::sync::NodeId receiver_b = make_node(0xC6);
+    const mdbxc::sync::NodeId receiver_c = make_node(0xD6);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+
+    mdbxc::KeyMultiValueTable<int, std::string> table(conn, "automatic_multi");
+    IntStringMultiAdapter adapter(table, "app.automatic.multi.v3", 3u);
+    engine.bind_key_multi_value_logical_capture(
+        adapter, destination, make_key_multi_value_record("automatic_multi", 3u));
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+    table.insert(1, "one");
+    table.insert(1, "two");
+    MDBXC_TEST_ASSERT(table.erase_one(1, "one"));
+    MDBXC_TEST_ASSERT(table.erase(1, "two") == 1u);
+    table.clear();
+    MDBXC_TEST_ASSERT(table.empty());
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 5u);
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(destination, receiver_b).empty());
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(destination, receiver_c).empty());
+
+    MDBXC_TEST_ASSERT(engine.materialize_logical_journal(destination, receiver_b) == 5u);
+    const std::vector<mdbxc::sync::LogicalDeliveryEnvelope> pending =
+        engine.pending_logical_deliveries(destination, receiver_b);
+    MDBXC_TEST_ASSERT(pending.size() == 5u);
+    MDBXC_TEST_ASSERT(pending[0].frame.changes.size() == 1u);
+    MDBXC_TEST_ASSERT(pending[0].frame.changes[0].opcode ==
+        mdbxc::sync::opcode_value(
+            mdbxc::sync::KeyMultiValueLogicalOpcode::InsertOne));
+    MDBXC_TEST_ASSERT(pending[2].frame.changes[0].opcode ==
+        mdbxc::sync::opcode_value(
+            mdbxc::sync::KeyMultiValueLogicalOpcode::EraseOneValue));
+    MDBXC_TEST_ASSERT(pending[3].frame.changes[0].opcode ==
+        mdbxc::sync::opcode_value(
+            mdbxc::sync::KeyMultiValueLogicalOpcode::EraseAllValues));
+    MDBXC_TEST_ASSERT(pending[4].frame.changes[0].opcode ==
+        mdbxc::sync::opcode_value(
+            mdbxc::sync::KeyMultiValueLogicalOpcode::Clear));
+
+    MDBX_txn* raw = nullptr;
+    MDBXC_TEST_ASSERT(mdbx_txn_begin(
+        conn->env_handle(), nullptr, static_cast<MDBX_txn_flags_t>(0), &raw) ==
+        MDBX_SUCCESS);
+    bool rejected = false;
+    try {
+        table.insert(3, "raw", raw);
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    MDBXC_TEST_ASSERT(rejected);
+    MDBXC_TEST_ASSERT(mdbx_txn_commit(raw) == MDBX_SUCCESS);
+    MDBXC_TEST_ASSERT(!table.contains(3));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_multi_value_automatic_capture_rolls_back_codec_failure() {
+    const std::string path = "test_key_multi_value_automatic_capture_failure.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x97);
+    const mdbxc::sync::DbId local_db = make_node(0xA7);
+    const mdbxc::sync::DbId destination = make_node(0xB7);
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+
+    mdbxc::KeyMultiValueTable<int, std::string> table(conn, "automatic_failure");
+    LateFailMultiAdapter adapter(table, "app.automatic.failure.v3", 3u);
+    engine.bind_key_multi_value_logical_capture(
+        adapter, destination, make_key_multi_value_record("automatic_failure", 3u));
+
+    LateFailStringCodec::fail_on_value = true;
+    bool failed = false;
+    try {
+        table.insert(1, "fail");
+    } catch (const std::runtime_error&) {
+        failed = true;
+    }
+    LateFailStringCodec::fail_on_value = false;
+    MDBXC_TEST_ASSERT(failed);
+    MDBXC_TEST_ASSERT(table.empty());
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_logical_journal_separates_capture_from_routing() {
     const std::string path = "test_logical_journal_routing.mdbx";
     cleanup(path);
@@ -6600,6 +6706,8 @@ int main() {
     test_key_value_logical_adapter_decodes_literal_little_endian_payload();
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     test_logical_outbox_persists_ordered_destination_streams();
+    test_key_multi_value_automatic_capture_uses_receiver_neutral_journal();
+    test_key_multi_value_automatic_capture_rolls_back_codec_failure();
     test_logical_journal_separates_capture_from_routing();
     test_logical_journal_is_lazy_for_raw_sync_capacity();
     test_logical_journal_rejects_legacy_outbox_state();

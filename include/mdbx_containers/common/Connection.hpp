@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,6 +35,7 @@ namespace mdbxc {
 
     namespace sync {
         class ISyncCaptureSink;
+        class ILogicalDbiCapture;
         class ISyncApplyObserver;
         class SyncCaptureScope;
         class SyncEngine;
@@ -338,9 +340,35 @@ namespace mdbxc {
             const char* context) const;
         bool is_sync_versioned_dbi(MDBX_txn* txn,
                                    const std::string& dbi_name) const;
+        bool is_sync_logical_dbi(MDBX_txn* txn,
+                                 const std::string& dbi_name) const;
         void validate_sync_dbi_write(MDBX_txn* txn,
                                      const std::string& dbi_name,
                                      sync::ChangeOpType op_type);
+        void attach_logical_dbi_capture(
+            const std::shared_ptr<sync::ILogicalDbiCapture>& capture);
+        std::shared_ptr<sync::ILogicalDbiCapture> logical_dbi_capture_for(
+            MDBX_txn* txn, const std::string& dbi_name) const;
+        void record_logical_dbi_insert(MDBX_txn* txn,
+                                       const std::string& dbi_name,
+                                       const void* key,
+                                       const void* value);
+        void record_logical_dbi_erase_key(MDBX_txn* txn,
+                                          const std::string& dbi_name,
+                                          const void* key);
+        void record_logical_dbi_erase_all_values(MDBX_txn* txn,
+                                                 const std::string& dbi_name,
+                                                 const void* key,
+                                                 const void* value);
+        void record_logical_dbi_erase_one_value(MDBX_txn* txn,
+                                                const std::string& dbi_name,
+                                                const void* key,
+                                                const void* value);
+        void record_logical_dbi_clear(MDBX_txn* txn,
+                                      const std::string& dbi_name);
+        void ensure_logical_dbi_operation_supported(
+            MDBX_txn* txn, const std::string& dbi_name,
+            const char* operation) const;
         struct SyncApplyObserverState;
 
         struct SyncApplyObserverCallback {
@@ -391,6 +419,8 @@ namespace mdbxc {
         };
 
         sync::ISyncCaptureSink* m_sync_capture = nullptr;
+        std::map<std::string, std::shared_ptr<sync::ILogicalDbiCapture>>
+            m_logical_dbi_captures;
         std::uint64_t m_sync_capture_token = 0;
         std::uint64_t m_next_sync_capture_token = 0;
         MDBX_txn* m_sync_capture_failed_txn = nullptr;

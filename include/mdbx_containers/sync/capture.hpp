@@ -12,6 +12,7 @@
 #include "protocol.hpp"
 #include "storage.hpp"
 #include "capture/ISyncCaptureSink.hpp"
+#include "capture/ILogicalDbiCapture.hpp"
 #include "capture/SyncCaptureScope.hpp"
 #include "capture/ChangeAccumulator.hpp"
 #endif
