@@ -38,6 +38,8 @@ Core support classes:
 
 - `Config` - MDBX environment configuration. Use `Config::pathname` for the
   database path.
+- `CompositeKey<P1, ..., PN>` - canonical bytewise-sortable key composed from
+  two to five supported parts.
 - `Connection` - owns one MDBX environment and the transaction registries.
 - `Transaction` - RAII wrapper for an MDBX transaction owned by one thread.
 - `BaseTable` - common DBI opening and transaction helpers.

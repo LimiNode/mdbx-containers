@@ -12,6 +12,7 @@
 /// table API.
 
 #include "common.hpp"
+#include "mdbx_containers/CompositeKey.hpp"
 #include "mdbx_containers/AnyValueTable.hpp"
 #include "mdbx_containers/HashedKeyValueStore.hpp"
 #include "mdbx_containers/KeyMultiValueTable.hpp"

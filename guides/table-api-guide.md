@@ -92,6 +92,20 @@ All public table classes follow the same broad shape:
 - Keep C++11 support. Guard `std::optional`, `std::filesystem`, structured
   bindings, and other C++17 features.
 
+### Composite Keys
+
+`CompositeKey<P1, ..., PN>` is a typed key for an MDBX table whose ordering
+depends on two to five components. It supports integral types up to 64 bits,
+`bool`, `float`, `double`, `std::string`, and `std::vector<uint8_t>`.
+
+- Its serialized form preserves lexicographic component ordering under MDBX's
+  normal bytewise comparator, so it is suitable for prefix-oriented key layouts
+  and table range reads.
+- Strings and byte vectors are binary-safe; embedded zero bytes are preserved.
+- `float` and `double` reject NaN keys, matching the ordinary table-key rule.
+- Do not use an arbitrary application's `to_bytes()` format as a component
+  unless a separate order-preserving component codec is defined.
+
 ## Bulk Semantics
 
 Bulk methods are similar across tables, but they do not all mean the same thing:

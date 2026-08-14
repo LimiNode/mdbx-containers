@@ -463,6 +463,7 @@ if(MDBXC_BUILD_TESTS)
     set(MDBXC_STANDALONE_PUBLIC_HEADERS
         mdbx_containers/common.hpp
         mdbx_containers/common/backup.hpp
+        mdbx_containers/CompositeKey.hpp
         mdbx_containers/AnyValueTable.hpp
         mdbx_containers/HashedKeyValueStore.hpp
         mdbx_containers/KeyMultiValueTable.hpp

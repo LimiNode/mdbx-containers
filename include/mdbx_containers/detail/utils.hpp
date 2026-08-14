@@ -137,8 +137,6 @@ namespace mdbxc {
         return out;
     }
     
-    // --- Traits --- 
-
     /// \brief Trait to check if a type provides a `to_bytes()` member.
     /// \tparam T Type under inspection.
     template <typename T>
@@ -177,6 +175,8 @@ namespace mdbxc {
     public:
         static const bool value = decltype(check<T>(0))::value;
     };
+
+    // --- Traits ---
 
     template <typename T>
     struct is_string_sequence_container {
@@ -425,9 +425,21 @@ namespace mdbxc {
         !is_key_bitset<T>::value &&
         !is_key_integral<T>::value &&
         !std::is_same<T, float>::value &&
-        !std::is_same<T, double>::value, size_t>::type
+        !std::is_same<T, double>::value &&
+        !(has_to_bytes<T>::value && has_from_bytes<T>::value), size_t>::type
     get_key_size(const T&) {
         return sizeof(T);
+    }
+
+    /// \brief Returns the serialized size of a custom byte-serializable key.
+    /// \tparam T Key type providing `to_bytes()`.
+    /// \param key Key value.
+    /// \return Number of serialized bytes.
+    template<typename T>
+    typename std::enable_if<
+        has_to_bytes<T>::value && has_from_bytes<T>::value, size_t>::type
+    get_key_size(const T& key) {
+        return key.to_bytes().size();
     }
     
     /// \class SerializeScratch
@@ -563,6 +575,20 @@ namespace mdbxc {
         val.iov_base = nullptr;
         val.iov_len  = 0;
         return val;
+    }
+
+    /// \brief Serializes a key using its canonical `to_bytes()` representation.
+    /// \tparam T Key type providing `to_bytes()`.
+    /// \param key Key to serialize.
+    /// \param sc Scratch storage owning the serialized bytes.
+    /// \return MDBX value view over the scratch storage.
+    template <bool SafeIntegerKey = true, typename T>
+    typename std::enable_if<
+        has_to_bytes<T>::value && has_from_bytes<T>::value, MDBX_val>::type
+    serialize_key(const T& key, SerializeScratch& sc) {
+        (void)SafeIntegerKey;
+        sc.bytes = key.to_bytes();
+        return sc.view_bytes();
     }
 
     /// \brief Serializes a key of type std::string.
@@ -1080,7 +1106,8 @@ namespace mdbxc {
     /// \brief Deserializes a value using its `from_bytes()` method.
     /// \tparam T Type providing `from_bytes`.
     template<typename T>
-    typename std::enable_if<has_from_bytes<T>::value, T>::type
+    typename std::enable_if<
+        has_to_bytes<T>::value && has_from_bytes<T>::value, T>::type
     deserialize_value(const MDBX_val& val) {
         return T::from_bytes(val.iov_base, val.iov_len);
     }
@@ -1151,6 +1178,16 @@ namespace mdbxc {
     typename std::enable_if<std::is_same<T, std::string>::value, T>::type
     deserialize_key(const MDBX_val& val) {
         return deserialize_value<T>(val);
+    }
+
+    /// \brief Deserializes a key using its canonical `from_bytes()` representation.
+    /// \tparam T Key type providing static `from_bytes(const void*, size_t)`.
+    /// \param val Serialized key bytes.
+    /// \return Deserialized key.
+    template<typename T>
+    typename std::enable_if<has_from_bytes<T>::value, T>::type
+    deserialize_key(const MDBX_val& val) {
+        return T::from_bytes(val.iov_base, val.iov_len);
     }
 
     template<typename T>
@@ -1305,7 +1342,8 @@ namespace mdbxc {
         !std::is_same<T, std::string>::value &&
         !is_key_integral<T>::value &&
         !std::is_same<T, float>::value &&
-        !std::is_same<T, double>::value, T>::type
+        !std::is_same<T, double>::value &&
+        !(has_to_bytes<T>::value && has_from_bytes<T>::value), T>::type
     deserialize_key(const MDBX_val& val) {
         return deserialize_value<T>(val);
     }
