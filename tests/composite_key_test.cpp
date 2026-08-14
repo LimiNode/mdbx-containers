@@ -16,9 +16,7 @@ struct TrivialCustomId {
     std::uint64_t value;
 
     std::vector<std::uint8_t> to_bytes() const {
-        std::vector<std::uint8_t> bytes(sizeof(value));
-        std::memcpy(bytes.data(), &value, sizeof(value));
-        return bytes;
+        return std::vector<std::uint8_t>{0xdeu, 0xadu};
     }
 
     static TrivialCustomId from_bytes(const void* data, std::size_t size) {
@@ -96,6 +94,7 @@ void assert_trivial_custom_key_compatibility() {
     mdbxc::SerializeScratch scratch;
     const MDBX_val serialized = mdbxc::serialize_key(id, scratch);
     MDBXC_TEST_ASSERT(serialized.iov_len == sizeof(id));
+    MDBXC_TEST_ASSERT(std::memcmp(serialized.iov_base, &id, sizeof(id)) == 0);
 
     const TrivialCustomId restored =
         mdbxc::deserialize_key<TrivialCustomId>(serialized);
@@ -107,6 +106,50 @@ void assert_trivial_custom_key_compatibility() {
     const TrivialFromOnlyId from_only_restored =
         mdbxc::deserialize_key<TrivialFromOnlyId>(from_only_serialized);
     MDBXC_TEST_ASSERT(from_only_restored.value == from_only_id.value);
+}
+
+void assert_integral_component_range_validation() {
+    const std::uint8_t signed_short_out_of_range[] = {
+        0xffu, 0xffu, 0xffu, 0xffu, 0u, 0u, 0u, 0u
+    };
+    assert_throws_runtime_error([&signed_short_out_of_range]() {
+        (void)mdbxc::CompositeKey<short, bool>::from_bytes(
+            signed_short_out_of_range, sizeof(signed_short_out_of_range));
+    });
+
+    const std::uint8_t unsigned_short_out_of_range[] = {
+        0u, 1u, 0u, 0u, 0u, 0u, 0u, 0u
+    };
+    assert_throws_runtime_error([&unsigned_short_out_of_range]() {
+        (void)mdbxc::CompositeKey<unsigned short, bool>::from_bytes(
+            unsigned_short_out_of_range, sizeof(unsigned_short_out_of_range));
+    });
+
+    const std::uint8_t signed_char_out_of_range[] = {
+        0xffu, 0xffu, 0xffu, 0xffu, 0u, 0u, 0u, 0u
+    };
+    assert_throws_runtime_error([&signed_char_out_of_range]() {
+        (void)mdbxc::CompositeKey<signed char, bool>::from_bytes(
+            signed_char_out_of_range, sizeof(signed_char_out_of_range));
+    });
+
+    const std::uint8_t long_value_beyond_int32[] = {
+        0x80u, 0u, 1u, 0u, 0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u
+    };
+    typedef mdbxc::CompositeKey<long, bool> LongKeyT;
+    if (sizeof(long) == sizeof(std::int32_t)) {
+        assert_throws_runtime_error([&long_value_beyond_int32]() {
+            (void)LongKeyT::from_bytes(
+                long_value_beyond_int32, sizeof(long_value_beyond_int32));
+        });
+    } else {
+        const LongKeyT decoded = LongKeyT::from_bytes(
+            long_value_beyond_int32, sizeof(long_value_beyond_int32));
+        MDBXC_TEST_ASSERT(decoded.to_bytes() == std::vector<std::uint8_t>(
+            long_value_beyond_int32,
+            long_value_beyond_int32 + sizeof(long_value_beyond_int32)));
+    }
 }
 
 } // namespace
@@ -193,6 +236,7 @@ int main() {
             0u, 0u, 0u, 0u
         });
     assert_trivial_custom_key_compatibility();
+    assert_integral_component_range_validation();
 
     std::vector<std::uint8_t> truncated(bytes.begin(), bytes.end() - 1u);
     assert_throws_runtime_error([&truncated]() {

@@ -8,6 +8,7 @@
 #include "common.hpp"
 
 #include <climits>
+#include <limits>
 #include <tuple>
 
 namespace mdbxc {
@@ -47,6 +48,30 @@ namespace detail {
             ++current;
         }
         return value;
+    }
+
+    template<typename T>
+    inline T composite_key_checked_integral_cast(std::int64_t value) {
+        const std::int64_t minimum = static_cast<std::int64_t>(
+            (std::numeric_limits<T>::min)());
+        const std::int64_t maximum = static_cast<std::int64_t>(
+            (std::numeric_limits<T>::max)());
+        if (value < minimum || value > maximum) {
+            throw std::runtime_error(
+                "CompositeKey::from_bytes: integral component out of range");
+        }
+        return static_cast<T>(value);
+    }
+
+    template<typename T>
+    inline T composite_key_checked_integral_cast(std::uint64_t value) {
+        const std::uint64_t maximum = static_cast<std::uint64_t>(
+            (std::numeric_limits<T>::max)());
+        if (value > maximum) {
+            throw std::runtime_error(
+                "CompositeKey::from_bytes: integral component out of range");
+        }
+        return static_cast<T>(value);
     }
 
     inline void composite_key_append_terminated_bytes(
@@ -144,15 +169,19 @@ namespace detail {
                 const std::uint32_t raw =
                     composite_key_read_big_endian<std::uint32_t>(current, end);
                 return is_signed_mdbx_integer_key<T>::value
-                    ? static_cast<T>(signed_int32_from_sortable_key(raw))
-                    : static_cast<T>(raw);
+                    ? composite_key_checked_integral_cast<T>(
+                        static_cast<std::int64_t>(
+                            signed_int32_from_sortable_key(raw)))
+                    : composite_key_checked_integral_cast<T>(
+                        static_cast<std::uint64_t>(raw));
             }
 
             const std::uint64_t raw =
                 composite_key_read_big_endian<std::uint64_t>(current, end);
             return is_signed_mdbx_integer_key<T>::value
-                ? static_cast<T>(signed_int64_from_sortable_key(raw))
-                : static_cast<T>(raw);
+                ? composite_key_checked_integral_cast<T>(
+                    signed_int64_from_sortable_key(raw))
+                : composite_key_checked_integral_cast<T>(raw);
         }
     };
 
