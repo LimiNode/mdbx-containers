@@ -101,11 +101,12 @@ internal seam, not an application include point.
 
 ## Header Ownership Rule
 
-An internal leaf includes standard-library, third-party, and same-domain
-implementation dependencies only. Its domain aggregate supplies cross-domain
-prerequisites in a visible order. This preserves one-way dependency flow and
-keeps supported aggregate headers self-sufficient without making every leaf a
-standalone API.
+An internal leaf may include standard-library, third-party, and local
+same-domain implementation dependencies that it owns directly. It may also
+rely on prerequisites deliberately established by its owning domain aggregate
+or an explicit integration seam when a direct project include would introduce
+an upward traversal or dependency back edge. Standalone compilation is
+required only for supported public entry points, not for internal leaves.
 
 ## Find the Detailed Contract
 

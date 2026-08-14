@@ -105,11 +105,13 @@ internal seam, а не точкой include для приложения.
 
 ## Правило владения include
 
-Internal leaf подключает только standard-library, third-party и
-same-domain implementation dependencies. Его domain aggregate в явном порядке
-предоставляет cross-domain prerequisites. Это сохраняет однонаправленный поток
-зависимостей и делает поддерживаемые aggregate headers self-sufficient, не
-превращая каждый leaf в standalone API.
+Internal leaf может непосредственно подключать standard-library, third-party и
+локальные same-domain implementation dependencies, которыми он владеет
+напрямую. Он также может опираться на prerequisites, намеренно установленные
+владеющим domain aggregate или явным integration seam, когда прямой project
+include потребовал бы traversal вверх или создал обратную зависимость.
+Standalone-компиляция требуется только от поддерживаемых public entry points,
+а не от internal leaves.
 
 ## Где искать подробный контракт
 
