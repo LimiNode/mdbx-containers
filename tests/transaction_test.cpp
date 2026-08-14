@@ -88,6 +88,14 @@ int main() {
     }
 
     {
+        const int key = 99;
+        names.begin(mdbxc::TransactionMode::WRITABLE);
+        names.insert_or_assign(key, "committed");
+        names.commit();
+        MDBXC_TEST_ASSERT(names.at(key) == "committed");
+    }
+
+    {
         const int key = 100;
         {
             auto old_txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
@@ -295,6 +303,75 @@ int main() {
         MDBXC_TEST_ASSERT(shutdown_conn->is_connected());
         shutdown_conn->shutdown();
         MDBXC_TEST_ASSERT(!shutdown_conn->is_connected());
+    }
+
+    {
+        mdbxc::Config writer_cfg;
+        writer_cfg.pathname = "data/transaction_writer_wait_test.mdbx";
+        writer_cfg.max_dbs = 2;
+        writer_cfg.no_subdir = true;
+        writer_cfg.relative_to_exe = false;
+
+        auto writer_conn = mdbxc::Connection::create(writer_cfg);
+        std::mutex writer_mutex;
+        std::condition_variable writer_cv;
+        bool first_writer_started = false;
+        bool second_writer_attempting = false;
+        bool release_first_writer = false;
+
+        std::thread first_writer(
+            [writer_conn, &writer_mutex, &writer_cv,
+             &first_writer_started, &release_first_writer]() {
+                writer_conn->begin(mdbxc::TransactionMode::WRITABLE);
+                {
+                    std::lock_guard<std::mutex> lock(writer_mutex);
+                    first_writer_started = true;
+                }
+                writer_cv.notify_all();
+                {
+                    std::unique_lock<std::mutex> lock(writer_mutex);
+                    writer_cv.wait(lock, [&release_first_writer]() {
+                        return release_first_writer;
+                    });
+                }
+                writer_conn->commit();
+            });
+
+        {
+            std::unique_lock<std::mutex> lock(writer_mutex);
+            writer_cv.wait(lock, [&first_writer_started]() {
+                return first_writer_started;
+            });
+        }
+
+        std::thread second_writer(
+            [writer_conn, &writer_mutex, &writer_cv,
+             &second_writer_attempting]() {
+                {
+                    std::lock_guard<std::mutex> lock(writer_mutex);
+                    second_writer_attempting = true;
+                }
+                writer_cv.notify_all();
+                writer_conn->begin(mdbxc::TransactionMode::WRITABLE);
+                writer_conn->commit();
+            });
+
+        {
+            std::unique_lock<std::mutex> lock(writer_mutex);
+            writer_cv.wait(lock, [&second_writer_attempting]() {
+                return second_writer_attempting;
+            });
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        {
+            std::lock_guard<std::mutex> lock(writer_mutex);
+            release_first_writer = true;
+        }
+        writer_cv.notify_all();
+
+        first_writer.join();
+        second_writer.join();
+        writer_conn->disconnect();
     }
 
     std::cout << "Transaction test passed.\n";

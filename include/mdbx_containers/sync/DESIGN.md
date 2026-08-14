@@ -107,7 +107,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `SequenceTable` | Supported | Captures set/append/delete/clear against stable `uint64_t` record ids. `append()` remains a local single-writer helper; external synchronization is still required for concurrent appenders. |
 | `VectorStore` | Raw plus limited logical adapter | Raw replication covers its `SequenceTable` and `KeyValueTable` member writes. The explicit schema-v1 logical adapter captures and applies add, erase, and clear over the ids, embeddings, text, and metadata DBIs with explicit record ids. Erase retains the ids marker as the persistent allocation high-water; clear resets all four DBIs. Both paths require one authoritative or application-serialized writer per collection; the logical adapter is not a multi-writer conflict resolver or automatic transport path. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
-| `KeyMultiValueTable` | Limited logical adapter | Raw v0.1 capture remains unsupported. Schema v1 captures unordered insert, version-neutral batch `append()`, key erase, all-matching-value erase, and clear; schema v2 adds exact-one erase and typed `reconcile()`; schema v3 adds bounded typed `erase_range()` expanded into exact `EraseKey` changes. All destructive modes require one-writer or causally serialized updates. |
+| `KeyMultiValueTable` | Schema-v3 logical adapter plus automatic capture | Raw v0.1 capture remains unsupported. `SyncEngine::bind_key_multi_value_logical_capture()` durably binds one DBI to a receiver-neutral logical dataset and makes ordinary supported writes publish schema-v3 frames atomically into `LogicalJournalStore`. `erase_range()` remains fail-closed because its normal API is unbounded. All destructive modes require one-writer or causally serialized updates. |
 | `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids, and single-origin `replace_with()` expands replacement state into exact changes. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
@@ -174,7 +174,8 @@ C++11 builds fall back to an exclusive connection mutex model.
 This section documents the logical replication contract for
 `KeyMultiValueTable`. Raw v0.1 capture remains unsupported:
 `KeyMultiValueTable` emits no raw `ChangeOp` records. Its explicit typed
-capture session emits only the operations defined by this contract.
+capture session and schema-v3 automatic binding emit only the operations
+defined by this contract.
 
 `KeyMultiValueTable` cannot safely reuse the v0.1 raw DBI put/delete model as
 an undocumented implementation detail. The table stores one MDBX DUPSORT record
@@ -248,9 +249,11 @@ Reconciliation matches canonical logical pairs by multiplicity, emits one
 `EraseOneValue` per surplus occurrence, then emits missing `InsertOne` changes
 in desired-vector order. Schema v3 additionally supports bounded typed
 `erase_range()`, expanded into `EraseKey` changes before local mutation. These
-typed session methods are version-neutral where stated; direct table calls and
-raw capture remain local-only. This is not partial raw capture: callers opt
-into the typed session and only its documented methods publish logical changes.
+typed session methods are version-neutral where stated. Raw capture remains
+local-only; direct table calls publish logical changes only after the explicit
+schema-v3 automatic binding described below. This is not partial raw capture:
+callers opt into the typed session or durable automatic binding, and only their
+documented methods publish logical changes.
 
 Schema v3 typed range erasure is an inclusive logical-key interval, never a raw
 MDBX cursor key. Capture scans the complete local range before mutation under a
@@ -262,6 +265,32 @@ replays those exact key erasures through its public table API. The operation is
 still limited to one writer or causally serialized destructive updates; it
 provides no multi-writer convergence. `append()` needs no schema-v3 opcode:
 typed capture expands it into `InsertOne` changes in input order.
+
+Schema-v3 also provides receiver-neutral automatic capture for an explicitly
+bound `KeyMultiValueTable` DBI. Bind it through
+`SyncEngine::bind_key_multi_value_logical_capture(adapter, destination, record)`.
+The binding is durable in `_mdbxc_logical_dbi_bindings`; it records a logical
+dataset `destination`, never a receiver route. Supported normal table writes
+accumulate typed changes in their `Connection` transaction, and pre-commit
+appends one frame to `LogicalJournalStore` atomically with the physical table
+mutation. Routing later fans that journal out with
+`materialize_logical_journal(destination, receiver)`.
+
+The binding fails closed. A process that opens a bound DBI without installing
+the matching runtime capture cannot mutate it through the wrapper, and a
+caller-created writable `MDBX_txn*` is rejected before physical mutation.
+The public raw `SyncCaptureSuppressionScope` cannot bypass this contract: a
+bound-table write while it is active fails and rolls back. Only the private
+`SyncEngine` logical-apply scope suppresses automatic capture for an incoming
+frame. Direct public adapter apply on a bound DBI fails closed. Legacy typed
+capture sessions are rejected for a bound DBI, so there is
+no second caller-selected outbox route. Runtime capture registrations are
+cleared after a successful `Connection::disconnect()` and rechecked against the
+current environment's durable binding before each use. The normal `erase_range()`
+API remains unavailable for a bound DBI
+because it has no caller-supplied bound; `insert`, `append`, `erase(key)`,
+`erase(key,value)`, `erase_one`, `clear`, and `reconcile` map to the existing
+schema-v3 operations.
 
 Implementation phases:
 
@@ -971,9 +1000,9 @@ anchors, see the
 
 - `HashedKeyValueStore` — internal hash index layout complicates the wire
   format; deferred until an explicit identity-mapping scheme lands.
-- `KeyMultiValueTable` — raw capture, direct table bulk/range calls, and
+- `KeyMultiValueTable` — raw capture, unbounded direct `erase_range()`, and
   general multi-writer destructive convergence remain deferred beyond the
-  typed schema-v1/v2/v3 model described above.
+  schema-v3 automatic capture model described above.
 - `KeyOrderedMultiValueTable` — raw capture, baseline import, multi-origin
   history and tombstone compaction remain deferred beyond the implemented
   single-origin v2 capture contract. That contract includes `replace_with()`,

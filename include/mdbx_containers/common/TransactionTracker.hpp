@@ -38,7 +38,10 @@ namespace mdbxc {
         /// \param txn Pointer to the MDBX transaction.
         void bind_txn(MDBX_txn* txn);
 
-        /// \brief Registers a newly created MDBX transaction handle.
+        /// \brief Reserves tracking for an opening or newly created transaction handle.
+        /// \details A reservation made before \c mdbx_txn_begin() keeps
+        /// coordinated shutdown from closing the environment while the native
+        /// begin call waits for a writer slot.
         void register_txn_handle();
 
         /// \brief Unregisters a closed MDBX transaction handle.

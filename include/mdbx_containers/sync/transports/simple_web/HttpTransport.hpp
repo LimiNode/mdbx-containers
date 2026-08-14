@@ -194,10 +194,11 @@ namespace simple_web {
 
             const std::uint64_t call_generation =
                 m_cancel_generation.load(std::memory_order_acquire);
-            Client client(detail::endpoint(m_config.host, m_config.port));
-            client.config.timeout =
+            std::shared_ptr<Client> client(
+                new Client(detail::endpoint(m_config.host, m_config.port)));
+            client->config.timeout =
                 static_cast<long>(m_config.timeout.count());
-            client.config.timeout_connect =
+            client->config.timeout_connect =
                 static_cast<long>(m_config.timeout.count());
             ActiveClientGuard active(*this, client);
 
@@ -222,10 +223,10 @@ namespace simple_web {
                 }
 
                 const std::shared_ptr<Client::Response> received =
-                    client.request("POST",
-                                   target,
-                                   detail::bytes_to_string(body),
-                                   headers);
+                    client->request("POST",
+                                    target,
+                                    detail::bytes_to_string(body),
+                                    headers);
 
                 HttpSyncResponse out;
                 out.status_code =
@@ -266,9 +267,13 @@ namespace simple_web {
             m_cancel_generation.fetch_add(1, std::memory_order_acq_rel);
             m_cancel_count.fetch_add(1, std::memory_order_acq_rel);
 
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_active_client != nullptr) {
-                m_active_client->stop();
+            std::shared_ptr<Client> active_client;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                active_client = m_active_client;
+            }
+            if (active_client) {
+                active_client->stop();
             }
         }
 
@@ -281,8 +286,9 @@ namespace simple_web {
 
         class ActiveClientGuard {
         public:
-            ActiveClientGuard(HttpSyncClient& owner, Client& client)
-                : m_owner(owner), m_client(&client) {
+            ActiveClientGuard(HttpSyncClient& owner,
+                              const std::shared_ptr<Client>& client)
+                : m_owner(owner), m_client(client) {
                 m_owner.set_active_client(m_client);
             }
 
@@ -295,7 +301,7 @@ namespace simple_web {
 
         private:
             HttpSyncClient& m_owner;
-            Client* m_client;
+            std::shared_ptr<Client> m_client;
         };
 
         static HttpSyncResponse make_cancelled_response(
@@ -318,22 +324,22 @@ namespace simple_web {
             return out;
         }
 
-        void set_active_client(Client* client) {
+        void set_active_client(const std::shared_ptr<Client>& client) {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_active_client = client;
         }
 
-        void clear_active_client(Client* client) {
+        void clear_active_client(const std::shared_ptr<Client>& client) {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_active_client == client) {
-                m_active_client = nullptr;
+                m_active_client.reset();
             }
         }
 
         HttpSyncClientConfig m_config;
         std::atomic<std::uint64_t> m_cancel_generation;
         mutable std::mutex m_mutex;
-        Client* m_active_client;
+        std::shared_ptr<Client> m_active_client;
         std::atomic<std::size_t> m_cancel_count;
     };
 

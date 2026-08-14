@@ -18,6 +18,11 @@
 #endif
 #endif
 
+#if MDBXC_SYNC_ENABLED
+#include <mdbx_containers/sync/capture/ILogicalDbiCapture.hpp>
+#include <mdbx_containers/sync/logical/stores/LogicalDbiBindingStore.hpp>
+#endif
+
 namespace mdbxc {
 
     inline Connection::Connection(const Config& config) {
@@ -25,9 +30,18 @@ namespace mdbxc {
     }
 
     inline Connection::~Connection() {
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        assert(!has_txn_handles() && "Destroying Connection with live transaction handles");
-        cleanup(false);
+#       if MDBXC_SYNC_ENABLED
+        LogicalDbiCaptureMap retired_captures;
+#       endif
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            assert(!has_txn_handles() &&
+                   "Destroying Connection with live transaction handles");
+            cleanup(false);
+#           if MDBXC_SYNC_ENABLED
+            retired_captures.swap(m_logical_dbi_captures);
+#           endif
+        }
     }
 
     inline std::shared_ptr<Connection> Connection::create(const Config& config) {
@@ -66,8 +80,16 @@ namespace mdbxc {
     }
 
     inline void Connection::disconnect() {
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        cleanup();
+#       if MDBXC_SYNC_ENABLED
+        LogicalDbiCaptureMap retired_captures;
+#       endif
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            cleanup();
+#           if MDBXC_SYNC_ENABLED
+            retired_captures.swap(m_logical_dbi_captures);
+#           endif
+        }
     }
 
     inline void Connection::shutdown() {
@@ -89,70 +111,120 @@ namespace mdbxc {
     }
 
     inline Transaction Connection::transaction(TransactionMode mode) {
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        if (m_shutdown_requested) {
-            throw std::logic_error("Connection shutdown is in progress.");
+        MDBX_env* env = nullptr;
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            if (m_shutdown_requested) {
+                throw std::logic_error("Connection shutdown is in progress.");
+            }
+            if (!m_env) {
+                throw std::logic_error("Connection is not connected.");
+            }
+            if (current_thread_has_txn()) {
+                throw std::logic_error(
+                    "A transaction is already active on this connection's thread. "
+                    "Reuse it through table operations or pass the active transaction explicitly."
+                );
+            }
+            register_txn_handle();
+            env = m_env;
         }
-        if (!m_env) {
-            throw std::logic_error("Connection is not connected.");
-        }
-        if (current_thread_has_txn()) {
-            throw std::logic_error(
-                "A transaction is already active on this connection's thread. "
-                "Reuse it through table operations or pass the active transaction explicitly."
-            );
-        }
-        return Transaction(static_cast<TransactionTracker*>(this), m_env, mode);
+        return Transaction(static_cast<TransactionTracker*>(this), env, mode,
+                           true);
     }
 
     inline void Connection::begin(TransactionMode mode) {
+        const std::thread::id tid = std::this_thread::get_id();
+        MDBX_env* env = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_mdbx_mutex);
+            if (m_shutdown_requested) {
+                throw std::logic_error("Connection shutdown is in progress.");
+            }
+            if (!m_env) {
+                throw std::logic_error("Connection is not connected.");
+            }
+            if (m_transactions.find(tid) != m_transactions.end()) {
+                throw std::logic_error(
+                    "Transaction already started for this thread.");
+            }
+            if (current_thread_has_txn()) {
+                throw std::logic_error(
+                    "A transaction is already active on this connection's thread. "
+                    "Commit or roll it back before starting a manual transaction."
+                );
+            }
+            register_txn_handle();
+            env = m_env;
+        }
+        std::shared_ptr<Transaction> txn(new Transaction(
+            static_cast<TransactionTracker*>(this), env, mode, true));
         std::lock_guard<std::mutex> lock(m_mdbx_mutex);
-        if (m_shutdown_requested) {
-            throw std::logic_error("Connection shutdown is in progress.");
-        }
-        if (!m_env) {
-            throw std::logic_error("Connection is not connected.");
-        }
-        auto tid = std::this_thread::get_id();
-        auto it = m_transactions.find(tid);
-        if (it != m_transactions.end()) {
-            throw std::logic_error("Transaction already started for this thread.");
-        }
-        if (current_thread_has_txn()) {
+        const std::pair<std::unordered_map<
+                            std::thread::id,
+                            std::shared_ptr<Transaction>>::iterator,
+                        bool> inserted =
+            m_transactions.insert(std::make_pair(tid, txn));
+        if (!inserted.second) {
             throw std::logic_error(
-                "A transaction is already active on this connection's thread. "
-                "Commit or roll it back before starting a manual transaction."
-            );
+                "Transaction already started for this thread.");
         }
-        auto txn = std::make_shared<Transaction>(static_cast<TransactionTracker*>(this), m_env, mode);
-        m_transactions[tid] = txn;
     }
 
     inline void Connection::commit() {
-        std::lock_guard<std::mutex> lock(m_mdbx_mutex);
-        auto tid = std::this_thread::get_id();
-        auto it = m_transactions.find(tid);
-        if (it == m_transactions.end()) {
-            throw std::logic_error("No transaction for this thread.");
+        const std::thread::id tid = std::this_thread::get_id();
+        std::shared_ptr<Transaction> txn;
+        {
+            std::lock_guard<std::mutex> lock(m_mdbx_mutex);
+            std::unordered_map<std::thread::id,
+                               std::shared_ptr<Transaction>>::iterator it =
+                m_transactions.find(tid);
+            if (it == m_transactions.end()) {
+                throw std::logic_error("No transaction for this thread.");
+            }
+            txn = it->second;
         }
         try {
-            it->second->commit();
+            txn->commit();
         } catch (...) {
-            m_transactions.erase(it);
+            erase_manual_transaction_if_current(tid, txn);
             throw;
         }
-        m_transactions.erase(it);
+        erase_manual_transaction_if_current(tid, txn);
     }
 
     inline void Connection::rollback() {
-        std::lock_guard<std::mutex> lock(m_mdbx_mutex);
-        auto tid = std::this_thread::get_id();
-        auto it = m_transactions.find(tid);
-        if (it == m_transactions.end()) {
-            throw std::logic_error("No transaction for this thread.");
+        const std::thread::id tid = std::this_thread::get_id();
+        std::shared_ptr<Transaction> txn;
+        {
+            std::lock_guard<std::mutex> lock(m_mdbx_mutex);
+            std::unordered_map<std::thread::id,
+                               std::shared_ptr<Transaction>>::iterator it =
+                m_transactions.find(tid);
+            if (it == m_transactions.end()) {
+                throw std::logic_error("No transaction for this thread.");
+            }
+            txn = it->second;
         }
-        it->second->rollback();
-        m_transactions.erase(it);
+        try {
+            txn->rollback();
+        } catch (...) {
+            erase_manual_transaction_if_current(tid, txn);
+            throw;
+        }
+        erase_manual_transaction_if_current(tid, txn);
+    }
+
+    inline void Connection::erase_manual_transaction_if_current(
+            const std::thread::id& tid,
+            const std::shared_ptr<Transaction>& txn) {
+        std::lock_guard<std::mutex> lock(m_mdbx_mutex);
+        std::unordered_map<std::thread::id,
+                           std::shared_ptr<Transaction>>::iterator it =
+            m_transactions.find(tid);
+        if (it != m_transactions.end() && it->second == txn) {
+            m_transactions.erase(it);
+        }
     }
 
     inline std::shared_ptr<Transaction> Connection::current_txn() const {
@@ -193,8 +265,14 @@ namespace mdbxc {
             sync::ChangeOpType op_type) {
         try {
             (void)op_type;
-            if (!is_sync_versioned_dbi(txn, dbi_name)) {
+            if (!is_sync_versioned_dbi(txn, dbi_name) &&
+                !is_sync_logical_dbi(txn, dbi_name)) {
                 return;
+            }
+            if (is_sync_logical_dbi(txn, dbi_name)) {
+                throw std::logic_error(
+                    "registered logical DBI must be mutated through "
+                    "KeyMultiValueTable logical capture");
             }
             throw std::logic_error(
                 "registered source-version-wins DBI must be mutated through "
@@ -216,6 +294,20 @@ namespace mdbxc {
     ~SyncCaptureSuppressionScope() noexcept {
         if (m_connection != nullptr) {
             m_connection->end_sync_capture_suppression(m_txn);
+        }
+    }
+
+    inline Connection::LogicalDbiApplySuppressionScope::
+    LogicalDbiApplySuppressionScope(Connection& connection, MDBX_txn* txn)
+        : m_connection(&connection),
+          m_txn(txn) {
+        m_connection->begin_logical_dbi_apply_suppression(m_txn);
+    }
+
+    inline Connection::LogicalDbiApplySuppressionScope::
+    ~LogicalDbiApplySuppressionScope() noexcept {
+        if (m_connection != nullptr) {
+            m_connection->end_logical_dbi_apply_suppression(m_txn);
         }
     }
 
@@ -377,6 +469,46 @@ namespace mdbxc {
         return false;
     }
 
+    inline void Connection::begin_logical_dbi_apply_suppression(
+            MDBX_txn* txn) {
+        if (txn == nullptr) {
+            throw std::invalid_argument(
+                "Connection logical DBI apply suppression transaction cannot be null");
+        }
+        checked_txn_env(txn, m_env,
+                        "Connection logical DBI apply suppression");
+        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        m_logical_dbi_apply_suppressed_txns.push_back(txn);
+    }
+
+    inline void Connection::end_logical_dbi_apply_suppression(
+            MDBX_txn* txn) noexcept {
+        if (txn == nullptr) return;
+        try {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            for (std::vector<MDBX_txn*>::iterator it =
+                     m_logical_dbi_apply_suppressed_txns.begin();
+                 it != m_logical_dbi_apply_suppressed_txns.end(); ++it) {
+                if (*it == txn) {
+                    m_logical_dbi_apply_suppressed_txns.erase(it);
+                    return;
+                }
+            }
+        } catch (...) {
+        }
+    }
+
+    inline bool Connection::logical_dbi_apply_suppressed(
+            MDBX_txn* txn) const {
+        if (txn == nullptr) return false;
+        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        for (std::size_t i = 0u;
+             i < m_logical_dbi_apply_suppressed_txns.size(); ++i) {
+            if (m_logical_dbi_apply_suppressed_txns[i] == txn) return true;
+        }
+        return false;
+    }
+
     inline void Connection::ensure_sync_capture_txn_supported(
             MDBX_txn* txn,
             const char* context) const {
@@ -414,13 +546,32 @@ namespace mdbxc {
              static_cast<int>(MDBX_TXN_RDONLY)) != 0) {
             return;
         }
-        if (!is_sync_versioned_dbi(txn, dbi_name)) {
+        if (!is_sync_versioned_dbi(txn, dbi_name) &&
+            !is_sync_logical_dbi(txn, dbi_name)) {
             return;
+        }
+        if (is_sync_logical_dbi(txn, dbi_name)) {
+            throw std::logic_error(
+                std::string(context) +
+                " cannot use caller-created raw writable MDBX_txn* with a "
+                "registered logical DBI; use Connection::transaction() and "
+                "KeyMultiValueTable");
         }
         throw std::logic_error(
             std::string(context) +
             " cannot use caller-created raw writable MDBX_txn* with a "
             "registered source-version-wins DBI; use VersionedKeyValueTable");
+    }
+
+    inline void Connection::ensure_logical_dbi_capture_session_supported(
+            MDBX_txn* txn, const std::string& dbi_name) const {
+        checked_txn_env(txn, m_env,
+                        "Connection logical capture session");
+        if (is_sync_logical_dbi(txn, dbi_name)) {
+            throw std::logic_error(
+                "registered automatic logical DBI cannot use a legacy typed "
+                "capture session");
+        }
     }
 
     inline bool Connection::is_sync_versioned_dbi(
@@ -468,6 +619,195 @@ namespace mdbxc {
         check_mdbx(get_rc,
                    "Connection failed to query versioned DBI registry");
         return true;
+    }
+
+    inline bool Connection::is_sync_logical_dbi(
+            MDBX_txn* txn,
+            const std::string& dbi_name) const {
+        checked_txn_env(txn, m_env, "Connection::is_sync_logical_dbi");
+        static const char binding_registry_name[] =
+            "_mdbxc_logical_dbi_bindings";
+        MDBX_dbi main_dbi = 0;
+        check_mdbx(mdbx_dbi_open(txn, nullptr, static_cast<MDBX_db_flags_t>(0),
+                                 &main_dbi),
+                   "Connection failed to open main DBI");
+        MDBX_val registry_name = {
+            const_cast<char*>(binding_registry_name),
+            sizeof(binding_registry_name) - 1u
+        };
+        MDBX_val registry_value;
+        const int registry_lookup_rc = mdbx_get(
+            txn, main_dbi, &registry_name, &registry_value);
+        if (registry_lookup_rc == MDBX_NOTFOUND) return false;
+        check_mdbx(registry_lookup_rc,
+                   "Connection failed to find logical DBI binding registry");
+        MDBX_dbi bindings_dbi = 0;
+        const int open_rc = mdbx_dbi_open(
+            txn, binding_registry_name, static_cast<MDBX_db_flags_t>(0),
+            &bindings_dbi);
+        if (open_rc == MDBX_NOTFOUND) return false;
+        check_mdbx(open_rc,
+                   "Connection failed to open logical DBI binding registry");
+        MDBX_val key = {
+            dbi_name.empty() ? nullptr : const_cast<char*>(dbi_name.data()),
+            dbi_name.size()
+        };
+        MDBX_val value;
+        const int get_rc = mdbx_get(txn, bindings_dbi, &key, &value);
+        if (get_rc == MDBX_NOTFOUND) return false;
+        check_mdbx(get_rc,
+                   "Connection failed to query logical DBI binding registry");
+        if (value.iov_len < 26u) {
+            throw std::runtime_error(
+                "Connection found invalid logical DBI binding");
+        }
+        return true;
+    }
+
+    inline void Connection::attach_logical_dbi_capture(
+            const std::shared_ptr<sync::ILogicalDbiCapture>& capture) {
+        if (!capture) {
+            throw std::invalid_argument("Connection logical DBI capture is null");
+        }
+        const std::string capture_name = capture->dbi_name();
+        const sync::LogicalSchemaRef capture_schema = capture->schema_ref();
+        const sync::DbId capture_destination = capture->destination();
+        if (capture_name.empty()) {
+            throw std::invalid_argument("Connection logical DBI capture name is empty");
+        }
+        std::shared_ptr<sync::ILogicalDbiCapture> existing;
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            LogicalDbiCaptureMap::iterator it =
+                m_logical_dbi_captures.find(capture_name);
+            if (it == m_logical_dbi_captures.end()) {
+                m_logical_dbi_captures[capture_name] = capture;
+                return;
+            }
+            existing = it->second;
+        }
+        const sync::LogicalSchemaRef existing_schema = existing->schema_ref();
+        if (existing->destination() != capture_destination ||
+            existing_schema.schema_id != capture_schema.schema_id ||
+            existing_schema.kind != capture_schema.kind ||
+            existing_schema.schema_version != capture_schema.schema_version) {
+            throw std::logic_error(
+                "Connection logical DBI capture schema does not match existing binding");
+        }
+    }
+
+    inline std::shared_ptr<sync::ILogicalDbiCapture>
+    Connection::logical_dbi_capture_for(MDBX_txn* txn,
+                                        const std::string& dbi_name) const {
+        sync::LogicalDbiBinding binding;
+        sync::LogicalDbiBindingStore bindings(m_env);
+        if (!bindings.get(txn, dbi_name, binding)) {
+            return std::shared_ptr<sync::ILogicalDbiCapture>();
+        }
+        std::shared_ptr<sync::ILogicalDbiCapture> capture;
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            std::map<std::string, std::shared_ptr<sync::ILogicalDbiCapture>>::
+                const_iterator it = m_logical_dbi_captures.find(dbi_name);
+            if (it != m_logical_dbi_captures.end()) capture = it->second;
+        }
+        if (!capture) {
+            throw std::logic_error(
+                "registered logical DBI has no active logical capture binding");
+        }
+        const sync::LogicalSchemaRef capture_schema = capture->schema_ref();
+        if (capture->destination() != binding.destination ||
+            capture_schema.schema_id != binding.schema.schema_id ||
+            capture_schema.kind != binding.schema.kind ||
+            capture_schema.schema_version != binding.schema.schema_version) {
+            throw std::logic_error(
+                "runtime logical DBI capture does not match durable binding");
+        }
+        return capture;
+    }
+
+    inline void Connection::record_logical_dbi_insert(
+            MDBX_txn* txn, const std::string& dbi_name,
+            const void* key, const void* value) {
+        try {
+            const std::shared_ptr<sync::ILogicalDbiCapture> capture =
+                logical_dbi_capture_for(txn, dbi_name);
+            if (capture) capture->record_insert(txn, key, value);
+        } catch (...) {
+            mark_sync_capture_failed(txn);
+            throw;
+        }
+    }
+
+    inline void Connection::record_logical_dbi_erase_key(
+            MDBX_txn* txn, const std::string& dbi_name, const void* key) {
+        try {
+            const std::shared_ptr<sync::ILogicalDbiCapture> capture =
+                logical_dbi_capture_for(txn, dbi_name);
+            if (capture) capture->record_erase_key(txn, key);
+        } catch (...) {
+            mark_sync_capture_failed(txn);
+            throw;
+        }
+    }
+
+    inline void Connection::record_logical_dbi_erase_all_values(
+            MDBX_txn* txn, const std::string& dbi_name,
+            const void* key, const void* value) {
+        try {
+            const std::shared_ptr<sync::ILogicalDbiCapture> capture =
+                logical_dbi_capture_for(txn, dbi_name);
+            if (capture) capture->record_erase_all_values(txn, key, value);
+        } catch (...) {
+            mark_sync_capture_failed(txn);
+            throw;
+        }
+    }
+
+    inline void Connection::record_logical_dbi_erase_one_value(
+            MDBX_txn* txn, const std::string& dbi_name,
+            const void* key, const void* value) {
+        try {
+            const std::shared_ptr<sync::ILogicalDbiCapture> capture =
+                logical_dbi_capture_for(txn, dbi_name);
+            if (capture) capture->record_erase_one_value(txn, key, value);
+        } catch (...) {
+            mark_sync_capture_failed(txn);
+            throw;
+        }
+    }
+
+    inline void Connection::record_logical_dbi_clear(
+            MDBX_txn* txn, const std::string& dbi_name) {
+        try {
+            const std::shared_ptr<sync::ILogicalDbiCapture> capture =
+                logical_dbi_capture_for(txn, dbi_name);
+            if (capture) capture->record_clear(txn);
+        } catch (...) {
+            mark_sync_capture_failed(txn);
+            throw;
+        }
+    }
+
+    inline void Connection::ensure_logical_dbi_operation_supported(
+            MDBX_txn* txn, const std::string& dbi_name,
+            const char* operation) const {
+        if (!is_sync_logical_dbi(txn, dbi_name)) return;
+        throw std::logic_error(std::string("registered logical DBI does not support ") +
+                               operation + "; use a supported KeyMultiValueTable mutation");
+    }
+
+    inline void Connection::ensure_logical_dbi_capture_not_suppressed(
+            MDBX_txn* txn, const std::string& dbi_name) {
+        if (!sync_capture_suppressed(txn) ||
+            logical_dbi_apply_suppressed(txn) ||
+            !is_sync_logical_dbi(txn, dbi_name)) {
+            return;
+        }
+        mark_sync_capture_failed(txn);
+        throw std::logic_error(
+            "public raw sync capture suppression cannot bypass a registered "
+            "automatic logical DBI binding");
     }
 
     inline Connection::SyncApplyNotification Connection::mark_sync_apply_committed(
@@ -588,6 +928,25 @@ namespace mdbxc {
                 throw;
             }
         }
+        std::vector<std::shared_ptr<sync::ILogicalDbiCapture>> captures;
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            captures.reserve(m_logical_dbi_captures.size());
+            for (std::map<std::string,
+                           std::shared_ptr<sync::ILogicalDbiCapture>>::
+                     const_iterator it = m_logical_dbi_captures.begin();
+                 it != m_logical_dbi_captures.end(); ++it) {
+                captures.push_back(it->second);
+            }
+        }
+        try {
+            for (std::size_t i = 0; i < captures.size(); ++i) {
+                captures[i]->flush_in_txn(txn);
+            }
+        } catch (...) {
+            mark_sync_capture_failed(txn);
+            throw;
+        }
     }
 
     inline void Connection::on_discard(MDBX_txn* txn) noexcept {
@@ -598,6 +957,20 @@ namespace mdbxc {
             sync::ISyncCaptureSink* sink = sync_capture();
             if (sink != nullptr) {
                 sink->discard_txn(txn);
+            }
+            std::vector<std::shared_ptr<sync::ILogicalDbiCapture>> captures;
+            {
+                std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+                captures.reserve(m_logical_dbi_captures.size());
+                for (std::map<std::string,
+                               std::shared_ptr<sync::ILogicalDbiCapture>>::
+                         const_iterator it = m_logical_dbi_captures.begin();
+                     it != m_logical_dbi_captures.end(); ++it) {
+                    captures.push_back(it->second);
+                }
+            }
+            for (std::size_t i = 0; i < captures.size(); ++i) {
+                captures[i]->discard_txn(txn);
             }
         } catch (...) {
             // discard must not throw; sink contract is noexcept.
@@ -674,6 +1047,9 @@ namespace mdbxc {
             if (rc == MDBX_SUCCESS) {
                 m_env = nullptr;
                 m_shutdown_requested = false;
+#           if MDBXC_SYNC_ENABLED
+                m_logical_dbi_apply_suppressed_txns.clear();
+#           endif
             }
         }
     }

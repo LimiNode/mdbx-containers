@@ -65,12 +65,6 @@ namespace sync {
         return out;
     }
 
-    /// \brief Returns true when \p id is all zeros.
-    inline bool is_zero_sync_id(const NodeId& id) {
-        const NodeId zero{};
-        return compare_node_id(id, zero) == 0;
-    }
-
     /// \brief Returns true when \p envelope has required delivery identity.
     inline bool is_logical_delivery_envelope_complete(
             const LogicalDeliveryEnvelope& envelope) {

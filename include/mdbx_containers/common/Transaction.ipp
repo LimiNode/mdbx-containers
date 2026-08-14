@@ -30,6 +30,15 @@ namespace mdbxc {
         begin();
     }
 
+    inline Transaction::Transaction(TransactionTracker* registry,
+                                    MDBX_env* env,
+                                    TransactionMode mode,
+                                    bool handle_reserved)
+        : m_registry(registry), m_env(env), m_mode(mode),
+          m_handle_registered(handle_reserved) {
+        begin();
+    }
+
     inline Transaction::Transaction(Transaction&& other) noexcept {
         move_from(other);
     }
@@ -69,11 +78,13 @@ namespace mdbxc {
         MDBX_txn* txn = m_txn;
         const TransactionMode mode = m_mode;
         const bool was_started = m_started;
+        const bool handle_registered = m_handle_registered;
 
         m_registry = nullptr;
         m_env = nullptr;
         m_txn = nullptr;
         m_started = false;
+        m_handle_registered = false;
 
 #       if MDBXC_SYNC_ENABLED
         if (registry && txn && was_started && mode == TransactionMode::WRITABLE) {
@@ -92,7 +103,7 @@ namespace mdbxc {
             safe_unbind_txn(registry, txn);
         }
 
-        if (registry && txn) {
+        if (registry && handle_registered) {
             safe_unregister_txn_handle(registry);
         }
     }
@@ -103,27 +114,36 @@ namespace mdbxc {
         m_txn = other.m_txn;
         m_mode = other.m_mode;
         m_started = other.m_started;
+        m_handle_registered = other.m_handle_registered;
 
         other.m_registry = nullptr;
         other.m_env = nullptr;
         other.m_txn = nullptr;
         other.m_started = false;
+        other.m_handle_registered = false;
     }
 
     inline void Transaction::begin() {
         if (m_started) return;
         bool new_handle = false;
         bool registered_handle = false;
-        if (m_txn && m_mode == TransactionMode::READ_ONLY) {
-            check_mdbx(mdbx_txn_renew(m_txn), "Failed to renew transaction");
-        } else {
-            MDBX_txn_flags_t flags = (m_mode == TransactionMode::READ_ONLY) ? MDBX_TXN_RDONLY : MDBX_TXN_READWRITE;
-            check_mdbx(mdbx_txn_begin(m_env, nullptr, flags, &m_txn), "Failed to begin transaction");
-            new_handle = true;
-        }
+        const bool reserved_handle = m_handle_registered && m_txn == nullptr;
         try {
-            if (new_handle) {
+            if (m_txn && m_mode == TransactionMode::READ_ONLY) {
+                check_mdbx(mdbx_txn_renew(m_txn),
+                           "Failed to renew transaction");
+            } else {
+                MDBX_txn_flags_t flags =
+                    (m_mode == TransactionMode::READ_ONLY)
+                        ? MDBX_TXN_RDONLY
+                        : MDBX_TXN_READWRITE;
+                check_mdbx(mdbx_txn_begin(m_env, nullptr, flags, &m_txn),
+                           "Failed to begin transaction");
+                new_handle = true;
+            }
+            if (new_handle && !m_handle_registered) {
                 m_registry->register_txn_handle();
+                m_handle_registered = true;
                 registered_handle = true;
             }
             m_registry->bind_txn(m_txn);
@@ -131,12 +151,13 @@ namespace mdbxc {
         } catch (...) {
             if (new_handle && m_txn) {
                 mdbx_txn_abort(m_txn);
-                if (registered_handle) {
-                    m_registry->unregister_txn_handle();
-                }
                 m_txn = nullptr;
             } else if (m_txn && m_mode == TransactionMode::READ_ONLY) {
                 mdbx_txn_reset(m_txn);
+            }
+            if (registered_handle || reserved_handle) {
+                m_registry->unregister_txn_handle();
+                m_handle_registered = false;
             }
             throw;
         }
@@ -209,6 +230,7 @@ namespace mdbxc {
 
             safe_unbind_txn(registry, txn);
             safe_unregister_txn_handle(registry);
+            m_handle_registered = false;
 
             check_mdbx(rc, "Failed to commit writable transaction");
             break;
@@ -256,6 +278,7 @@ namespace mdbxc {
 
             safe_unbind_txn(registry, txn);
             safe_unregister_txn_handle(registry);
+            m_handle_registered = false;
 
             break;
         }

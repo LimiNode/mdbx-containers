@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -16,6 +18,10 @@
 #include <vector>
 
 #include "KeyValueTableLogicalAdapter.hpp"
+#include "../../capture/ILogicalDbiCapture.hpp"
+#include "../../stores/MetaStore.hpp"
+#include "../stores/LogicalJournalStore.hpp"
+#include "../stores/LogicalOutboxStore.hpp"
 
 namespace mdbxc {
 namespace sync {
@@ -43,6 +49,7 @@ namespace sync {
              class Options = DefaultTableOptions>
     class KeyMultiValueTableLogicalAdapter : public ILogicalTableAdapter {
     private:
+        class AutomaticCapture;
         static const std::uint32_t schema_version_v1 = 1u;
         static const std::uint32_t schema_version_v2 = 2u;
         static const std::uint32_t schema_version_v3 = 3u;
@@ -132,6 +139,17 @@ namespace sync {
             return change;
         }
 
+        /// \brief Creates connection-owned automatic capture for this adapter.
+        /// \details The capture appends a receiver-neutral logical journal frame
+        /// during the transaction pre-commit hook and holds no SyncEngine pointer.
+        std::shared_ptr<ILogicalDbiCapture> make_automatic_capture(
+                const DbId& destination) const {
+            return std::shared_ptr<ILogicalDbiCapture>(
+                new AutomaticCapture(m_table.connection()->env_handle(),
+                                     m_table.dbi_name(), schema_ref(),
+                                     destination));
+        }
+
         /// \brief Transaction-bound typed logical capture session.
         /// \details The session owns a writable transaction and suppresses raw
         /// capture for its mutations. It captures only unordered multiset
@@ -155,6 +173,9 @@ namespace sync {
                 : detail::CapturedLogicalTransaction(
                       *adapter.m_table.connection()),
                   m_adapter(adapter) {
+                adapter.m_table.connection()
+                    ->ensure_logical_dbi_capture_session_supported(
+                        m_txn.handle(), adapter.m_table.dbi_name());
                 const LogicalApplyResult marker_result =
                     validate_logical_adapter_marker(
                         m_txn.handle(),
@@ -555,6 +576,146 @@ namespace sync {
         }
 
     private:
+        class AutomaticCapture : public ILogicalDbiCapture {
+        public:
+            AutomaticCapture(MDBX_env* env,
+                             const std::string& dbi_name,
+                             const LogicalSchemaRef& schema,
+                             const DbId& destination)
+                : m_env(env), m_dbi_name(dbi_name), m_schema(schema),
+                  m_destination(destination) {
+                if (m_env == nullptr || !is_logical_schema_ref_complete(m_schema) ||
+                    is_zero_sync_id(m_destination)) {
+                    throw std::invalid_argument(
+                        "KeyMultiValue automatic logical capture is invalid");
+                }
+            }
+
+            const std::string& dbi_name() const override { return m_dbi_name; }
+            LogicalSchemaRef schema_ref() const override { return m_schema; }
+            const DbId& destination() const override { return m_destination; }
+
+            void record_insert(MDBX_txn* txn, const void* key,
+                               const void* value) override {
+                append(txn, make_pair_change(
+                    opcode_value(KeyMultiValueLogicalOpcode::InsertOne),
+                    checked_key(key), checked_value(value)));
+            }
+
+            void record_erase_key(MDBX_txn* txn, const void* key) override {
+                LogicalChange change;
+                change.schema = m_schema;
+                change.opcode = opcode_value(KeyMultiValueLogicalOpcode::EraseKey);
+                encode_key(checked_key(key), change.payload);
+                append(txn, change);
+            }
+
+            void record_erase_all_values(MDBX_txn* txn, const void* key,
+                                         const void* value) override {
+                append(txn, make_pair_change(
+                    opcode_value(KeyMultiValueLogicalOpcode::EraseAllValues),
+                    checked_key(key), checked_value(value)));
+            }
+
+            void record_erase_one_value(MDBX_txn* txn, const void* key,
+                                        const void* value) override {
+                if (m_schema.schema_version < schema_version_v2) {
+                    throw std::logic_error(
+                        "KeyMultiValue automatic exact-one erase requires schema version 2 or newer");
+                }
+                append(txn, make_pair_change(
+                    opcode_value(KeyMultiValueLogicalOpcode::EraseOneValue),
+                    checked_key(key), checked_value(value)));
+            }
+
+            void record_clear(MDBX_txn* txn) override {
+                LogicalChange change;
+                change.schema = m_schema;
+                change.opcode = opcode_value(KeyMultiValueLogicalOpcode::Clear);
+                append(txn, change);
+            }
+
+            void flush_in_txn(MDBX_txn* txn) override {
+                LogicalChangeFrame frame;
+                {
+                    std::lock_guard<std::mutex> locker(m_mutex);
+                    typename std::map<MDBX_txn*, LogicalChangeFrame>::iterator it =
+                        m_pending.find(txn);
+                    if (it == m_pending.end() || it->second.changes.empty()) return;
+                    frame.changes.swap(it->second.changes);
+                    m_pending.erase(it);
+                }
+                MetaStore meta(m_env);
+                LogicalJournalStore journal(m_env);
+                LogicalOutboxStore outbox(m_env);
+                meta.open(txn);
+                const NodeId origin = meta.get_node_id(txn);
+                if (is_zero_sync_id(origin)) {
+                    throw std::logic_error(
+                        "KeyMultiValue automatic logical capture requires local node identity");
+                }
+                if (!journal.is_initialized(txn)) {
+                    if (outbox.has_persistent_state(txn)) {
+                        throw std::logic_error(
+                            "logical journal cannot start with legacy outbox state");
+                    }
+                    journal.initialize(txn);
+                }
+                (void)journal.append(txn, m_destination, origin, frame);
+            }
+
+            void discard_txn(MDBX_txn* txn) noexcept override {
+                try {
+                    std::lock_guard<std::mutex> locker(m_mutex);
+                    m_pending.erase(txn);
+                } catch (...) {
+                }
+            }
+
+        private:
+            static const KeyT& checked_key(const void* value) {
+                if (value == nullptr) {
+                    throw std::invalid_argument(
+                        "KeyMultiValue automatic capture key is null");
+                }
+                return *static_cast<const KeyT*>(value);
+            }
+
+            static const ValueT& checked_value(const void* value) {
+                if (value == nullptr) {
+                    throw std::invalid_argument(
+                        "KeyMultiValue automatic capture value is null");
+                }
+                return *static_cast<const ValueT*>(value);
+            }
+
+            LogicalChange make_pair_change(std::uint32_t opcode,
+                                            const KeyT& key,
+                                            const ValueT& value) const {
+                LogicalChange change;
+                change.schema = m_schema;
+                change.opcode = opcode;
+                encode_pair(key, value, change.payload);
+                return change;
+            }
+
+            void append(MDBX_txn* txn, const LogicalChange& change) {
+                if (txn == nullptr) {
+                    throw std::invalid_argument(
+                        "KeyMultiValue automatic capture transaction is null");
+                }
+                std::lock_guard<std::mutex> locker(m_mutex);
+                m_pending[txn].changes.push_back(change);
+            }
+
+            MDBX_env* m_env;
+            std::string m_dbi_name;
+            LogicalSchemaRef m_schema;
+            DbId m_destination;
+            std::mutex m_mutex;
+            std::map<MDBX_txn*, LogicalChangeFrame> m_pending;
+        };
+
 #include "KeyMultiValueTableLogicalAdapter.ipp"
 
     };

@@ -20,6 +20,7 @@
 #include "logical/ILogicalDeliveryPeer.hpp"
 #include "logical/LogicalTableAdapter.hpp"
 #include "logical/stores/SchemaRegistryStore.hpp"
+#include "logical/stores/LogicalDbiBindingStore.hpp"
 #include "logical/stores/LogicalDeliveryStore.hpp"
 #include "logical/stores/LogicalDeliveryOrderStore.hpp"
 #include "logical/stores/LogicalJournalStore.hpp"

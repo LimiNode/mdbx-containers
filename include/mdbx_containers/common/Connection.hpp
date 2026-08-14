@@ -10,6 +10,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <memory>
+#include <map>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -34,6 +35,7 @@ namespace mdbxc {
 
     namespace sync {
         class ISyncCaptureSink;
+        class ILogicalDbiCapture;
         class ISyncApplyObserver;
         class SyncCaptureScope;
         class SyncEngine;
@@ -208,6 +210,13 @@ namespace mdbxc {
         /// \brief Returns the currently attached \c ISyncCaptureSink or \c nullptr.
         sync::ISyncCaptureSink* sync_capture() const;
 
+        /// \brief Rejects legacy typed logical sessions for a durably automatic-bound DBI.
+        /// \details This preserves the binding's single authoritative local
+        /// capture route. It is a validation operation and does not enable
+        /// capture suppression or mutation.
+        void ensure_logical_dbi_capture_session_supported(
+            MDBX_txn* txn, const std::string& dbi_name) const;
+
         /// \brief Temporarily suppresses sync capture for one writable transaction.
         /// \details Intended for incoming logical sync apply paths that must
         /// write through public table wrappers without re-publishing the same
@@ -297,6 +306,10 @@ namespace mdbxc {
         mutable std::mutex m_mdbx_mutex;    ///< Protects lifecycle state and manual transaction map.
         std::unordered_map<std::thread::id, std::shared_ptr<Transaction>> m_transactions;
         bool m_shutdown_requested = false;  ///< Rejects new transactions during coordinated shutdown.
+
+        void erase_manual_transaction_if_current(
+            const std::thread::id& tid,
+            const std::shared_ptr<Transaction>& txn);
 #       if __cplusplus >= 201703L
         using config_t = std::optional<Config>;
 #       else
@@ -338,9 +351,55 @@ namespace mdbxc {
             const char* context) const;
         bool is_sync_versioned_dbi(MDBX_txn* txn,
                                    const std::string& dbi_name) const;
+        bool is_sync_logical_dbi(MDBX_txn* txn,
+                                 const std::string& dbi_name) const;
         void validate_sync_dbi_write(MDBX_txn* txn,
                                      const std::string& dbi_name,
                                      sync::ChangeOpType op_type);
+        void attach_logical_dbi_capture(
+            const std::shared_ptr<sync::ILogicalDbiCapture>& capture);
+        std::shared_ptr<sync::ILogicalDbiCapture> logical_dbi_capture_for(
+            MDBX_txn* txn, const std::string& dbi_name) const;
+        void record_logical_dbi_insert(MDBX_txn* txn,
+                                       const std::string& dbi_name,
+                                       const void* key,
+                                       const void* value);
+        void record_logical_dbi_erase_key(MDBX_txn* txn,
+                                          const std::string& dbi_name,
+                                          const void* key);
+        void record_logical_dbi_erase_all_values(MDBX_txn* txn,
+                                                 const std::string& dbi_name,
+                                                 const void* key,
+                                                 const void* value);
+        void record_logical_dbi_erase_one_value(MDBX_txn* txn,
+                                                const std::string& dbi_name,
+                                                const void* key,
+                                                const void* value);
+        void record_logical_dbi_clear(MDBX_txn* txn,
+                                      const std::string& dbi_name);
+        void ensure_logical_dbi_operation_supported(
+            MDBX_txn* txn, const std::string& dbi_name,
+            const char* operation) const;
+        void ensure_logical_dbi_capture_not_suppressed(
+            MDBX_txn* txn, const std::string& dbi_name);
+        class LogicalDbiApplySuppressionScope {
+        public:
+            LogicalDbiApplySuppressionScope(Connection& connection,
+                                             MDBX_txn* txn);
+            ~LogicalDbiApplySuppressionScope() noexcept;
+
+            LogicalDbiApplySuppressionScope(
+                const LogicalDbiApplySuppressionScope&) = delete;
+            LogicalDbiApplySuppressionScope& operator=(
+                const LogicalDbiApplySuppressionScope&) = delete;
+
+        private:
+            Connection* m_connection;
+            MDBX_txn* m_txn;
+        };
+        void begin_logical_dbi_apply_suppression(MDBX_txn* txn);
+        void end_logical_dbi_apply_suppression(MDBX_txn* txn) noexcept;
+        bool logical_dbi_apply_suppressed(MDBX_txn* txn) const;
         struct SyncApplyObserverState;
 
         struct SyncApplyObserverCallback {
@@ -391,10 +450,15 @@ namespace mdbxc {
         };
 
         sync::ISyncCaptureSink* m_sync_capture = nullptr;
+        using LogicalDbiCaptureMap =
+            std::map<std::string,
+                     std::shared_ptr<sync::ILogicalDbiCapture>>;
+        LogicalDbiCaptureMap m_logical_dbi_captures;
         std::uint64_t m_sync_capture_token = 0;
         std::uint64_t m_next_sync_capture_token = 0;
         MDBX_txn* m_sync_capture_failed_txn = nullptr;
         std::vector<MDBX_txn*> m_sync_capture_suppressed_txns;
+        std::vector<MDBX_txn*> m_logical_dbi_apply_suppressed_txns;
         mutable std::mutex m_sync_capture_failure_mutex;
         std::uint64_t m_next_sync_apply_observer_token = 0;
         std::uint64_t m_sync_apply_generation = 0;
