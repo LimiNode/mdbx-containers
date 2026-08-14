@@ -353,6 +353,23 @@ namespace sync {
                     throw std::logic_error(
                         "KeyOrderedMultiValue automatic logical capture requires local node identity");
                 }
+                SchemaRegistryStore schemas(m_env);
+                LogicalSchemaRecord record;
+                if (!schemas.get(txn, m_schema.schema_id, record) ||
+                    record.kind != m_schema.kind ||
+                    record.schema_version != m_schema.schema_version ||
+                    record.dbi_name != m_dbi_name ||
+                    record.dbi_names.size() != 1u ||
+                    record.dbi_names[0] != m_dbi_name) {
+                    throw std::logic_error(
+                        "KeyOrderedMultiValue automatic logical capture schema marker is invalid");
+                }
+                const LogicalApplyResult authority_result =
+                    validate_ordered_logical_schema_record_origin(
+                        txn, m_env, record);
+                if (!authority_result.ok) {
+                    throw std::logic_error(authority_result.error);
+                }
                 if (!journal.is_initialized(txn)) {
                     if (outbox.has_persistent_state(txn)) {
                         throw std::logic_error(

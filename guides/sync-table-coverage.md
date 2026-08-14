@@ -153,6 +153,9 @@ frames atomically, while destructive table calls fail closed. Schema v2 adds
 persistent `OrderedElementId`, with Live/Tombstone state, per-origin introduced
 high-water integrity, and typed capture that atomically commits the mutation and
 an ordered outbox envelope. Both require one authoritative ordered origin.
+Moving a bound v1 DBI to schema v2 requires a separate migration of existing
+occurrences, auxiliary state, the durable binding, and delivery/journal state;
+it is not a schema-marker version update.
 Bounded `erase_at`, key/value erase, and clear expand a complete
 canonical-codec selector result into deterministic exact-id operations before
 mutation. Candidate-expansion and inspected-record budgets apply to the entire

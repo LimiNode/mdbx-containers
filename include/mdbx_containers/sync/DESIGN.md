@@ -351,7 +351,12 @@ append one durable frame to `LogicalJournalStore` at pre-commit. The binding
 does not contain a receiver node; delivery later calls
 `materialize_logical_journal(destination, receiver)`. `erase`, `erase_at`,
 `clear`, and `replace_with` are rejected for a bound schema-v1 DBI, because
-their semantics require the schema-v2 element-id/tombstone protocol. Missing
+their semantics require the existing schema-v2 element-id/tombstone protocol.
+There is currently no automatic schema-v2 binding or in-place migration from a
+bound v1 DBI: assigning ids to existing v1 occurrences, creating the v2 state
+and key-index DBIs, migrating the durable logical DBI binding, and defining the
+journal/delivery-frontier transition require one explicit future migration
+procedure. A v1→v2 change is therefore not a schema-version edit. Missing
 runtime capture, legacy typed sessions, public capture suppression, and
 caller-created writable raw transactions fail closed, as for other automatic
 logical bindings.

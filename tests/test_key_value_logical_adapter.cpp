@@ -6112,6 +6112,20 @@ void test_key_ordered_multi_value_automatic_capture_uses_receiver_neutral_journa
     MDBXC_TEST_ASSERT(direct_commit_rejected);
     MDBXC_TEST_ASSERT(!table.contains(4));
 
+    mdbxc::sync::LogicalSchemaRecord cutover_record = record;
+    cutover_record.ordered_delivery_origin_node_id = make_node(0xECu);
+    engine.migrate_logical_schema(
+        adapter.schema_ref().schema_id, record, cutover_record);
+    bool stale_origin_rejected = false;
+    try {
+        table.append(5, "must-rollback-after-cutover");
+    } catch (const std::logic_error&) {
+        stale_origin_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(stale_origin_rejected);
+    MDBXC_TEST_ASSERT(!table.contains(5));
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 3u);
+
     conn->disconnect();
     cleanup(path);
 }
