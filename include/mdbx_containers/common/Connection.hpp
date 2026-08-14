@@ -306,6 +306,10 @@ namespace mdbxc {
         mutable std::mutex m_mdbx_mutex;    ///< Protects lifecycle state and manual transaction map.
         std::unordered_map<std::thread::id, std::shared_ptr<Transaction>> m_transactions;
         bool m_shutdown_requested = false;  ///< Rejects new transactions during coordinated shutdown.
+
+        void erase_manual_transaction_if_current(
+            const std::thread::id& tid,
+            const std::shared_ptr<Transaction>& txn);
 #       if __cplusplus >= 201703L
         using config_t = std::optional<Config>;
 #       else
@@ -446,8 +450,10 @@ namespace mdbxc {
         };
 
         sync::ISyncCaptureSink* m_sync_capture = nullptr;
-        std::map<std::string, std::shared_ptr<sync::ILogicalDbiCapture>>
-            m_logical_dbi_captures;
+        using LogicalDbiCaptureMap =
+            std::map<std::string,
+                     std::shared_ptr<sync::ILogicalDbiCapture>>;
+        LogicalDbiCaptureMap m_logical_dbi_captures;
         std::uint64_t m_sync_capture_token = 0;
         std::uint64_t m_next_sync_capture_token = 0;
         MDBX_txn* m_sync_capture_failed_txn = nullptr;

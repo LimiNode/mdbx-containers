@@ -109,6 +109,12 @@ namespace mdbxc {
         MDBX_txn*       m_txn = nullptr;            ///< MDBX transaction handle.
         TransactionMode m_mode = TransactionMode::WRITABLE; ///< Current transaction mode.
         bool            m_started = false;
+        bool            m_handle_registered = false; ///< Tracker owns a live or opening handle slot.
+
+        Transaction(TransactionTracker* registry,
+                    MDBX_env* env,
+                    TransactionMode mode,
+                    bool handle_reserved);
 
         /// \brief Releases any owned transaction without throwing.
         void release() noexcept;

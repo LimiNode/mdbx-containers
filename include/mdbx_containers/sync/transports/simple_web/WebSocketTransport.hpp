@@ -213,10 +213,10 @@ namespace simple_web {
 
             const std::uint64_t call_generation =
                 m_cancel_generation.load(std::memory_order_acquire);
-            Client client(detail::ws_endpoint(
-                m_config.host, m_config.port, m_config.path));
+            std::shared_ptr<Client> client(new Client(detail::ws_endpoint(
+                m_config.host, m_config.port, m_config.path)));
             if (!m_config.bearer_token.empty()) {
-                client.config.header.emplace(
+                client->config.header.emplace(
                     "Authorization",
                     std::string("Bearer ") + m_config.bearer_token);
             }
@@ -235,7 +235,7 @@ namespace simple_web {
             std::shared_ptr<WebSocketDeadlineSignal> deadline_signal(
                 new WebSocketDeadlineSignal());
 
-            client.on_open =
+            client->on_open =
                 [state, outbound, opcode](
                     std::shared_ptr<Client::Connection> connection) {
                     try {
@@ -246,7 +246,7 @@ namespace simple_web {
                     }
                 };
 
-            client.on_message =
+            client->on_message =
                 [state, bounds](
                     std::shared_ptr<Client::Connection> connection,
                     std::shared_ptr<Client::InMessage> in_message) {
@@ -262,7 +262,7 @@ namespace simple_web {
                     connection->send_close(1000);
                 };
 
-            client.on_close =
+            client->on_close =
                 [state](
                     std::shared_ptr<Client::Connection> connection,
                     int status,
@@ -281,7 +281,7 @@ namespace simple_web {
                     }
                 };
 
-            client.on_error =
+            client->on_error =
                 [state](
                     std::shared_ptr<Client::Connection> connection,
                     const SimpleWeb::error_code& ec) {
@@ -298,17 +298,17 @@ namespace simple_web {
             std::thread deadline_thread;
             if (exchange_timeout.count() > 0) {
                 deadline_thread = std::thread(
-                    [state, deadline_signal, exchange_timeout, &client]() {
+                    [state, deadline_signal, exchange_timeout, client]() {
                         if (!deadline_signal->wait_until_finished(
                                 exchange_timeout)) {
                             state->set_exception(
                                 "WebSocket exchange deadline exceeded");
-                            client.stop();
+                            client->stop();
                         }
                     });
             }
             try {
-                client.start();
+                client->start();
             } catch (...) {
                 deadline_signal->finish();
                 if (deadline_thread.joinable()) {
@@ -332,9 +332,13 @@ namespace simple_web {
             m_cancel_generation.fetch_add(1, std::memory_order_acq_rel);
             m_cancel_count.fetch_add(1, std::memory_order_acq_rel);
 
-            std::lock_guard<std::mutex> lock(m_mutex);
-            if (m_active_client != nullptr) {
-                m_active_client->stop();
+            std::shared_ptr<Client> active_client;
+            {
+                std::lock_guard<std::mutex> lock(m_mutex);
+                active_client = m_active_client;
+            }
+            if (active_client) {
+                active_client->stop();
             }
         }
 
@@ -347,8 +351,9 @@ namespace simple_web {
 
         class ActiveClientGuard {
         public:
-            ActiveClientGuard(WebSocketSyncChannel& owner, Client& client)
-                : m_owner(owner), m_client(&client) {
+            ActiveClientGuard(WebSocketSyncChannel& owner,
+                              const std::shared_ptr<Client>& client)
+                : m_owner(owner), m_client(client) {
                 m_owner.set_active_client(m_client);
             }
 
@@ -361,25 +366,25 @@ namespace simple_web {
 
         private:
             WebSocketSyncChannel& m_owner;
-            Client* m_client;
+            std::shared_ptr<Client> m_client;
         };
 
-        void set_active_client(Client* client) {
+        void set_active_client(const std::shared_ptr<Client>& client) {
             std::lock_guard<std::mutex> lock(m_mutex);
             m_active_client = client;
         }
 
-        void clear_active_client(Client* client) {
+        void clear_active_client(const std::shared_ptr<Client>& client) {
             std::lock_guard<std::mutex> lock(m_mutex);
             if (m_active_client == client) {
-                m_active_client = nullptr;
+                m_active_client.reset();
             }
         }
 
         WebSocketSyncChannelConfig m_config;
         std::atomic<std::uint64_t> m_cancel_generation;
         mutable std::mutex m_mutex;
-        Client* m_active_client;
+        std::shared_ptr<Client> m_active_client;
         std::atomic<std::size_t> m_cancel_count;
     };
 

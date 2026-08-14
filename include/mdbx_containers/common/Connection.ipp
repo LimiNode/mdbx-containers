@@ -30,9 +30,18 @@ namespace mdbxc {
     }
 
     inline Connection::~Connection() {
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        assert(!has_txn_handles() && "Destroying Connection with live transaction handles");
-        cleanup(false);
+#       if MDBXC_SYNC_ENABLED
+        LogicalDbiCaptureMap retired_captures;
+#       endif
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            assert(!has_txn_handles() &&
+                   "Destroying Connection with live transaction handles");
+            cleanup(false);
+#           if MDBXC_SYNC_ENABLED
+            retired_captures.swap(m_logical_dbi_captures);
+#           endif
+        }
     }
 
     inline std::shared_ptr<Connection> Connection::create(const Config& config) {
@@ -71,8 +80,16 @@ namespace mdbxc {
     }
 
     inline void Connection::disconnect() {
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        cleanup();
+#       if MDBXC_SYNC_ENABLED
+        LogicalDbiCaptureMap retired_captures;
+#       endif
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            cleanup();
+#           if MDBXC_SYNC_ENABLED
+            retired_captures.swap(m_logical_dbi_captures);
+#           endif
+        }
     }
 
     inline void Connection::shutdown() {
@@ -94,70 +111,120 @@ namespace mdbxc {
     }
 
     inline Transaction Connection::transaction(TransactionMode mode) {
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        if (m_shutdown_requested) {
-            throw std::logic_error("Connection shutdown is in progress.");
+        MDBX_env* env = nullptr;
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            if (m_shutdown_requested) {
+                throw std::logic_error("Connection shutdown is in progress.");
+            }
+            if (!m_env) {
+                throw std::logic_error("Connection is not connected.");
+            }
+            if (current_thread_has_txn()) {
+                throw std::logic_error(
+                    "A transaction is already active on this connection's thread. "
+                    "Reuse it through table operations or pass the active transaction explicitly."
+                );
+            }
+            register_txn_handle();
+            env = m_env;
         }
-        if (!m_env) {
-            throw std::logic_error("Connection is not connected.");
-        }
-        if (current_thread_has_txn()) {
-            throw std::logic_error(
-                "A transaction is already active on this connection's thread. "
-                "Reuse it through table operations or pass the active transaction explicitly."
-            );
-        }
-        return Transaction(static_cast<TransactionTracker*>(this), m_env, mode);
+        return Transaction(static_cast<TransactionTracker*>(this), env, mode,
+                           true);
     }
 
     inline void Connection::begin(TransactionMode mode) {
+        const std::thread::id tid = std::this_thread::get_id();
+        MDBX_env* env = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(m_mdbx_mutex);
+            if (m_shutdown_requested) {
+                throw std::logic_error("Connection shutdown is in progress.");
+            }
+            if (!m_env) {
+                throw std::logic_error("Connection is not connected.");
+            }
+            if (m_transactions.find(tid) != m_transactions.end()) {
+                throw std::logic_error(
+                    "Transaction already started for this thread.");
+            }
+            if (current_thread_has_txn()) {
+                throw std::logic_error(
+                    "A transaction is already active on this connection's thread. "
+                    "Commit or roll it back before starting a manual transaction."
+                );
+            }
+            register_txn_handle();
+            env = m_env;
+        }
+        std::shared_ptr<Transaction> txn(new Transaction(
+            static_cast<TransactionTracker*>(this), env, mode, true));
         std::lock_guard<std::mutex> lock(m_mdbx_mutex);
-        if (m_shutdown_requested) {
-            throw std::logic_error("Connection shutdown is in progress.");
-        }
-        if (!m_env) {
-            throw std::logic_error("Connection is not connected.");
-        }
-        auto tid = std::this_thread::get_id();
-        auto it = m_transactions.find(tid);
-        if (it != m_transactions.end()) {
-            throw std::logic_error("Transaction already started for this thread.");
-        }
-        if (current_thread_has_txn()) {
+        const std::pair<std::unordered_map<
+                            std::thread::id,
+                            std::shared_ptr<Transaction>>::iterator,
+                        bool> inserted =
+            m_transactions.insert(std::make_pair(tid, txn));
+        if (!inserted.second) {
             throw std::logic_error(
-                "A transaction is already active on this connection's thread. "
-                "Commit or roll it back before starting a manual transaction."
-            );
+                "Transaction already started for this thread.");
         }
-        auto txn = std::make_shared<Transaction>(static_cast<TransactionTracker*>(this), m_env, mode);
-        m_transactions[tid] = txn;
     }
 
     inline void Connection::commit() {
-        std::lock_guard<std::mutex> lock(m_mdbx_mutex);
-        auto tid = std::this_thread::get_id();
-        auto it = m_transactions.find(tid);
-        if (it == m_transactions.end()) {
-            throw std::logic_error("No transaction for this thread.");
+        const std::thread::id tid = std::this_thread::get_id();
+        std::shared_ptr<Transaction> txn;
+        {
+            std::lock_guard<std::mutex> lock(m_mdbx_mutex);
+            std::unordered_map<std::thread::id,
+                               std::shared_ptr<Transaction>>::iterator it =
+                m_transactions.find(tid);
+            if (it == m_transactions.end()) {
+                throw std::logic_error("No transaction for this thread.");
+            }
+            txn = it->second;
         }
         try {
-            it->second->commit();
+            txn->commit();
         } catch (...) {
-            m_transactions.erase(it);
+            erase_manual_transaction_if_current(tid, txn);
             throw;
         }
-        m_transactions.erase(it);
+        erase_manual_transaction_if_current(tid, txn);
     }
 
     inline void Connection::rollback() {
-        std::lock_guard<std::mutex> lock(m_mdbx_mutex);
-        auto tid = std::this_thread::get_id();
-        auto it = m_transactions.find(tid);
-        if (it == m_transactions.end()) {
-            throw std::logic_error("No transaction for this thread.");
+        const std::thread::id tid = std::this_thread::get_id();
+        std::shared_ptr<Transaction> txn;
+        {
+            std::lock_guard<std::mutex> lock(m_mdbx_mutex);
+            std::unordered_map<std::thread::id,
+                               std::shared_ptr<Transaction>>::iterator it =
+                m_transactions.find(tid);
+            if (it == m_transactions.end()) {
+                throw std::logic_error("No transaction for this thread.");
+            }
+            txn = it->second;
         }
-        it->second->rollback();
-        m_transactions.erase(it);
+        try {
+            txn->rollback();
+        } catch (...) {
+            erase_manual_transaction_if_current(tid, txn);
+            throw;
+        }
+        erase_manual_transaction_if_current(tid, txn);
+    }
+
+    inline void Connection::erase_manual_transaction_if_current(
+            const std::thread::id& tid,
+            const std::shared_ptr<Transaction>& txn) {
+        std::lock_guard<std::mutex> lock(m_mdbx_mutex);
+        std::unordered_map<std::thread::id,
+                           std::shared_ptr<Transaction>>::iterator it =
+            m_transactions.find(tid);
+        if (it != m_transactions.end() && it->second == txn) {
+            m_transactions.erase(it);
+        }
     }
 
     inline std::shared_ptr<Transaction> Connection::current_txn() const {
@@ -602,26 +669,31 @@ namespace mdbxc {
         if (!capture) {
             throw std::invalid_argument("Connection logical DBI capture is null");
         }
-        if (capture->dbi_name().empty()) {
+        const std::string capture_name = capture->dbi_name();
+        const sync::LogicalSchemaRef capture_schema = capture->schema_ref();
+        const sync::DbId capture_destination = capture->destination();
+        if (capture_name.empty()) {
             throw std::invalid_argument("Connection logical DBI capture name is empty");
         }
-        std::lock_guard<std::mutex> locker(m_mdbx_mutex);
-        std::map<std::string, std::shared_ptr<sync::ILogicalDbiCapture>>::iterator
-            it = m_logical_dbi_captures.find(capture->dbi_name());
-        if (it != m_logical_dbi_captures.end()) {
-            const sync::LogicalSchemaRef existing_schema =
-                it->second->schema_ref();
-            const sync::LogicalSchemaRef new_schema = capture->schema_ref();
-            if (it->second->destination() != capture->destination() ||
-                existing_schema.schema_id != new_schema.schema_id ||
-                existing_schema.kind != new_schema.kind ||
-                existing_schema.schema_version != new_schema.schema_version) {
-                throw std::logic_error(
-                    "Connection logical DBI capture schema does not match existing binding");
+        std::shared_ptr<sync::ILogicalDbiCapture> existing;
+        {
+            std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+            LogicalDbiCaptureMap::iterator it =
+                m_logical_dbi_captures.find(capture_name);
+            if (it == m_logical_dbi_captures.end()) {
+                m_logical_dbi_captures[capture_name] = capture;
+                return;
             }
-            return;
+            existing = it->second;
         }
-        m_logical_dbi_captures[capture->dbi_name()] = capture;
+        const sync::LogicalSchemaRef existing_schema = existing->schema_ref();
+        if (existing->destination() != capture_destination ||
+            existing_schema.schema_id != capture_schema.schema_id ||
+            existing_schema.kind != capture_schema.kind ||
+            existing_schema.schema_version != capture_schema.schema_version) {
+            throw std::logic_error(
+                "Connection logical DBI capture schema does not match existing binding");
+        }
     }
 
     inline std::shared_ptr<sync::ILogicalDbiCapture>
@@ -976,7 +1048,6 @@ namespace mdbxc {
                 m_env = nullptr;
                 m_shutdown_requested = false;
 #           if MDBXC_SYNC_ENABLED
-                m_logical_dbi_captures.clear();
                 m_logical_dbi_apply_suppressed_txns.clear();
 #           endif
             }

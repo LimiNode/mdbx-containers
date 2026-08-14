@@ -7,8 +7,16 @@ namespace mdbxc {
 
     inline void TransactionTracker::register_txn_handle() {
         std::lock_guard<std::mutex> lock(m_mutex);
+        const std::thread::id tid = std::this_thread::get_id();
+        std::unordered_map<std::thread::id, std::size_t>::iterator it =
+            m_thread_txn_handle_counts.find(tid);
+        if (it == m_thread_txn_handle_counts.end()) {
+            it = m_thread_txn_handle_counts.insert(
+                std::unordered_map<std::thread::id, std::size_t>::value_type(
+                    tid, std::size_t(0))).first;
+        }
         ++m_open_txn_handles;
-        ++m_thread_txn_handle_counts[std::this_thread::get_id()];
+        ++it->second;
     }
 
     inline void TransactionTracker::unregister_txn_handle() {

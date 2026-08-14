@@ -28,6 +28,78 @@ typedef mdbxc::sync::KeyMultiValueTableLogicalAdapter<
 typedef mdbxc::sync::KeyOrderedMultiValueTableLogicalAdapter<
     int, std::string, IntKeyCodec, StringValueCodec> IntStringOrderedAdapter;
 
+class ReentrantDestroyCapture : public mdbxc::sync::ILogicalDbiCapture {
+public:
+    ReentrantDestroyCapture(mdbxc::Connection& connection,
+                            const std::string& dbi_name,
+                            const mdbxc::sync::LogicalSchemaRef& schema,
+                            const mdbxc::sync::DbId& destination,
+                            bool& destroyed)
+        : m_connection(connection), m_dbi_name(dbi_name), m_schema(schema),
+          m_destination(destination), m_destroyed(destroyed) {}
+
+    ~ReentrantDestroyCapture() noexcept override {
+        try {
+            (void)m_connection.is_connected();
+            m_destroyed = true;
+        } catch (...) {
+        }
+    }
+
+    const std::string& dbi_name() const override {
+        (void)m_connection.is_connected();
+        return m_dbi_name;
+    }
+    mdbxc::sync::LogicalSchemaRef schema_ref() const override {
+        (void)m_connection.is_connected();
+        return m_schema;
+    }
+    const mdbxc::sync::DbId& destination() const override {
+        (void)m_connection.is_connected();
+        return m_destination;
+    }
+
+    void record_insert(MDBX_txn*, const void*, const void*) override {}
+    void record_erase_key(MDBX_txn*, const void*) override {}
+    void record_erase_all_values(MDBX_txn*, const void*,
+                                 const void*) override {}
+    void record_erase_one_value(MDBX_txn*, const void*,
+                                const void*) override {}
+    void record_clear(MDBX_txn*) override {}
+    void flush_in_txn(MDBX_txn*) override {}
+    void discard_txn(MDBX_txn*) noexcept override {}
+
+private:
+    mdbxc::Connection& m_connection;
+    std::string m_dbi_name;
+    mdbxc::sync::LogicalSchemaRef m_schema;
+    mdbxc::sync::DbId m_destination;
+    bool& m_destroyed;
+};
+
+class ReentrantDestroyMultiAdapter : public IntStringMultiAdapter {
+public:
+    ReentrantDestroyMultiAdapter(table_type& table,
+                                 const std::string& schema_id,
+                                 mdbxc::Connection& connection,
+                                 bool& destroyed)
+        : IntStringMultiAdapter(table, schema_id, 3u),
+          m_connection(connection), m_destroyed(destroyed) {}
+
+    std::shared_ptr<mdbxc::sync::ILogicalDbiCapture>
+    make_automatic_capture(
+            const mdbxc::sync::DbId& destination) const {
+        return std::shared_ptr<mdbxc::sync::ILogicalDbiCapture>(
+            new ReentrantDestroyCapture(
+                m_connection, primary_dbi(), schema_ref(), destination,
+                m_destroyed));
+    }
+
+private:
+    mdbxc::Connection& m_connection;
+    bool& m_destroyed;
+};
+
 struct LateFailStringCodec {
     typedef std::string value_type;
 
@@ -5599,6 +5671,81 @@ void test_key_multi_value_automatic_capture_uses_receiver_neutral_journal() {
     cleanup(path);
 }
 
+void test_key_multi_value_automatic_capture_supports_manual_transactions() {
+    const std::string path =
+        "test_key_multi_value_automatic_manual_transactions.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0xC5);
+    const mdbxc::sync::DbId local_db = make_node(0xD5);
+    const mdbxc::sync::DbId destination = make_node(0xE5);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+
+    mdbxc::KeyMultiValueTable<int, std::string> table(
+        conn, "automatic_manual_transactions");
+    IntStringMultiAdapter adapter(
+        table, "app.automatic.manual.transactions.v3", 3u);
+    engine.bind_key_multi_value_logical_capture(
+        adapter, destination,
+        make_key_multi_value_record(
+            "automatic_manual_transactions", 3u));
+
+    conn->begin(mdbxc::TransactionMode::WRITABLE);
+    table.insert(1, "committed");
+    conn->commit();
+    MDBXC_TEST_ASSERT(table.contains(1, "committed"));
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 1u);
+
+    conn->begin(mdbxc::TransactionMode::WRITABLE);
+    table.insert(2, "rolled-back");
+    conn->rollback();
+    MDBXC_TEST_ASSERT(!table.contains(2, "rolled-back"));
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 1u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_multi_value_automatic_capture_destroys_outside_connection_lock() {
+    const std::string path =
+        "test_key_multi_value_automatic_reentrant_capture_destroy.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0xC4);
+    const mdbxc::sync::DbId local_db = make_node(0xD4);
+    const mdbxc::sync::DbId destination = make_node(0xE4);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+
+    bool capture_destroyed = false;
+    mdbxc::KeyMultiValueTable<int, std::string> table(
+        conn, "automatic_reentrant_capture_destroy");
+    ReentrantDestroyMultiAdapter adapter(
+        table, "app.automatic.reentrant.capture.destroy.v3", *conn,
+        capture_destroyed);
+    engine.bind_key_multi_value_logical_capture(
+        adapter, destination,
+        make_key_multi_value_record(
+            "automatic_reentrant_capture_destroy", 3u));
+
+    conn->disconnect();
+    MDBXC_TEST_ASSERT(capture_destroyed);
+    cleanup(path);
+}
+
 void test_key_multi_value_automatic_capture_rolls_back_codec_failure() {
     const std::string path = "test_key_multi_value_automatic_capture_failure.mdbx";
     cleanup(path);
@@ -6913,6 +7060,8 @@ int main() {
     test_key_value_logical_apply_does_not_recapture_incoming_change();
     test_logical_outbox_persists_ordered_destination_streams();
     test_key_multi_value_automatic_capture_uses_receiver_neutral_journal();
+    test_key_multi_value_automatic_capture_supports_manual_transactions();
+    test_key_multi_value_automatic_capture_destroys_outside_connection_lock();
     test_key_multi_value_automatic_capture_rolls_back_codec_failure();
     test_key_multi_value_automatic_capture_rejects_public_suppression();
     test_key_multi_value_automatic_capture_rejects_legacy_session();
