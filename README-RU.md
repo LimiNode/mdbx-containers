@@ -178,7 +178,10 @@
   `MDBXC_HAS_KURLYK_HTTP_TRANSPORT` для условного подключения backend headers.
   Установленный package также экспортирует CMake provider functions для этих
   готовых transport targets.
-  Начните с [обзора sync](docs/sync-RU.md), затем используйте [руководство по
+  Начните с [карты архитектуры sync](guides/sync-architecture-RU.md), затем с
+  [обзора sync](docs/sync-RU.md), используйте [руководство по сценариям
+  sync](docs/sync-use-cases-RU.md) для выбора поддерживаемой модели данных и
+  [руководство по
   deployment patterns](docs/sync-deployment-patterns-RU.md) для выбора
   multi-origin data model, [руководство по logical и ordered sync](docs/sync-logical-RU.md)
   либо [руководство по восстановлению и full snapshots](docs/sync-recovery-RU.md)

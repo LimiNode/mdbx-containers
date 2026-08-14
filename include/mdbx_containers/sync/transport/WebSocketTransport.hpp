@@ -17,7 +17,6 @@
 #include <vector>
 
 #include "TransportMessageCodec.hpp"
-#include "../logical/LogicalRecoveryProtocol.hpp"
 
 namespace mdbxc {
 namespace sync {

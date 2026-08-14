@@ -18,11 +18,6 @@
 #endif
 #endif
 
-#if MDBXC_SYNC_ENABLED
-#include <mdbx_containers/sync/capture/ILogicalDbiCapture.hpp>
-#include <mdbx_containers/sync/logical/stores/LogicalDbiBindingStore.hpp>
-#endif
-
 namespace mdbxc {
 
     inline Connection::Connection(const Config& config) {

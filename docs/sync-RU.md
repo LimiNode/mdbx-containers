@@ -172,6 +172,9 @@ id и HTTP/WebSocket status mapping остаются на стороне adapter
 
 ## Дальнейшее чтение
 
+- [Сценарии использования sync](sync-use-cases-RU.md): выбор поддерживаемого
+  контракта для одного writer, immutable multi-origin events, LWW registers и
+  RAG corpus.
 - [Практические схемы развёртывания](sync-deployment-patterns-RU.md): модели
   данных и ownership writers для multi-origin datasets.
 - [Logical и ordered delivery](sync-logical-RU.md): typed schemas, adapter

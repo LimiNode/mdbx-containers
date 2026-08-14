@@ -9,8 +9,10 @@
 
 #if MDBXC_SYNC_ENABLED
 #include <mdbx_containers/common.hpp>
+#include "common.hpp"
 #include "protocol.hpp"
 #include "storage.hpp"
+#include "logical/LogicalChange.hpp"
 #include "capture/ISyncCaptureSink.hpp"
 #include "capture/ILogicalDbiCapture.hpp"
 #include "capture/SyncCaptureScope.hpp"

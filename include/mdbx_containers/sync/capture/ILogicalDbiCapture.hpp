@@ -12,9 +12,6 @@
 
 #include <mdbx.h>
 
-#include "../common.hpp"
-#include "../logical/LogicalChange.hpp"
-
 namespace mdbxc {
 namespace sync {
 

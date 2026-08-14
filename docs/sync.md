@@ -167,6 +167,8 @@ Useful runnable starting points:
 
 ## Next Reading
 
+- [Sync use cases](sync-use-cases.md): choose a supported contract for one
+  writer, immutable multi-origin events, LWW registers, and RAG corpus data.
 - [Deployment patterns](sync-deployment-patterns.md): data models and writer
   ownership for multi-origin datasets.
 - [Logical and ordered delivery](sync-logical.md): typed schemas, adapter

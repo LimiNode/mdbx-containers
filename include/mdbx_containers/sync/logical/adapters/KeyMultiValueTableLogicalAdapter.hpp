@@ -18,10 +18,6 @@
 #include <vector>
 
 #include "KeyValueTableLogicalAdapter.hpp"
-#include "../../capture/ILogicalDbiCapture.hpp"
-#include "../../stores/MetaStore.hpp"
-#include "../stores/LogicalJournalStore.hpp"
-#include "../stores/LogicalOutboxStore.hpp"
 
 namespace mdbxc {
 namespace sync {
