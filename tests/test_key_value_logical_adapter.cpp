@@ -5988,6 +5988,174 @@ void test_key_multi_value_automatic_capture_does_not_cross_reconnect_environment
     cleanup(path_b);
 }
 
+void test_key_ordered_multi_value_automatic_capture_uses_receiver_neutral_journal() {
+    const std::string path =
+        "test_key_ordered_multi_value_automatic_capture.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x9Cu);
+    const mdbxc::sync::DbId local_db = make_node(0xACu);
+    const mdbxc::sync::DbId destination = make_node(0xBCu);
+    const mdbxc::sync::NodeId receiver_b = make_node(0xCCu);
+    const mdbxc::sync::NodeId receiver_c = make_node(0xDCu);
+
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+
+    mdbxc::sync::LogicalSchemaRecord record =
+        make_key_ordered_multi_value_record("automatic_ordered");
+    record.ordered_delivery_origin_node_id = local_node;
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> table(
+        conn, "automatic_ordered");
+    IntStringOrderedAdapter adapter(table, "app.automatic.ordered.v1");
+    engine.bind_key_ordered_multi_value_logical_capture(
+        adapter, destination, record);
+
+    table.append(1, "first");
+    table.insert(1, "second");
+    std::vector<mdbxc::KeyOrderedMultiValueTable<int, std::string>::value_type>
+        batch;
+    batch.push_back(std::make_pair(2, std::string("third")));
+    batch.push_back(std::make_pair(2, std::string("fourth")));
+    table.append(batch);
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 3u);
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(destination, receiver_b).empty());
+    MDBXC_TEST_ASSERT(engine.pending_logical_deliveries(destination, receiver_c).empty());
+
+    MDBXC_TEST_ASSERT(engine.materialize_logical_journal(destination, receiver_b) == 3u);
+    MDBXC_TEST_ASSERT(engine.materialize_logical_journal(destination, receiver_c) == 3u);
+    const std::vector<mdbxc::sync::LogicalDeliveryEnvelope> receiver_b_pending =
+        engine.pending_logical_deliveries(destination, receiver_b);
+    const std::vector<mdbxc::sync::LogicalDeliveryEnvelope> receiver_c_pending =
+        engine.pending_logical_deliveries(destination, receiver_c);
+    MDBXC_TEST_ASSERT(receiver_b_pending.size() == 3u);
+    MDBXC_TEST_ASSERT(receiver_c_pending.size() == 3u);
+    MDBXC_TEST_ASSERT(receiver_b_pending[0].frame.changes[0].opcode ==
+        mdbxc::sync::opcode_value(
+            mdbxc::sync::KeyOrderedMultiValueLogicalOpcode::AppendOne));
+    MDBXC_TEST_ASSERT(receiver_b_pending[2].frame.changes.size() == 2u);
+
+    bool destructive_rejected = false;
+    try {
+        (void)table.erase(1);
+    } catch (const std::logic_error&) {
+        destructive_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(destructive_rejected);
+    MDBXC_TEST_ASSERT(table.find(1).size() == 2u);
+
+    bool raw_rejected = false;
+    MDBX_txn* raw = nullptr;
+    MDBXC_TEST_ASSERT(mdbx_txn_begin(
+        conn->env_handle(), nullptr, static_cast<MDBX_txn_flags_t>(0), &raw) ==
+        MDBX_SUCCESS);
+    try {
+        table.append(3, "raw", raw);
+    } catch (const std::logic_error&) {
+        raw_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(mdbx_txn_commit(raw) == MDBX_SUCCESS);
+    MDBXC_TEST_ASSERT(raw_rejected);
+    MDBXC_TEST_ASSERT(!table.contains(3));
+
+    bool write_rejected = false;
+    bool commit_rejected = false;
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        {
+            mdbxc::Connection::SyncCaptureSuppressionScope suppress(
+                *conn, txn.handle());
+            try {
+                table.append(3, "suppressed", txn.handle());
+            } catch (const std::logic_error&) {
+                write_rejected = true;
+            }
+        }
+        try {
+            txn.commit();
+        } catch (const std::logic_error&) {
+            commit_rejected = true;
+        }
+    }
+    MDBXC_TEST_ASSERT(write_rejected);
+    MDBXC_TEST_ASSERT(commit_rejected);
+    MDBXC_TEST_ASSERT(!table.contains(3));
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 3u);
+
+    bool legacy_rejected = false;
+    try {
+        (void)adapter.begin_capture_session();
+    } catch (const std::logic_error&) {
+        legacy_rejected = true;
+    }
+    MDBXC_TEST_ASSERT(legacy_rejected);
+
+    bool direct_commit_rejected = false;
+    {
+        mdbxc::Transaction txn =
+            conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        const mdbxc::sync::LogicalApplyResult direct_result = adapter.apply(
+            txn.handle(), adapter.make_append(4, "inbound"));
+        MDBXC_TEST_ASSERT(!direct_result.ok);
+        try {
+            txn.commit();
+        } catch (const std::logic_error&) {
+            direct_commit_rejected = true;
+        }
+    }
+    MDBXC_TEST_ASSERT(direct_commit_rejected);
+    MDBXC_TEST_ASSERT(!table.contains(4));
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_key_ordered_multi_value_automatic_capture_rejects_non_authority() {
+    const std::string path =
+        "test_key_ordered_multi_value_automatic_non_authority.mdbx";
+    cleanup(path);
+
+    const mdbxc::sync::NodeId local_node = make_node(0x9Du);
+    const mdbxc::sync::DbId local_db = make_node(0xADu);
+    const mdbxc::sync::DbId destination = make_node(0xBDu);
+    mdbxc::Config cfg;
+    cfg.pathname = path;
+    cfg.max_dbs = 20;
+    cfg.no_subdir = true;
+    std::shared_ptr<mdbxc::Connection> conn = mdbxc::Connection::create(cfg);
+    mdbxc::sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, local_db);
+
+    mdbxc::sync::LogicalSchemaRecord record =
+        make_key_ordered_multi_value_record("automatic_ordered_non_authority");
+    record.ordered_delivery_origin_node_id = make_node(0xEDu);
+    mdbxc::KeyOrderedMultiValueTable<int, std::string> table(
+        conn, "automatic_ordered_non_authority");
+    IntStringOrderedAdapter adapter(
+        table, "app.automatic.ordered.non-authority.v1");
+    bool rejected = false;
+    try {
+        engine.bind_key_ordered_multi_value_logical_capture(
+            adapter, destination, record);
+    } catch (const std::runtime_error&) {
+        rejected = true;
+    }
+    MDBXC_TEST_ASSERT(rejected);
+
+    table.append(1, "local-only");
+    MDBXC_TEST_ASSERT(table.contains(1, "local-only"));
+    MDBXC_TEST_ASSERT(engine.logical_journal_known_tail(destination) == 0u);
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_logical_journal_separates_capture_from_routing() {
     const std::string path = "test_logical_journal_routing.mdbx";
     cleanup(path);
@@ -7068,6 +7236,8 @@ int main() {
     test_key_multi_value_automatic_capture_rejects_direct_logical_apply();
     test_key_multi_value_automatic_capture_requires_rebind_after_reconnect();
     test_key_multi_value_automatic_capture_does_not_cross_reconnect_environments();
+    test_key_ordered_multi_value_automatic_capture_uses_receiver_neutral_journal();
+    test_key_ordered_multi_value_automatic_capture_rejects_non_authority();
     test_logical_journal_separates_capture_from_routing();
     test_logical_journal_is_lazy_for_raw_sync_capacity();
     test_logical_journal_rejects_legacy_outbox_state();

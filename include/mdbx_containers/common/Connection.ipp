@@ -271,8 +271,8 @@ namespace mdbxc {
             }
             if (is_sync_logical_dbi(txn, dbi_name)) {
                 throw std::logic_error(
-                    "registered logical DBI must be mutated through "
-                    "KeyMultiValueTable logical capture");
+                    "registered logical DBI must be mutated through its "
+                    "automatic logical capture-enabled table API");
             }
             throw std::logic_error(
                 "registered source-version-wins DBI must be mutated through "
@@ -555,7 +555,7 @@ namespace mdbxc {
                 std::string(context) +
                 " cannot use caller-created raw writable MDBX_txn* with a "
                 "registered logical DBI; use Connection::transaction() and "
-                "KeyMultiValueTable");
+                "the bound automatic logical table API");
         }
         throw std::logic_error(
             std::string(context) +
@@ -794,7 +794,8 @@ namespace mdbxc {
             const char* operation) const {
         if (!is_sync_logical_dbi(txn, dbi_name)) return;
         throw std::logic_error(std::string("registered logical DBI does not support ") +
-                               operation + "; use a supported KeyMultiValueTable mutation");
+                               operation +
+                               "; use a supported automatic logical table mutation");
     }
 
     inline void Connection::ensure_logical_dbi_capture_not_suppressed(
