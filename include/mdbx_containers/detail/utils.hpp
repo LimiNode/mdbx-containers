@@ -176,6 +176,15 @@ namespace mdbxc {
         static const bool value = decltype(check<T>(0))::value;
     };
 
+    /// \brief Marks key types with a library-defined bytewise key codec.
+    /// \details Application-provided `to_bytes()` and `from_bytes()` methods do
+    ///          not opt a type into key serialization. A specialization denotes
+    ///          a documented, canonical key layout whose bytes use MDBX's normal
+    ///          bytewise comparator.
+    /// \tparam T Key type under inspection.
+    template<typename T>
+    struct is_canonical_bytewise_key : std::false_type {};
+
     // --- Traits ---
 
     template <typename T>
@@ -426,18 +435,18 @@ namespace mdbxc {
         !is_key_integral<T>::value &&
         !std::is_same<T, float>::value &&
         !std::is_same<T, double>::value &&
-        !(has_to_bytes<T>::value && has_from_bytes<T>::value), size_t>::type
+        !is_canonical_bytewise_key<T>::value, size_t>::type
     get_key_size(const T&) {
         return sizeof(T);
     }
 
-    /// \brief Returns the serialized size of a custom byte-serializable key.
-    /// \tparam T Key type providing `to_bytes()`.
+    /// \brief Returns the serialized size of a canonical bytewise key.
+    /// \tparam T Key type with a library-defined canonical codec.
     /// \param key Key value.
     /// \return Number of serialized bytes.
     template<typename T>
     typename std::enable_if<
-        has_to_bytes<T>::value && has_from_bytes<T>::value, size_t>::type
+        is_canonical_bytewise_key<T>::value, size_t>::type
     get_key_size(const T& key) {
         return key.to_bytes().size();
     }
@@ -565,7 +574,10 @@ namespace mdbxc {
     /// \param key The key to convert.
     /// \return MDBX_val representing the key.
     template <bool SafeIntegerKey = true, typename T>
-    typename std::enable_if<!has_to_bytes<T>::value && !std::is_same<T, std::string>::value && !std::is_trivially_copyable<T>::value, MDBX_val>::type
+    typename std::enable_if<
+        !std::is_same<T, std::string>::value &&
+        !std::is_trivially_copyable<T>::value &&
+        !is_canonical_bytewise_key<T>::value, MDBX_val>::type
     serialize_key(const T& key, SerializeScratch& sc) {
         (void)SafeIntegerKey;
         (void)key; 
@@ -577,14 +589,14 @@ namespace mdbxc {
         return val;
     }
 
-    /// \brief Serializes a key using its canonical `to_bytes()` representation.
-    /// \tparam T Key type providing `to_bytes()`.
+    /// \brief Serializes a key using its library-defined canonical representation.
+    /// \tparam T Key type with a library-defined canonical codec.
     /// \param key Key to serialize.
     /// \param sc Scratch storage owning the serialized bytes.
     /// \return MDBX value view over the scratch storage.
     template <bool SafeIntegerKey = true, typename T>
     typename std::enable_if<
-        has_to_bytes<T>::value && has_from_bytes<T>::value, MDBX_val>::type
+        is_canonical_bytewise_key<T>::value, MDBX_val>::type
     serialize_key(const T& key, SerializeScratch& sc) {
         (void)SafeIntegerKey;
         sc.bytes = key.to_bytes();
@@ -1106,8 +1118,7 @@ namespace mdbxc {
     /// \brief Deserializes a value using its `from_bytes()` method.
     /// \tparam T Type providing `from_bytes`.
     template<typename T>
-    typename std::enable_if<
-        has_to_bytes<T>::value && has_from_bytes<T>::value, T>::type
+    typename std::enable_if<has_from_bytes<T>::value, T>::type
     deserialize_value(const MDBX_val& val) {
         return T::from_bytes(val.iov_base, val.iov_len);
     }
@@ -1180,12 +1191,12 @@ namespace mdbxc {
         return deserialize_value<T>(val);
     }
 
-    /// \brief Deserializes a key using its canonical `from_bytes()` representation.
-    /// \tparam T Key type providing static `from_bytes(const void*, size_t)`.
+    /// \brief Deserializes a key using its library-defined canonical representation.
+    /// \tparam T Key type with a library-defined canonical codec.
     /// \param val Serialized key bytes.
     /// \return Deserialized key.
     template<typename T>
-    typename std::enable_if<has_from_bytes<T>::value, T>::type
+    typename std::enable_if<is_canonical_bytewise_key<T>::value, T>::type
     deserialize_key(const MDBX_val& val) {
         return T::from_bytes(val.iov_base, val.iov_len);
     }
@@ -1343,7 +1354,7 @@ namespace mdbxc {
         !is_key_integral<T>::value &&
         !std::is_same<T, float>::value &&
         !std::is_same<T, double>::value &&
-        !(has_to_bytes<T>::value && has_from_bytes<T>::value), T>::type
+        !is_canonical_bytewise_key<T>::value, T>::type
     deserialize_key(const MDBX_val& val) {
         return deserialize_value<T>(val);
     }

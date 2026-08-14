@@ -96,7 +96,9 @@ All public table classes follow the same broad shape:
 
 `CompositeKey<P1, ..., PN>` is a typed key for an MDBX table whose ordering
 depends on two to five components. It supports integral types up to 64 bits,
-`bool`, `float`, `double`, `std::string`, and `std::vector<uint8_t>`.
+`bool`, `float`, `double`, `std::string`, and `std::vector<uint8_t>`. Integral
+components use the same canonical 32-/64-bit storage widths as ordinary table
+keys, independent of LP64 versus LLP64 platform data models.
 
 - Its serialized form preserves lexicographic component ordering under MDBX's
   normal bytewise comparator, so it is suitable for prefix-oriented key layouts

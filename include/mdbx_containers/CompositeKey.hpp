@@ -112,45 +112,73 @@ namespace detail {
 
     template<typename T>
     struct CompositeKeyPartCodec<T, typename std::enable_if<
-            std::is_integral<T>::value && !std::is_same<T, bool>::value>::type> {
-        typedef typename std::make_unsigned<T>::type UnsignedT;
+            std::is_integral<T>::value &&
+            !std::is_same<T, bool>::value &&
+            !is_key_character_code_unit<T>::value>::type> {
+        static_assert(sizeof(T) <= sizeof(std::uint64_t),
+                      "CompositeKey integral components must be at most 64 bits");
 
         static void append(T value, std::vector<std::uint8_t>& out) {
-            static_assert(sizeof(T) <= sizeof(std::uint64_t),
-                          "CompositeKey integral components must be at most 64 bits");
-            UnsignedT sortable = static_cast<UnsignedT>(value);
-            if (std::is_signed<T>::value) {
-                sortable = static_cast<UnsignedT>(
-                    sortable ^ (UnsignedT(1) << (sizeof(T) * CHAR_BIT - 1u)));
+            if (mdbx_integer_key_storage_size<T>::value ==
+                    sizeof(std::uint32_t)) {
+                const std::uint32_t sortable =
+                    is_signed_mdbx_integer_key<T>::value
+                        ? sortable_key_from_signed_int32(
+                            static_cast<std::int32_t>(value))
+                        : static_cast<std::uint32_t>(value);
+                composite_key_append_big_endian(sortable, out);
+                return;
             }
+
+            const std::uint64_t sortable =
+                is_signed_mdbx_integer_key<T>::value
+                    ? sortable_key_from_signed_int64(
+                        static_cast<std::int64_t>(value))
+                    : static_cast<std::uint64_t>(value);
             composite_key_append_big_endian(sortable, out);
         }
 
         static T read(const std::uint8_t*& current, const std::uint8_t* end) {
-            static_assert(sizeof(T) <= sizeof(std::uint64_t),
-                          "CompositeKey integral components must be at most 64 bits");
-            UnsignedT raw = composite_key_read_big_endian<UnsignedT>(current, end);
-            if (std::is_signed<T>::value) {
-                raw = static_cast<UnsignedT>(
-                    raw ^ (UnsignedT(1) << (sizeof(T) * CHAR_BIT - 1u)));
-                T value;
-                std::memcpy(&value, &raw, sizeof(value));
-                return value;
+            if (mdbx_integer_key_storage_size<T>::value ==
+                    sizeof(std::uint32_t)) {
+                const std::uint32_t raw =
+                    composite_key_read_big_endian<std::uint32_t>(current, end);
+                return is_signed_mdbx_integer_key<T>::value
+                    ? static_cast<T>(signed_int32_from_sortable_key(raw))
+                    : static_cast<T>(raw);
             }
-            return static_cast<T>(raw);
+
+            const std::uint64_t raw =
+                composite_key_read_big_endian<std::uint64_t>(current, end);
+            return is_signed_mdbx_integer_key<T>::value
+                ? static_cast<T>(signed_int64_from_sortable_key(raw))
+                : static_cast<T>(raw);
+        }
+    };
+
+    template<typename T>
+    struct CompositeKeyPartCodec<T, typename std::enable_if<
+            is_key_character_code_unit<T>::value>::type> {
+        static void append(T value, std::vector<std::uint8_t>& out) {
+            composite_key_append_big_endian(code_unit_key_bits(value), out);
+        }
+
+        static T read(const std::uint8_t*& current, const std::uint8_t* end) {
+            return code_unit_key_from_bits<T>(
+                composite_key_read_big_endian<std::uint32_t>(current, end));
         }
     };
 
     template<>
     struct CompositeKeyPartCodec<bool, void> {
         static void append(bool value, std::vector<std::uint8_t>& out) {
-            out.push_back(value ? 1u : 0u);
+            composite_key_append_big_endian<std::uint32_t>(
+                value ? 1u : 0u, out);
         }
 
         static bool read(const std::uint8_t*& current, const std::uint8_t* end) {
-            composite_key_require_bytes(current, end, 1u);
-            const std::uint8_t value = *current;
-            ++current;
+            const std::uint32_t value =
+                composite_key_read_big_endian<std::uint32_t>(current, end);
             if (value > 1u) {
                 throw std::runtime_error(
                     "CompositeKey::from_bytes: invalid bool component");
@@ -264,9 +292,10 @@ namespace detail {
 
 /// \brief Typed composite key with a canonical bytewise-sortable encoding.
 /// \tparam Parts Two to five supported component types.
-/// \details Integral components use big-endian sortable encodings; strings and
-///          byte vectors use a prefix-safe escaped terminator. The resulting
-///          bytes preserve lexicographic component ordering under MDBX's normal
+/// \details Integral components use the library's platform-neutral 32- or
+///          64-bit sortable rank before big-endian encoding; strings and byte
+///          vectors use a prefix-safe escaped terminator. The resulting bytes
+///          preserve lexicographic component ordering under MDBX's normal
 ///          bytewise key comparator.
 template<typename... Parts>
 struct CompositeKey {
@@ -314,6 +343,9 @@ struct CompositeKey {
         return to_bytes() < other.to_bytes();
     }
 };
+
+template<typename... Parts>
+struct is_canonical_bytewise_key<CompositeKey<Parts...> > : std::true_type {};
 
 /// \brief Constructs a composite key with decayed component types.
 /// \tparam Parts Component argument types.
