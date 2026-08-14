@@ -9,6 +9,8 @@
 #include <cstdint>
 #include <limits>
 #include <memory>
+#include <map>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
@@ -16,6 +18,10 @@
 #include <vector>
 
 #include "KeyValueTableLogicalAdapter.hpp"
+#include "../../capture/ILogicalDbiCapture.hpp"
+#include "../../stores/MetaStore.hpp"
+#include "../stores/LogicalJournalStore.hpp"
+#include "../stores/LogicalOutboxStore.hpp"
 
 namespace mdbxc {
 namespace sync {
@@ -41,6 +47,7 @@ namespace sync {
     class KeyOrderedMultiValueTableLogicalAdapter
             : public ILogicalTableAdapter {
     private:
+        class AutomaticCapture;
         static const std::uint32_t supported_schema_version = 1u;
 
     public:
@@ -111,6 +118,19 @@ namespace sync {
             return make_append(key, value);
         }
 
+        /// \brief Creates connection-owned automatic capture for this adapter.
+        /// \details Schema-v1 ordered capture is append-only. Ordinary
+        /// \c append and \c insert calls append receiver-neutral frames to the
+        /// durable logical journal at transaction pre-commit; receiver routes
+        /// are selected later by \c materialize_logical_journal().
+        std::shared_ptr<ILogicalDbiCapture> make_automatic_capture(
+                const DbId& destination) const {
+            return std::shared_ptr<ILogicalDbiCapture>(
+                new AutomaticCapture(m_table.connection()->env_handle(),
+                                     m_table.dbi_name(), schema_ref(),
+                                     destination));
+        }
+
         /// \brief Transaction-bound typed capture session for append history.
         /// \details The session owns one writable transaction, suppresses raw
         /// capture, and records only \c append and its \c insert alias. A
@@ -124,6 +144,9 @@ namespace sync {
                 : detail::CapturedLogicalTransaction(
                       *adapter.m_table.connection()),
                   m_adapter(adapter) {
+                adapter.m_table.connection()
+                    ->ensure_logical_dbi_capture_session_supported(
+                        m_txn.handle(), adapter.m_table.dbi_name());
                 const LogicalApplyResult marker_result =
                     validate_logical_adapter_marker(
                         m_txn.handle(),
@@ -259,6 +282,151 @@ namespace sync {
         }
 
     private:
+        class AutomaticCapture : public ILogicalDbiCapture {
+        public:
+            AutomaticCapture(MDBX_env* env,
+                             const std::string& dbi_name,
+                             const LogicalSchemaRef& schema,
+                             const DbId& destination)
+                : m_env(env),
+                  m_dbi_name(dbi_name),
+                  m_schema(schema),
+                  m_destination(destination) {
+                if (m_env == nullptr ||
+                    !is_logical_schema_ref_complete(m_schema) ||
+                    m_schema.kind != LogicalTableKind::KeyOrderedMultiValue ||
+                    m_schema.schema_version != supported_schema_version ||
+                    is_zero_sync_id(m_destination)) {
+                    throw std::invalid_argument(
+                        "KeyOrderedMultiValue automatic logical capture is invalid");
+                }
+            }
+
+            const std::string& dbi_name() const override { return m_dbi_name; }
+            LogicalSchemaRef schema_ref() const override { return m_schema; }
+            const DbId& destination() const override { return m_destination; }
+
+            void record_insert(MDBX_txn* txn, const void* key,
+                               const void* value) override {
+                LogicalChange change;
+                change.schema = m_schema;
+                change.opcode = opcode_value(
+                    KeyOrderedMultiValueLogicalOpcode::AppendOne);
+                encode_pair(checked_key(key), checked_value(value), change.payload);
+                append(txn, change);
+            }
+
+            void record_erase_key(MDBX_txn*, const void*) override {
+                reject_destructive_operation();
+            }
+
+            void record_erase_all_values(MDBX_txn*, const void*,
+                                         const void*) override {
+                reject_destructive_operation();
+            }
+
+            void record_erase_one_value(MDBX_txn*, const void*,
+                                        const void*) override {
+                reject_destructive_operation();
+            }
+
+            void record_clear(MDBX_txn*) override {
+                reject_destructive_operation();
+            }
+
+            void flush_in_txn(MDBX_txn* txn) override {
+                LogicalChangeFrame frame;
+                {
+                    std::lock_guard<std::mutex> locker(m_mutex);
+                    typename std::map<MDBX_txn*, LogicalChangeFrame>::iterator it =
+                        m_pending.find(txn);
+                    if (it == m_pending.end() || it->second.changes.empty()) return;
+                    frame.changes.swap(it->second.changes);
+                    m_pending.erase(it);
+                }
+                MetaStore meta(m_env);
+                LogicalJournalStore journal(m_env);
+                LogicalOutboxStore outbox(m_env);
+                meta.open(txn);
+                const NodeId origin = meta.get_node_id(txn);
+                if (is_zero_sync_id(origin)) {
+                    throw std::logic_error(
+                        "KeyOrderedMultiValue automatic logical capture requires local node identity");
+                }
+                SchemaRegistryStore schemas(m_env);
+                LogicalSchemaRecord record;
+                if (!schemas.get(txn, m_schema.schema_id, record) ||
+                    record.kind != m_schema.kind ||
+                    record.schema_version != m_schema.schema_version ||
+                    record.dbi_name != m_dbi_name ||
+                    record.dbi_names.size() != 1u ||
+                    record.dbi_names[0] != m_dbi_name) {
+                    throw std::logic_error(
+                        "KeyOrderedMultiValue automatic logical capture schema marker is invalid");
+                }
+                const LogicalApplyResult authority_result =
+                    validate_ordered_logical_schema_record_origin(
+                        txn, m_env, record);
+                if (!authority_result.ok) {
+                    throw std::logic_error(authority_result.error);
+                }
+                if (!journal.is_initialized(txn)) {
+                    if (outbox.has_persistent_state(txn)) {
+                        throw std::logic_error(
+                            "logical journal cannot start with legacy outbox state");
+                    }
+                    journal.initialize(txn);
+                }
+                (void)journal.append(txn, m_destination, origin, frame);
+            }
+
+            void discard_txn(MDBX_txn* txn) noexcept override {
+                try {
+                    std::lock_guard<std::mutex> locker(m_mutex);
+                    m_pending.erase(txn);
+                } catch (...) {
+                }
+            }
+
+        private:
+            static const KeyT& checked_key(const void* value) {
+                if (value == nullptr) {
+                    throw std::invalid_argument(
+                        "KeyOrderedMultiValue automatic capture key is null");
+                }
+                return *static_cast<const KeyT*>(value);
+            }
+
+            static const ValueT& checked_value(const void* value) {
+                if (value == nullptr) {
+                    throw std::invalid_argument(
+                        "KeyOrderedMultiValue automatic capture value is null");
+                }
+                return *static_cast<const ValueT*>(value);
+            }
+
+            static void reject_destructive_operation() {
+                throw std::logic_error(
+                    "KeyOrderedMultiValue automatic logical capture is append-only");
+            }
+
+            void append(MDBX_txn* txn, const LogicalChange& change) {
+                if (txn == nullptr) {
+                    throw std::invalid_argument(
+                        "KeyOrderedMultiValue automatic capture transaction is null");
+                }
+                std::lock_guard<std::mutex> locker(m_mutex);
+                m_pending[txn].changes.push_back(change);
+            }
+
+            MDBX_env* m_env;
+            std::string m_dbi_name;
+            LogicalSchemaRef m_schema;
+            DbId m_destination;
+            std::mutex m_mutex;
+            std::map<MDBX_txn*, LogicalChangeFrame> m_pending;
+        };
+
 #include "KeyOrderedMultiValueTableLogicalAdapter.ipp"
 
     };

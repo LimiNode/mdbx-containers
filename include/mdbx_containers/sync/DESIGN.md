@@ -108,7 +108,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `VectorStore` | Raw plus limited logical adapter | Raw replication covers its `SequenceTable` and `KeyValueTable` member writes. The explicit schema-v1 logical adapter captures and applies add, erase, and clear over the ids, embeddings, text, and metadata DBIs with explicit record ids. Erase retains the ids marker as the persistent allocation high-water; clear resets all four DBIs. Both paths require one authoritative or application-serialized writer per collection; the logical adapter is not a multi-writer conflict resolver or automatic transport path. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Schema-v3 logical adapter plus automatic capture | Raw v0.1 capture remains unsupported. `SyncEngine::bind_key_multi_value_logical_capture()` durably binds one DBI to a receiver-neutral logical dataset and makes ordinary supported writes publish schema-v3 frames atomically into `LogicalJournalStore`. `erase_range()` remains fail-closed because its normal API is unbounded. All destructive modes require one-writer or causally serialized updates. |
-| `KeyOrderedMultiValueTable` | Ordered logical adapters | Schema v1 remains append-only. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids, and single-origin `replace_with()` expands replacement state into exact changes. |
+| `KeyOrderedMultiValueTable` | Schema-v1 automatic append capture plus ordered adapters | `SyncEngine::bind_key_ordered_multi_value_logical_capture()` durably binds schema v1 to a receiver-neutral logical dataset and atomically journals ordinary `append`/`insert` calls. The bound v1 API rejects destructive table mutations. Schema v2 provides explicit `AppendElement` and `EraseElement` by immutable id through ordered delivery for one authoritative origin. Bounded key/index/value/clear capture expands selectors to exact ids, and single-origin `replace_with()` expands replacement state into exact changes. |
 | `HashedKeyValueStore` | Not supported in v0.1 | Deferred until hash-index and identity-key mapping semantics are specified. |
 
 Do not add `record_op()` paths for unsupported table types without first
@@ -340,6 +340,26 @@ per-key append order is part of the contract. Its first logical adapter is
 append-only and accepts changes only through
 `SyncEngine::apply_ordered_logical_delivery_envelope()`. Direct logical frames
 and unordered delivery must fail before adapter callbacks or table mutation.
+
+Schema v1 may also use receiver-neutral automatic capture at its authoritative
+origin. `SyncEngine::bind_key_ordered_multi_value_logical_capture(adapter,
+destination, record)` persists the dataset binding in
+`_mdbxc_logical_dbi_bindings` and requires `record` to name the local node as
+the ordered origin. Ordinary `append` and `insert` calls, including a vector
+batch append, accumulate `AppendOne` changes in the current transaction and
+append one durable frame to `LogicalJournalStore` at pre-commit. The binding
+does not contain a receiver node; delivery later calls
+`materialize_logical_journal(destination, receiver)`. `erase`, `erase_at`,
+`clear`, and `replace_with` are rejected for a bound schema-v1 DBI, because
+their semantics require the existing schema-v2 element-id/tombstone protocol.
+There is currently no automatic schema-v2 binding or in-place migration from a
+bound v1 DBI: assigning ids to existing v1 occurrences, creating the v2 state
+and key-index DBIs, migrating the durable logical DBI binding, and defining the
+journal/delivery-frontier transition require one explicit future migration
+procedure. A v1→v2 change is therefore not a schema-version edit. Missing
+runtime capture, legacy typed sessions, public capture suppression, and
+caller-created writable raw transactions fail closed, as for other automatic
+logical bindings.
 The local storage format is:
 
 ```text

@@ -538,6 +538,52 @@ namespace sync {
                 adapter.make_automatic_capture(destination));
         }
 
+        /// \brief Binds a schema-v1 ordered adapter to automatic capture.
+        /// \details Ordinary append-only \c KeyOrderedMultiValueTable writes
+        /// are journaled without selecting a receiver. The persistent marker
+        /// must designate this local node as the ordered authoritative origin;
+        /// destructive operations remain unavailable on the bound DBI.
+        template<class KeyOrderedMultiValueAdapterT>
+        void bind_key_ordered_multi_value_logical_capture(
+                const KeyOrderedMultiValueAdapterT& adapter,
+                const DbId& destination,
+                const LogicalSchemaRecord& record) {
+            const LogicalSchemaRef ref = adapter.schema_ref();
+            if (ref.kind != LogicalTableKind::KeyOrderedMultiValue ||
+                ref.schema_version != 1u ||
+                !is_logical_schema_ref_complete(ref) ||
+                record.kind != ref.kind ||
+                record.schema_version != ref.schema_version) {
+                throw std::invalid_argument(
+                    "automatic KeyOrderedMultiValue capture requires schema version 1");
+            }
+            {
+                auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+                initialize_system_stores(txn.handle());
+                SchemaRegistryStore schemas(m_conn->env_handle());
+                LogicalSchemaRecord existing;
+                if (schemas.get(txn.handle(), ref.schema_id, existing)) {
+                    schemas.register_or_verify(txn.handle(), ref.schema_id, record);
+                    adapter.verify_storage(txn.handle());
+                } else {
+                    adapter.initialize_storage(txn.handle());
+                    schemas.register_or_verify(txn.handle(), ref.schema_id, record);
+                }
+                const LogicalApplyResult marker_result =
+                    validate_ordered_logical_adapter_origin(
+                        txn.handle(), m_conn->env_handle(), adapter);
+                if (!marker_result.ok) {
+                    throw std::runtime_error(marker_result.error);
+                }
+                LogicalDbiBindingStore bindings(m_conn->env_handle());
+                bindings.register_or_verify(txn.handle(), adapter.primary_dbi(),
+                                            destination, ref);
+                txn.commit();
+            }
+            m_conn->attach_logical_dbi_capture(
+                adapter.make_automatic_capture(destination));
+        }
+
         /// \brief Migrates an existing persistent logical table schema marker.
         /// \details This is an explicit marker lifecycle operation. It does
         /// not migrate user table contents or changelog data. The current

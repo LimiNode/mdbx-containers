@@ -206,6 +206,9 @@ namespace mdbxc {
         /// \param txn Optional transaction handle.
         void replace_with(const std::vector<value_type>& container, MDBX_txn* txn = nullptr) {
             with_transaction([this, &container](MDBX_txn* t) {
+#           if MDBXC_SYNC_ENABLED
+                ensure_logical_operation_supported(t, "replace_with()");
+#           endif
                 db_clear(t);
                 db_append(container, t);
             }, TransactionMode::WRITABLE, txn);
@@ -319,6 +322,9 @@ namespace mdbxc {
         bool erase(const KeyT& key, MDBX_txn* txn = nullptr) {
             bool result = false;
             with_transaction([this, &key, &result](MDBX_txn* t) {
+#           if MDBXC_SYNC_ENABLED
+                ensure_logical_operation_supported(t, "erase(key)");
+#           endif
                 result = db_erase_key(key, t);
             }, TransactionMode::WRITABLE, txn);
             return result;
@@ -335,6 +341,9 @@ namespace mdbxc {
         std::size_t erase(const KeyT& key, const ValueT& value, MDBX_txn* txn = nullptr) {
             std::size_t removed = 0;
             with_transaction([this, &key, &value, &removed](MDBX_txn* t) {
+#           if MDBXC_SYNC_ENABLED
+                ensure_logical_operation_supported(t, "erase(key, value)");
+#           endif
                 removed = db_erase_pair(key, value, t);
             }, TransactionMode::WRITABLE, txn);
             return removed;
@@ -354,6 +363,9 @@ namespace mdbxc {
         bool erase_at(const KeyT& key, std::size_t index, MDBX_txn* txn = nullptr) {
             bool removed = false;
             with_transaction([this, &key, &index, &removed](MDBX_txn* t) {
+#           if MDBXC_SYNC_ENABLED
+                ensure_logical_operation_supported(t, "erase_at()");
+#           endif
                 removed = db_erase_at(key, index, t);
             }, TransactionMode::WRITABLE, txn);
             return removed;
@@ -367,6 +379,9 @@ namespace mdbxc {
         /// \brief Removes all pairs.
         void clear(MDBX_txn* txn = nullptr) {
             with_transaction([this](MDBX_txn* t) {
+#           if MDBXC_SYNC_ENABLED
+                ensure_logical_operation_supported(t, "clear()");
+#           endif
                 db_clear(t);
             }, TransactionMode::WRITABLE, txn);
         }
@@ -665,6 +680,9 @@ namespace mdbxc {
             check_dupsort_value_size(db_val);
             check_mdbx(mdbx_put(txn, m_dbi, &db_key, &db_val, MDBX_UPSERT),
                        "Failed to append ordered multi-value record");
+#       if MDBXC_SYNC_ENABLED
+            record_logical_insert(txn, &key, &value);
+#       endif
         }
 
         void db_append(const std::vector<value_type>& container, MDBX_txn* txn) {
