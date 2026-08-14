@@ -1,31 +1,31 @@
 # Логическая и упорядоченная синхронизация
 
-Logical sync - это opt-in application-owned protocol для таблиц, чью публичную
-семантику нельзя безопасно выразить raw MDBX puts и deletes. Он использует
-явный schema marker и payloads, принадлежащие adapter'у. Он не входит в обычный
-raw `PullRequest` / `PushRequest` wire path.
+Логическая синхронизация — подключаемый протокол уровня приложения для таблиц,
+чью публичную семантику нельзя безопасно выразить raw-операциями MDBX put и
+delete. Он использует явный маркер схемы и нагрузку, принадлежащую адаптеру. Он
+не входит в обычный сетевой путь raw `PullRequest` / `PushRequest`.
 
-Сначала прочитайте [Sync-репликация](sync-RU.md). English version:
+Сначала прочитайте [Sync-репликация](sync-RU.md). Английская версия:
 [sync-logical.md](sync-logical.md).
 
 ## Жизненный цикл
 
-1. Выберите стабильные application `schema_id`, logical table kind, schema
-   version, codec tags и полный набор owned DBI names.
-2. Инициализируйте или проверьте schema marker через `SyncEngine`. Существующий
-   marker проверяется, а не пересоздаётся как неявное восстановление.
-3. Создайте соответствующие adapters на source и destination. Зарегистрируйте
-   destination adapter в destination `SyncEngine`.
-4. Выполняйте записи source через typed capture session adapter'а. Успешный
-   session commit публикует logical changes только после успешной local table
-   mutation.
-5. Доставляйте `LogicalChangeFrame` через application protocol либо коммитьте
-   ordered envelope в durable outbox через `commit_to_outbox()`.
+1. Выберите стабильные `schema_id` приложения, вид логической таблицы, версию
+   схемы, теги кодека и полный набор имён принадлежащих DBI.
+2. Инициализируйте или проверьте маркер схемы через `SyncEngine`. Существующий
+   маркер проверяется, а не пересоздаётся как неявное восстановление.
+3. Создайте соответствующие адаптеры на источнике и получателе. Зарегистрируйте
+   адаптер получателя в его `SyncEngine`.
+4. Выполняйте записи источника через типизированную сессию захвата адаптера.
+   Успешный commit сессии публикует логические изменения только после успешной
+   мутации локальной таблицы.
+5. Доставляйте `LogicalChangeFrame` через протокол приложения либо фиксируйте
+   упорядоченный envelope в постоянном outbox через `commit_to_outbox()`.
    `SyncWorkerOptions::enable_logical_delivery` отправляет второй вариант через
-   logical-capable peer после полного raw pull round.
-6. Применяйте изменения на destination соответствующим методом `SyncEngine`.
-   Marker validation и adapter preflight происходят до mutation adapter'а;
-   ошибки откатывают engine-owned transaction.
+   peer с поддержкой логической доставки после полного raw-обхода pull.
+6. Применяйте изменения на получателе соответствующим методом `SyncEngine`.
+   Проверка маркера и предварительная проверка адаптера происходят до его
+   мутации; ошибки откатывают транзакцию, которой владеет engine.
 
 ```mermaid
 sequenceDiagram
@@ -44,33 +44,34 @@ sequenceDiagram
     E->>A: apply в одной MDBX transaction
 ```
 
-Schema marker хранит application schema id, kind, version, primary DBI и owned
-DBI set. Он защищает получателя от принятия stale in-memory adapter после marker
-migration. Смена codec semantics, schema version или owned DBI требует новой
-schema identity либо явной совместимой migration; обычная registration не
-перезаписывает существующий несовместимый marker.
+Маркер схемы хранит id схемы приложения, вид, версию, основной DBI и набор
+принадлежащих DBI. Он защищает получателя от принятия устаревшего адаптера в
+памяти после миграции маркера. Смена семантики кодека, версии схемы или
+принадлежащего DBI требует новой идентичности схемы либо явной совместимой
+миграции; обычная регистрация не перезаписывает существующий несовместимый маркер.
 
 ## Прямые логические фреймы
 
-`LogicalChangeFrameCodec` сериализует явный набор logical changes.
+`LogicalChangeFrameCodec` сериализует явный набор логических изменений.
 `SyncEngine::apply_logical_frame_bytes()` применяет его на получателе. Этот
-маршрут подходит, когда приложение уже владеет destination routing, delivery
-order и retry policy.
+маршрут подходит, когда приложение уже владеет маршрутизацией получателя,
+порядком доставки и политикой повторов.
 
-Сам по себе он намеренно не является retry-safe ordered transport. У frame нет
-destination identity, global order и durable replay identity. Его нельзя
-использовать как неявную замену raw pull/push или ordered-delivery envelope.
+Сам по себе он намеренно не является безопасным для повторов упорядоченным
+транспортом. У фрейма нет идентичности получателя, глобального порядка и
+постоянной идентичности повтора. Его нельзя использовать как неявную замену raw
+pull/push или envelope упорядоченной доставки.
 
-Runnable example [`sync_23_key_value_logical_frame.cpp`](../examples/sync_23_key_value_logical_frame.cpp)
-показывает полный capture, encode, decode и apply path для adapter'а
+Рабочий пример [`sync_23_key_value_logical_frame.cpp`](../examples/sync_23_key_value_logical_frame.cpp)
+показывает полный путь захвата, кодирования, декодирования и применения адаптера
 `KeyValueTable`.
 
 ## Упорядоченная логическая доставка
 
 `KeyOrderedMultiValueTable` использует другой маршрут, потому что наблюдаемый
-порядок append является частью его API. Direct logical frame и unordered
-delivery отклоняются. Schema marker называет один ненулевой authoritative
-origin.
+порядок append является частью его API. Прямой логический фрейм и
+неупорядоченная доставка отклоняются. Маркер схемы называет один ненулевой
+авторитетный origin.
 
 ```mermaid
 sequenceDiagram
@@ -89,82 +90,85 @@ sequenceDiagram
     D->>Outbox: acknowledgement доставленного envelope
 ```
 
-Получатель считает committed redelivery успешным no-op. Gap либо mismatched
-origin отклоняется до table mutation. Sender outbox позволяет приложению
-повторить доставку после process или transport failure, не теряя local ordered
-history, закоммиченную вместе с envelope.
+Получатель считает повторную доставку уже зафиксированного envelope успешным
+no-op. Пропуск либо несовпадающий origin отклоняется до мутации таблицы. Outbox
+отправителя позволяет приложению повторить доставку после сбоя процесса или
+транспорта, не теряя локальную упорядоченную историю, зафиксированную вместе с
+envelope.
 
-Каждая упорядоченная отправка адресуется ровно одному узлу-получателю. Wire
-`DeliveryRequest` связывает этот receiver id с envelope, а получатель проверяет
-его до replay, frontier и работы adapter'а; acknowledgement повторяет
-фактический receiver id. HTTP и WebSocket принимают для упорядоченной доставки
-только такой receiver-bound request. Устаревшее envelope-only сообщение
+Каждая упорядоченная отправка адресуется ровно одному узлу-получателю. Сетевой
+`DeliveryRequest` связывает id получателя с envelope, а получатель проверяет
+его до повтора, границы последовательности и работы адаптера; acknowledgement
+повторяет фактический id получателя. HTTP и WebSocket принимают для
+упорядоченной доставки только такой запрос, привязанный к получателю. Устаревшее
+сообщение только с envelope
 `Delivery` не является сетевым маршрутом упорядоченной доставки.
 
-В v0.1 один capture/session commit атомарно публикует envelope для одного
-получателя. Atomic fan-out на несколько получателей и peer registry отложены.
-Outbox entries всегда укладываются в library-default codec bounds, поэтому
-поздний worker декодирует их без caller-specific bounds.
+В v0.1 один commit сессии захвата атомарно публикует envelope для одного
+получателя. Атомарная рассылка нескольким получателям и реестр peer отложены.
+Записи outbox всегда укладываются в ограничения кодека библиотеки по умолчанию,
+поэтому поздно запущенный worker декодирует их без ограничений вызывающего кода.
 
-`origin_sequence` идентифицирует одно logical event для его origin и database;
-он не выделяется заново для другого receiver. Pending delivery и
-acknowledgement state остаются receiver-specific. Перед переносом v0.1 route
-на новую replica восстановите её из текущего receiver, чтобы она импортировала
-origin frontier. Иначе первая новая доставка будет отклонена как sequence gap.
+`origin_sequence` идентифицирует одно логическое событие для его origin и БД;
+он не выделяется заново для другого получателя. Ожидающая доставка и состояние
+подтверждений остаются специфичными для получателя. Перед переносом маршрута
+v0.1 на новую реплику восстановите её из текущего получателя, чтобы она
+импортировала границу последовательности origin. Иначе первая новая доставка
+будет отклонена из-за пропуска последовательности.
 
-Для `DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer` этот dispatcher может
-предоставить optional logical-delivery pass worker'а. Он запускается только при
-`SyncWorkerOptions::enable_logical_delivery = true`, только после полного raw
-pull round и только для текущего `DbId` worker'а. Peer сначала согласует ordered
-delivery и cumulative acknowledgement. Каждый acknowledged prefix durably
-удаляется из sender outbox; unsupported peer, sequence gap или retryable
-acknowledgement failure сохраняют unacknowledged suffix в очереди.
-`max_logical_deliveries` ограничивает round при необходимости, а ноль отправляет
-весь pending prefix. Этот protocol остаётся отдельным от raw `PullRequest` /
-`PushRequest`.
+Для `DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer` этот диспетчер может
+предоставить подключаемый проход логической доставки worker. Он запускается
+только при `SyncWorkerOptions::enable_logical_delivery = true`, только после
+полного raw-обхода pull и только для текущего `DbId` worker. Peer сначала
+согласует упорядоченную доставку и накопительное подтверждение. Каждый
+подтверждённый префикс постоянно удаляется из outbox отправителя; peer без
+поддержки, пропуск последовательности или ошибка подтверждения, допускающая
+повтор, сохраняют неподтверждённый суффикс в очереди. `max_logical_deliveries`
+ограничивает обход при необходимости, а ноль отправляет весь ожидающий префикс.
+Этот протокол остаётся отдельным от raw `PullRequest` / `PushRequest`.
 
-Смена authoritative origin - application-coordinated cutover. Приложение
-должно остановить старый capture, доставить старый outbox, сохранить replay
-state на свой retry horizon, мигрировать marker на всех участниках и только
-затем включить новый origin. Это не automatic failover и не делает два origin
+Смена авторитетного origin — переключение, координируемое приложением. Приложение
+должно остановить старый захват, доставить старый outbox, сохранить состояние
+повтора на свой горизонт повторов, мигрировать маркер на всех участниках и
+только затем включить новый origin. Это не автоматическое переключение и не делает два origin
 одновременно допустимыми для одного ordered dataset.
 
 ## Реализованные контракты адаптеров
 
-| Adapter | Реализованный typed contract | Граница |
+| Адаптер | Реализованный типизированный контракт | Граница |
 | --- | --- | --- |
-| `KeyValueTableLogicalAdapter` | Явный typed capture и apply; `commit_to_outbox()` атомарно публикует ordered envelope. | Direct frames остаются manual; ordered outbox delivery требует capable peer. |
-| `KeyTableLogicalAdapter` | Явный typed capture и apply; `commit_to_outbox()` атомарно публикует ordered envelope. | Direct frames остаются manual; ordered outbox delivery требует capable peer. |
-| `VectorStoreLogicalAdapter` | Schema v1 add, erase и clear по DBI ids, embeddings, text и metadata. Explicit IDs проверяются до mutation; `commit_to_outbox()` атомарен. | Один authoritative либо externally serialized writer на коллекцию. |
-| `KeyMultiValueTableLogicalAdapter` | v1: insert, version-neutral batch `append()`, key erase, all-matching-value erase, clear. v2 добавляет exact-one erase и `reconcile()`. v3 добавляет bounded typed `erase_range()`, разложенный в точные key erasures. `commit_to_outbox()` атомарен. | Unordered multiset semantics; один writer либо causally serialized destructive updates. |
-| `KeyOrderedMultiValueTableLogicalAdapter` | v1 append-only ordered delivery. | Один authoritative origin. |
-| `KeyOrderedMultiValueTableDestructiveLogicalAdapter` | v2 exact append/erase по persistent element ID, bounded selector erasure, clear и single-origin `replace_with()`. | Один authoritative origin; baseline import, multi-origin history и tombstone compaction отложены. |
+| `KeyValueTableLogicalAdapter` | Явный типизированный захват и применение; `commit_to_outbox()` атомарно публикует упорядоченный envelope. | Прямые фреймы остаются ручными; доставка из упорядоченного outbox требует peer с поддержкой. |
+| `KeyTableLogicalAdapter` | Явный типизированный захват и применение; `commit_to_outbox()` атомарно публикует упорядоченный envelope. | Прямые фреймы остаются ручными; доставка из упорядоченного outbox требует peer с поддержкой. |
+| `VectorStoreLogicalAdapter` | Схема v1: add, erase и clear по id DBI, embedding, тексту и метаданным. Явные id проверяются до мутации; `commit_to_outbox()` атомарен. | Один авторитетный либо внешне сериализованный пишущий узел на коллекцию. |
+| `KeyMultiValueTableLogicalAdapter` | v1: insert, нейтральный к версии пакетный `append()`, удаление ключа, всех совпадающих значений и clear. v2 добавляет удаление ровно одного значения и `reconcile()`. v3 добавляет ограниченный типизированный `erase_range()`, разложенный в точные удаления ключей. `commit_to_outbox()` атомарен. | Семантика неупорядоченного мультимножества; один пишущий узел либо причинно сериализованные разрушающие обновления. |
+| `KeyOrderedMultiValueTableLogicalAdapter` | v1: упорядоченная доставка только `append()`. | Один авторитетный origin. |
+| `KeyOrderedMultiValueTableDestructiveLogicalAdapter` | v2: точные append/erase по постоянному id элемента, ограниченное удаление селектором, clear и `replace_with()` одного origin. | Один авторитетный origin; импорт baseline, история нескольких origin и уплотнение tombstone отложены. |
 
-Для `KeyMultiValueTable` повторяющиеся одинаковые пары образуют multiset:
-multiplicity сохраняется, но local iteration order duplicates не является
-межузловой гарантией. Direct table calls, raw capture и неподдерживаемые bulk
-paths остаются local-only. Для `KeyOrderedMultiValueTable` физический local
-duplicate prefix не является distributed identity; источником порядка истории
-служит ordered envelope.
+Для `KeyMultiValueTable` повторяющиеся одинаковые пары образуют мультимножество:
+кратность сохраняется, но локальный порядок обхода повторов не является
+межузловой гарантией. Прямые вызовы таблицы, raw-захват и неподдерживаемые
+пакетные пути остаются только локальными. Для `KeyOrderedMultiValueTable`
+физический локальный префикс повтора не является распределённой идентичностью;
+источником порядка истории служит упорядоченный envelope.
 
 ## Правила ошибок и конкурентности
 
-- Validation, planning или encoding failures до mutation оставляют typed capture
-  session активной, если adapter явно не документирует storage-integrity failure
-  как session-fatal.
-- Когда capture/apply failure происходит после mutation, затронутый engine или
-  session откатывает MDBX transaction и отклоняет дальнейший commit там, где
-  его contract требует deactivation.
-- Общего multi-writer convergence contract для destructive logical updates нет.
-  Используйте одного authoritative writer для logical dataset либо внешне
-  сериализуйте конфликтующие изменения до доставки.
-- Logical stores являются durable compatibility и delivery state. Не изменяйте
-  `_mdbxc_sync_schema`, replay markers, ordered frontiers либо outbox records
-  через application MDBX calls.
+- Ошибки проверки, планирования или кодирования до мутации оставляют
+  типизированную сессию захвата активной, если адаптер явно не документирует
+  ошибку целостности хранилища как фатальную для сессии.
+- Когда ошибка захвата или применения происходит после мутации, затронутый
+  engine или сессия откатывает MDBX-транзакцию и отклоняет дальнейший commit там,
+  где его контракт требует деактивации.
+- Общего контракта сходимости разрушающих логических обновлений от нескольких
+  писателей нет. Используйте одного авторитетного пишущего узла для логического
+  набора данных либо внешне сериализуйте конфликтующие изменения до доставки.
+- Логические хранилища содержат постоянное состояние совместимости и доставки.
+  Не изменяйте `_mdbxc_sync_schema`, маркеры повтора, упорядоченные границы либо
+  записи outbox через вызовы MDBX приложения.
 
 ## Дальнейшее чтение
 
-- [Восстановление и full snapshots](sync-recovery-RU.md) объясняет, почему raw
-  complete snapshot не может восстановить БД с persistent logical-sync state.
+- [Восстановление и полные снимки](sync-recovery-RU.md) объясняет, почему raw
+  полный снимок не может восстановить БД с постоянным состоянием logical-sync.
 - [Матрица покрытия таблиц sync](../guides/sync-table-coverage.md) содержит
   исчерпывающую матрицу операций и отложенных границ.

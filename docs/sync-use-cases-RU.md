@@ -1,33 +1,33 @@
 # Сценарии использования sync
 
 Этот документ помогает выбрать контракт sync по структуре данных, а не по
-топологии сети. В нём приведены короткие recipes уровня приложения; инварианты
-wire-формата, persistent state и recovery определены в
+топологии сети. В нём приведены короткие рецепты уровня приложения; инварианты
+сетевого формата, постоянного состояния и восстановления определены в
 [`sync/DESIGN.md`](../include/mdbx_containers/sync/DESIGN.md).
 
-English version: [sync-use-cases.md](sync-use-cases.md).
+Английская версия: [sync-use-cases.md](sync-use-cases.md).
 
 ## Выбор по семантике записи
 
-| Набор данных и модель writers | Использовать | Не предполагать |
+| Набор данных и модель записи | Использовать | Не предполагать |
 | --- | --- | --- |
-| Один writer и много read replicas | Raw replication поддерживаемой таблицы | Что replica также может менять те же records. |
-| Несколько writers владеют непересекающимися keys | Raw multi-origin replication | Что raw sync разрешает конкурентные записи в один key. |
-| Несколько collectors создают immutable observations | Raw multi-origin replication с разными event identities | Что raw upsert одного key валидирует или сливает разные payloads. |
-| Несколько nodes обновляют одно текущее значение, а источник даёт authority порядка | Узкий LWW v1 через `VersionedKeyValueTable` | Что wall-clock node или время приёма является authority. |
-| Unordered multiset с одним writer или внешне сериализованными destructive updates | `KeyMultiValueTableLogicalAdapter` | Общую destructive multi-writer convergence. |
-| Одна authoritative ordered history | Ordered logical delivery для `KeyOrderedMultiValueTable` | Multi-origin ordered history или automatic failover. |
-| RAG corpus от нескольких ingestion nodes | Immutable chunk revisions через raw replication; один owner mutable projections | Независимое multi-writer выделение id или conflict resolution в `VectorStore`. |
+| Один пишущий узел и много реплик для чтения | Raw-репликация поддерживаемой таблицы | Что реплика также может менять те же записи. |
+| Несколько пишущих узлов владеют непересекающимися ключами | Raw-репликация с несколькими origin | Что raw sync разрешает конкурентные записи в один ключ. |
+| Несколько коллекторов создают неизменяемые наблюдения | Raw-репликация с несколькими origin и разными идентификаторами событий | Что raw upsert одного ключа проверяет или сливает разные payload. |
+| Несколько узлов обновляют одно текущее значение, а источник задаёт порядок | Узкий LWW v1 через `VersionedKeyValueTable` | Что часы узла или время приёма задают порядок. |
+| Неупорядоченное мультимножество с одним пишущим узлом либо внешне сериализованными разрушающими обновлениями | `KeyMultiValueTableLogicalAdapter` | Общее слияние разрушающих обновлений от нескольких писателей. |
+| Одна авторитетная упорядоченная история | Упорядоченная логическая доставка для `KeyOrderedMultiValueTable` | Упорядоченную историю от нескольких origin или автоматическое переключение. |
+| Корпус RAG от нескольких узлов загрузки | Неизменяемые редакции фрагментов через raw-репликацию; один владелец изменяемых проекций | Независимое выделение id несколькими писателями или разрешение конфликтов в `VectorStore`. |
 
-Все фрагменты ниже предполагают serializable application types, устойчивый
-уникальный `NodeId` у каждого процесса и один общий `DbId` у replication set.
-Они показывают ownership данных, а не HTTP/WebSocket wiring. Полный runnable
-lifecycle writer/worker приведён в
+Все фрагменты ниже предполагают сериализуемые типы приложения, устойчивый
+уникальный `NodeId` у каждого процесса и один общий `DbId` у набора реплик.
+Они показывают владение данными, а не настройку HTTP/WebSocket. Полный рабочий
+жизненный цикл пишущего узла и worker приведён в
 [sync_22_node_session_minimal.cpp](../examples/sync_22_node_session_minimal.cpp).
 
-## Общая настройка writer
+## Общая настройка пишущего узла
 
-Подключите capture на всё время жизни writer service либо используйте короткий
+Подключите захват на всё время жизни сервиса записи либо используйте короткий
 `SyncCaptureScope` вокруг ограниченной фазы записи. Тогда обычные операции
 поддерживаемых таблиц атомарно с MDBX transaction становятся changelog entries.
 
@@ -38,39 +38,39 @@ engine.initialize_local_identity(local_node_id, replicated_db_id);
 mdbxc::sync::ThreadLocalChangeAccumulator capture(connection);
 mdbxc::sync::SyncCaptureScope capture_scope(connection, capture);
 
-// Обычные записи в поддерживаемые таблицы ниже capture'ятся на commit.
+// Обычные записи в поддерживаемые таблицы ниже захватываются при commit.
 ```
 
-Каждый receiver владеет своим `SyncWorker` и выполняет pull у peer. Он может
-читать реплицированные таблицы, но не должен конкурировать за records, которыми
-владеет writer. Поэтому один primary может fan-out'ить данные на любое число
-read replicas; каждая replica хранит собственный applied cursor.
+Каждый получатель владеет своим `SyncWorker` и выполняет pull у peer. Он может
+читать реплицированные таблицы, но не должен конкурировать за записи, которыми
+владеет пишущий узел. Поэтому один основной узел может рассылать данные любому
+числу реплик для чтения; каждая реплика хранит собственный применённый курсор.
 
-## Сценарий: один writer и много readers
+## Сценарий: один пишущий узел и много читателей
 
-Это стандартный выбор для сервиса, публикующего canonical stream или reference
-dataset. Используйте raw-supported table и назначьте одному node write-side
-этой таблицы.
+Это стандартный выбор для сервиса, публикующего канонический поток или
+справочный набор данных. Используйте таблицу с raw-поддержкой и назначьте
+одному узлу право записи в неё.
 
 ```cpp
 mdbxc::KeyValueTable<std::string, Quote> quotes(connection, "quotes");
 
-// Эту мутацию делает только назначенный writer.
+// Эту мутацию делает только назначенный пишущий узел.
 quotes.insert_or_assign("binance/BTCUSDT", latest_quote);
 
-// Replica использует обычный read API после catch-up своего SyncWorker.
+// Реплика использует обычный API чтения после догоняющей работы своего SyncWorker.
 const Quote visible_quote = replica_quotes.at("binance/BTCUSDT");
 ```
 
 `KeyValueTable`, `KeyTable`, `ValueTable` и `SequenceTable` поддерживают raw
-capture. `SequenceTable::append()` остаётся single-writer: независимые
-appenders нужно сериализовать вне библиотеки.
+захват. `SequenceTable::append()` остаётся однописательской: независимые
+вызовы `append()` нужно сериализовать вне библиотеки.
 
 ## Сценарий: рыночные тики, сделки и другие immutable events
 
-Для event data пусть key идентифицирует upstream event, а не local collector и
-не только timestamp. Один timestamp может совпасть; добавьте устойчивый event
-id или sequence биржи.
+Для данных о событиях ключ должен идентифицировать событие источника, а не
+локальный коллектор и не только временную метку. Одна временная метка может
+совпасть; добавьте устойчивый идентификатор события или последовательность биржи.
 
 ```cpp
 mdbxc::KeyValueTable<std::string, Trade> observations(
@@ -81,29 +81,29 @@ const std::string observation_key =
 observations.insert_or_assign(observation_key, trade);
 ```
 
-Несколько collectors могут безопасно добавлять разные observation keys в одну
-БД receiver. Для canonical таблицы сделок явно выберите одну модель:
+Несколько коллекторов могут безопасно добавлять разные ключи наблюдений в одну
+БД получателя. Для канонической таблицы сделок явно выберите одну модель:
 
-- разделите ownership: каждый canonical key пишет ровно один collector;
-- храните observations collectors и поручите одному deterministic normalizer
+- разделите владение: каждый канонический ключ пишет ровно один коллектор;
+- храните наблюдения коллекторов и поручите одному детерминированному нормализатору
   записывать `(exchange, symbol, trade_id) -> Trade`;
-- принимайте duplicate observations как отдельные данные для анализа coverage
-  и latency фидов.
+- принимайте повторные наблюдения как отдельные данные для анализа покрытия
+  и задержки фидов.
 
 Raw sync не проверяет, что два конкурентных upsert одного key несут один и тот
-же payload. Если два collectors увидели один exchange event, raw same-key write
-нельзя использовать как механизм deduplication или проверки целостности.
+же payload. Если два коллектора увидели одно событие биржи, raw-запись с тем же
+ключом нельзя использовать как механизм устранения повторов или проверки целостности.
 
-Открытые OHLCV bars и `latest_quote` — mutable state, а не immutable events.
-Вычисляйте их из event stream под одним owner либо используйте узкий LWW
-контракт ниже, если upstream даёт реальный revision authority.
+Открытые OHLCV-бары и `latest_quote` — изменяемое состояние, а не неизменяемые
+события. Вычисляйте их из потока событий под одним владельцем либо используйте
+узкий LWW-контракт ниже, если источник даёт реальный порядок редакций.
 
-## Сценарий: одно текущее значение с authority источника
+## Сценарий: одно текущее значение с порядком от источника
 
-Используйте LWW v1 только для point `insert_or_assign` и `erase` в изначально
-пустой `KeyValueTable`. Каждый participant должен использовать
-`ConflictPolicy::LastWriterWins`, инициализировать identity, подключить capture
-и сконструировать versioned wrapper до приёма revisioned changes.
+Используйте LWW v1 только для точечных `insert_or_assign` и `erase` в изначально
+пустой `KeyValueTable`. Каждый участник должен использовать
+`ConflictPolicy::LastWriterWins`, инициализировать идентичность, подключить захват
+и сконструировать versioned wrapper до приёма изменений редакций.
 
 ```cpp
 mdbxc::sync::SyncEngine engine(
@@ -122,25 +122,26 @@ const std::vector<std::uint8_t> version =
 versioned_bars.insert_or_assign(bar_key, bar, version);
 ```
 
-`source_version_big_endian()` — application code. Она должна вернуть
-непустое canonical byte encoding, у которого lexicographic order совпадает с
-нужным source order. Fixed-width big-endian tuple, например
-`(broker_time, broker_sequence)`, подходит, когда оба компонента authoritative.
-`broker_time` — sync metadata; его не требуется добавлять полем в `Bar`.
-Равные versions разрешаются по `NodeId` origin только для convergence replicas,
+`source_version_big_endian()` — код приложения. Она должна вернуть непустимое
+каноническое байтовое представление, у которого лексикографический порядок
+совпадает с нужным порядком источника. Кортеж фиксированной длины в big-endian,
+например `(broker_time, broker_sequence)`, подходит, когда оба компонента
+задают порядок. `broker_time` — метаданные sync; его не требуется добавлять
+полем в `Bar`. Равные версии разрешаются по `NodeId` origin только для
+сходящихся реплик,
 а не для определения объективно более нового наблюдения.
 
-Wrapper durable-регистрирует свой DBI. Прямые записи через `KeyValueTable`,
-`clear`, bulk и range операции, generic capture и full snapshots этого DBI
-отклоняются. Обычные raw tables и LWW tables нужно оставлять раздельными, даже
+Wrapper постоянно регистрирует свой DBI. Прямые записи через `KeyValueTable`,
+`clear`, пакетные и диапазонные операции, общий захват и полные снимки этого
+DBI отклоняются. Обычные raw-таблицы и LWW-таблицы нужно оставлять раздельными, даже
 когда они используют один `SyncEngine`.
 
-## Сценарий: сделки трейдеров и platform ledger records
+## Сценарий: сделки трейдеров и записи журнала платформы
 
-Сначала моделируйте platform fills, executions, ledger entries и audit events
-как immutable records. Дайте каждой записи globally unambiguous business
-identity и реплицируйте историю; balances, positions и reporting views
-вычисляйте из неё под одним owner.
+Сначала моделируйте исполнения, сделки, записи журнала и события аудита
+как неизменяемые записи. Дайте каждой записи глобально однозначную деловую
+идентичность и реплицируйте историю; балансы, позиции и отчётные представления
+вычисляйте из неё под одним владельцем.
 
 ```cpp
 mdbxc::KeyValueTable<std::string, Fill> fills(connection, "fills");
@@ -149,16 +150,16 @@ const std::string fill_key = platform + "/" + account_id + "/" + execution_id;
 fills.insert_or_assign(fill_key, fill);
 ```
 
-Не используйте raw replication для координации concurrent mutation account
-balance, risk limit или order state. Назначьте authoritative writer,
-сериализуйте операцию на уровне приложения или задайте явный source-version
-контракт конкретному register.
+Не используйте raw-репликацию для координации конкурентных изменений баланса
+счёта, лимита риска или состояния заявки. Назначьте авторитетный пишущий узел,
+сериализуйте операцию на уровне приложения или задайте явный контракт версий
+источника для конкретного регистра.
 
-## Сценарий: RAG corpus и производное search state
+## Сценарий: корпус RAG и производное состояние поиска
 
-Реплицируйте immutable document/chunk revisions как обычные records. Key должен
-включать stable document identity, source revision и chunk ordinal (либо content
-hash вместе с codec и embedding versions).
+Реплицируйте неизменяемые редакции документов и фрагментов как обычные записи.
+Ключ должен включать устойчивую идентичность документа, редакцию источника и
+номер фрагмента (либо хеш содержимого вместе с версиями кодека и embedding).
 
 ```cpp
 mdbxc::KeyValueTable<std::string, Chunk> chunks(connection, "chunks");
@@ -168,25 +169,25 @@ const std::string chunk_key =
 chunks.insert_or_assign(chunk_key, chunk);
 ```
 
-Несколько ingestion nodes могут писать разные revisions или выделенные им key
-ranges. Рассматривайте current-document pointer, cached retrieval scores и
-vector index как derived state. Перестраивайте их из corpus либо назначьте
-одного writer. Текущие пути `VectorStore` не дают distributed id allocation или
-multi-writer conflict resolution одной collection.
+Несколько узлов загрузки могут писать разные редакции или выделенные им диапазоны
+ключей. Рассматривайте указатель на текущий документ, кэшированные оценки поиска
+и векторный индекс как производное состояние. Перестраивайте их из корпуса либо
+назначьте одного пишущего узла. Текущие пути `VectorStore` не дают распределённого
+выделения id или разрешения конфликтов нескольких писателей в одной коллекции.
 
 ## Когда sync пока не следует выбирать
 
-Не включайте path только потому, что nodes умеют обмениваться batches. Сначала
-определите record identity и write authority, если верно хотя бы одно условие:
+Не включайте этот путь только потому, что узлы умеют обмениваться пакетами.
+Сначала определите идентичность записи и право записи, если верно хотя бы одно условие:
 
-- два nodes могут конкурентно делать put или delete одного ordinary raw key;
-- `KeyMultiValueTable` требует destructive multi-writer updates;
-- ordered table требует несколько независимых origins или automatic failover;
-- используется `AnyValueTable` или `HashedKeyValueStore`, чьи sync contracts
+- два узла могут конкурентно делать put или delete одного обычного raw-ключа;
+- `KeyMultiValueTable` требует разрушающих обновлений от нескольких писателей;
+- упорядоченная таблица требует нескольких независимых origin или автоматического переключения;
+- используется `AnyValueTable` или `HashedKeyValueStore`, чьи контракты sync
   пока отложены;
-- partial snapshot предполагается для repair произвольной существующей replica.
+- частичный снимок предполагается для ремонта произвольной существующей реплики.
 
-Полные ограничения и детали topology описаны в
-[deployment patterns](sync-deployment-patterns-RU.md),
-[руководстве по logical sync](sync-logical-RU.md) и
+Полные ограничения и детали топологии описаны в
+[схемах развёртывания](sync-deployment-patterns-RU.md),
+[руководстве по логической синхронизации](sync-logical-RU.md) и
 [матрице покрытия таблиц](../guides/sync-table-coverage.md).

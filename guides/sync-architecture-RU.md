@@ -1,18 +1,18 @@
 # Карта архитектуры синхронизации
 
 Этот документ предназначен для первичной навигации по подсистеме sync перед
-выбором API или чтением implementation headers. Здесь описаны границы
-ответственности и точки входа. Инварианты wire-формата, persistent state и
-recovery определены в
+выбором API или чтением заголовочных файлов реализации. Здесь описаны границы
+ответственности и точки входа. Инварианты сетевого формата, постоянного
+состояния и восстановления определены в
 [`sync/DESIGN.md`](../include/mdbx_containers/sync/DESIGN.md).
 
-[English version](sync-architecture.md)
+[Английская версия](sync-architecture.md)
 
-## Сначала выберите pipeline
+## Сначала выберите контур
 
-В sync есть два независимых replication pipeline. Они используют общие node
-identity, transaction, планирование worker и transport seams, но не преобразуют
-сообщения одного pipeline в сообщения другого.
+В sync есть два независимых контура репликации. Они используют общие
+идентификаторы узлов, транзакции, планирование worker и транспортные стыки, но
+не преобразуют сообщения одного контура в сообщения другого.
 
 ```text
                             +---------------------------+
@@ -26,92 +26,94 @@ identity, transaction, планирование worker и transport seams, но 
        RAW REPLICATION                    /       \  LOGICAL REPLICATION
                                          v         v
  +---------------------------+     +------------------------------+
- | Мутация поддерживаемой    |     | Мутация bound-table или      |
- | таблицы (физическая DBI)  |     | adapter (объявленная schema) |
+  | Мутация поддерживаемой    |     | Мутация привязанной таблицы  |
+  | таблицы (физическая DBI)  |     | адаптер (объявленная схема)  |
  +-------------+-------------+     +--------------+---------------+
                |                                  |
                v                                  v
  +---------------------------+     +------------------------------+
- | Raw capture accumulator   |     | Logical change frame         |
+  | Накопитель raw-захвата     |     | Фрейм логического изменения  |
  +-------------+-------------+     +--------------+---------------+
                |                                  |
                v                                  v
  +---------------------------+     +------------------------------+
- | Durable raw changelog     |     | Receiver-neutral journal     |
+  | Постоянный raw-журнал      |     | Журнал без маршрута          |
  +-------------+-------------+     +--------------+---------------+
                |                                  |
                v                                  v
  +---------------------------+     +------------------------------+
- | Pull / push page          |     | Route / outbox для receiver  |
+  | Страница pull / push      |     | Маршрут / outbox получателя  |
  +-------------+-------------+     +--------------+---------------+
                |                                  |
                v                                  v
  +---------------------------+     +------------------------------+
- | Raw DBI apply             |     | Ordered logical delivery     |
+  | Применение raw DBI        |     | Упорядоченная логическая     |
+  |                           |     | доставка                     |
  +---------------------------+     +--------------+---------------+
                                                     |
                                                     v
                                      +-----------------------------+
-                                     | Apply зарегистрированным    |
-                                     | adapter                     |
+                                      | Применение зарегистрированным|
+                                      | адаптером                    |
                                      +-----------------------------+
 ```
 
-Используйте raw pipeline, когда достаточно физического replay пар
-ключ/значение в DBI. Используйте logical pipeline только когда public semantics
-таблицы требуют объявленной schema, custom apply-логики, порядка или
-receiver-specific delivery. Logical frame никогда не вкладывается в raw
+Используйте raw-контур, когда достаточно физического повторного применения пар
+ключ/значение в DBI. Используйте логический контур, только когда публичная
+семантика таблицы требует объявленной схемы, особой логики применения, порядка
+или доставки конкретному получателю. Логический фрейм никогда не вкладывается в raw
 `ChangeBatch`.
 
 ## Публичные точки входа
 
-Подключайте наиболее узкий aggregate header, которому принадлежит нужный API.
+Подключайте наиболее узкий агрегирующий заголовок, которому принадлежит нужный API.
 
-| Задача | Include | Что предоставляет |
+| Задача | Подключение | Что предоставляет |
 | --- | --- | --- |
-| Полная optional-подсистема | `mdbx_containers/sync.hpp` | Все домены sync. |
-| Raw protocol DTO и codecs | `mdbx_containers/sync/protocol.hpp` | Batches, cursors, snapshots, bounds. |
-| Durable raw state | `mdbx_containers/sync/storage.hpp` | Changelog, origin, applied-cursor, LWW sidecars. |
-| Время жизни raw capture | `mdbx_containers/sync/capture.hpp` | Capture sink, scope, accumulator, Connection hook. |
-| Logical contracts и durable state | `mdbx_containers/sync/logical.hpp` | Schemas, frames, journal, delivery, recovery DTOs. |
-| Table-bound logical adapters | `mdbx_containers/sync/adapters.hpp` | Prerequisites таблиц и реализации adapters. |
-| Engine и worker | `mdbx_containers/sync/engine.hpp` | Peers, engine, worker, in-process peers. |
-| Transport-neutral HTTP/WS seams | `mdbx_containers/sync/transport.hpp` | Codec, middleware, policy, HTTP и WebSocket adapters. |
-| Конкретные optional backends | `mdbx_containers/sync/transports/*.hpp` | Backend-specific provider aggregates. |
+| Полная подключаемая подсистема | `mdbx_containers/sync.hpp` | Все домены sync. |
+| DTO и кодеки raw-протокола | `mdbx_containers/sync/protocol.hpp` | Пакеты, курсоры, снимки, ограничения. |
+| Постоянное raw-состояние | `mdbx_containers/sync/storage.hpp` | Журнал изменений, origin, применённые курсоры, LWW-боковые данные. |
+| Время жизни raw-захвата | `mdbx_containers/sync/capture.hpp` | Приёмник захвата, область, накопитель, hook `Connection`. |
+| Логические контракты и постоянное состояние | `mdbx_containers/sync/logical.hpp` | Схемы, фреймы, журнал, доставка, DTO восстановления. |
+| Логические адаптеры, привязанные к таблицам | `mdbx_containers/sync/adapters.hpp` | Предварительные зависимости таблиц и реализации адаптеров. |
+| Engine и worker | `mdbx_containers/sync/engine.hpp` | Peers, engine, worker, peers в одном процессе. |
+| Независимые от транспорта HTTP/WS стыки | `mdbx_containers/sync/transport.hpp` | Кодек, middleware, policy, адаптеры HTTP и WebSocket. |
+| Конкретные подключаемые backend'ы | `mdbx_containers/sync/transports/*.hpp` | Агрегаты provider'ов конкретных backend'ов. |
 
-Concrete headers в `sync/transports/...` являются документированными точками
-integration для приложений, сознательно выбравших backend. Остальные headers
-ниже `sync/` являются internal leaves; вместо них подключайте владеющий ими
-aggregate.
+Конкретные заголовки в `sync/transports/...` — документированные точки
+интеграции для приложений, сознательно выбравших backend. Остальные заголовки
+ниже `sync/` — внутренние конечные заголовки; вместо них подключайте владеющий
+ими агрегат.
 
 ## Ответственность слоёв
 
 | Слой | Каталог | Ответственность |
 | --- | --- | --- |
-| Shared primitives | `sync/core/`, `sync/common.hpp` | Identity, cancellation, conflict и observer contracts. |
-| Raw protocol | `sync/protocol/` | Wire DTO и validation raw replication. |
-| Raw persistence | `sync/stores/` | Metadata, changelog и apply state. |
-| Capture | `sync/capture/` | Фиксирует локальные raw mutations в committing transaction. |
-| Logical state | `sync/logical/` | Schema references, logical frames, journal, route и replay state. |
-| Logical adapters | `sync/logical/adapters/` | Table-specific capture и apply semantics. |
-| Orchestration | `sync/engine/` | Pull/push, transactions, worker rounds и recovery coordination. |
-| Transport | `sync/transport/` | Framework-neutral DTO adaptation, policy и observability. |
-| Backend bindings | `sync/transports/` | Optional Simple-Web и Kurlyk integrations. |
+| Общие примитивы | `sync/core/`, `sync/common.hpp` | Идентификация, отмена, конфликты и контракты observer. |
+| Raw-протокол | `sync/protocol/` | Сетевые DTO и проверка raw-репликации. |
+| Постоянное raw-состояние | `sync/stores/` | Метаданные, журнал изменений и состояние применения. |
+| Захват | `sync/capture/` | Фиксирует локальные raw-мутации в фиксируемой транзакции. |
+| Логическое состояние | `sync/logical/` | Ссылки на схемы, логические фреймы, журнал, маршрут и состояние повтора. |
+| Логические адаптеры | `sync/logical/adapters/` | Захват и семантика применения для конкретных таблиц. |
+| Оркестрация | `sync/engine/` | Pull/push, транзакции, обходы worker и координация восстановления. |
+| Транспорт | `sync/transport/` | Адаптация DTO, policy и наблюдаемость без привязки к фреймворку. |
+| Привязки backend'ов | `sync/transports/` | Подключаемые интеграции Simple-Web и Kurlyk. |
 
-`Connection` — единственный намеренный bridge из storage core в sync.
+`Connection` — единственный намеренный мост из ядра хранения в sync.
 `sync/connection_hooks.hpp` перед определением `Connection` предоставляет его
-logical capture hook и prerequisites durable binding. Этот header является
-internal seam, а не точкой include для приложения.
+hook логического захвата и предварительные зависимости постоянной привязки.
+Этот заголовок — внутренний стык, а не точка подключения для приложения.
 
-## Правило владения include
+## Правило владения подключениями
 
-Internal leaf может непосредственно подключать standard-library, third-party и
-локальные same-domain implementation dependencies, которыми он владеет
-напрямую. Он также может опираться на prerequisites, намеренно установленные
-владеющим domain aggregate или явным integration seam, когда прямой project
-include потребовал бы traversal вверх или создал обратную зависимость.
-Standalone-компиляция требуется только от поддерживаемых public entry points,
-а не от internal leaves.
+Внутренний конечный заголовок может непосредственно подключать заголовки
+стандартной библиотеки, сторонние и локальные зависимости своего домена,
+которыми он владеет напрямую. Он также может опираться на предварительные
+зависимости, намеренно установленные владеющим доменным агрегатом или явным
+стыком интеграции, когда прямое подключение из проекта потребовало бы перехода
+к родительскому каталогу либо создало обратную зависимость. Отдельная
+компиляция требуется только от поддерживаемых публичных точек входа, а не от
+внутренних конечных заголовков.
 
 ## Где искать подробный контракт
 
@@ -119,9 +121,9 @@ Standalone-компиляция требуется только от подде�
 | --- | --- |
 | Какие таблицы поддержаны и с какой семантикой? | [Матрица покрытия таблиц sync](sync-table-coverage.md) |
 | Готова ли функция для v0.1 и что отложено? | [Чек-лист готовности sync v0.1](sync-v0.1-readiness.md) |
-| Как безопасно эксплуатировать production transport? | [Заметки о production transport](sync-transport-production.md) |
-| Каковы полные инварианты wire, storage и recovery? | [`sync/DESIGN.md`](../include/mdbx_containers/sync/DESIGN.md) |
-| Какой sync contract подходит dataset и модели writers? | [`docs/sync-use-cases-RU.md`](../docs/sync-use-cases-RU.md) |
-| Каковы подробные multi-origin deployment patterns? | [`docs/sync-deployment-patterns-RU.md`](../docs/sync-deployment-patterns-RU.md) |
-| Как использовать logical и ordered sync? | [`docs/sync-logical-RU.md`](../docs/sync-logical-RU.md) |
-| Как работают recovery и full snapshot? | [`docs/sync-recovery-RU.md`](../docs/sync-recovery-RU.md) |
+| Как безопасно эксплуатировать промышленный транспорт? | [Заметки о промышленном транспорте](sync-transport-production.md) |
+| Каковы полные инварианты сетевого формата, хранения и восстановления? | [`sync/DESIGN.md`](../include/mdbx_containers/sync/DESIGN.md) |
+| Какой контракт sync подходит набору данных и модели записи? | [`docs/sync-use-cases-RU.md`](../docs/sync-use-cases-RU.md) |
+| Каковы подробные схемы развёртывания с несколькими origin? | [`docs/sync-deployment-patterns-RU.md`](../docs/sync-deployment-patterns-RU.md) |
+| Как использовать логическую и упорядоченную синхронизацию? | [`docs/sync-logical-RU.md`](../docs/sync-logical-RU.md) |
+| Как работают восстановление и полный снимок? | [`docs/sync-recovery-RU.md`](../docs/sync-recovery-RU.md) |

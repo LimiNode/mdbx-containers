@@ -6,11 +6,11 @@
 
 [![MIT License](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE) ![Platform](https://img.shields.io/badge/platform-Windows%20%7C%20Linux%20%7C%20macOS-blue) ![C++ Standard](https://img.shields.io/badge/C++-11--17-orange) [![CI Windows](https://img.shields.io/github/actions/workflow/status/NewYaroslav/mdbx-containers/ci.yml?branch=main&label=Windows&logo=windows)](https://github.com/NewYaroslav/mdbx-containers/actions/workflows/ci.yml) [![CI Linux](https://img.shields.io/github/actions/workflow/status/NewYaroslav/mdbx-containers/ci.yml?branch=main&label=Linux&logo=linux)](https://github.com/NewYaroslav/mdbx-containers/actions/workflows/ci.yml) [![CI macOS](https://img.shields.io/github/actions/workflow/status/NewYaroslav/mdbx-containers/ci.yml?branch=main&label=macOS&logo=apple)](https://github.com/NewYaroslav/mdbx-containers/actions/workflows/ci.yml)
 
-[English version](README.md)
+[Английская версия](README.md)
 
 **mdbx-containers** — лёгкая заголовочная библиотека C++11/17, которая соединяет
 [libmdbx](https://github.com/erthink/libmdbx) с привычными STL-подобными API.
-Она сохраняет key-value данные в MDBX и предоставляет высокую производительность
+Она сохраняет данные «ключ—значение» в MDBX и предоставляет высокую производительность
 и удобные помощники для транзакций.
 
 > Примечание  
@@ -25,10 +25,10 @@
   `lower_bound`, `upper_bound`, `range_reverse`, `erase_range`, `update`, `find_many`,
   `operator[]` и связанные помощники.
 - `HashedKeyValueStore<K, V, H, Layout>` хранит одно значение на строковый или
-  byte-vector ключ через hash-index и проверяет исходные байты ключа, чтобы
+  вектор байтов через hash-индекс и проверяет исходные байты ключа, чтобы
   корректно обрабатывать коллизии.
 - `ValueTable<V>` хранит одно строго типизированное singleton-значение в
-  именованной таблице: метаданные, состояние модуля, snapshots и конфигурацию.
+  именованной таблице: метаданные, состояние модуля, снимки и конфигурацию.
 - `AnyValueTable<K>` хранит значения разных типов по выбранному вызывающим кодом
   типу и поддерживает типизированные `set`, `insert`, `get`, `find`, `get_or`,
   `update`, `contains`, `erase` и `keys`.
@@ -36,11 +36,11 @@
   `contains`, `range`, `for_each_range`, `filter_range`, `lower_bound`, `upper_bound`,
   `range_reverse`, `erase_range`, `clear`, `load`, `reconcile` и связанные помощники.
 - `KeyMultiValueTable<K, V>` хранит несколько значений на один ключ со
-  `std::multimap`-подобным API, потоковыми и материализованными range-scan методами,
+  `std::multimap`-подобным API, потоковыми и материализованными методами обхода диапазона,
   обратным сканированием, удалением диапазонов и сохранением повторяющихся одинаковых пар `(key, value)`.
 - `KeyOrderedMultiValueTable<K, V>` хранит несколько значений на один ключ,
   когда текущий порядок append является частью API; повторяющиеся одинаковые значения
-  остаются видимыми, а `find(key)` возвращает значения в порядке append.
+  остаются видимыми, а `find(key)` возвращает значения в порядке добавления.
 - `SequenceTable<ValueT>` хранит значения по стабильному uint64_t id с
   append-only семантикой и разреженными индексами. Append возвращает
   стабильный id; удаление не переиндексирует следующие записи.
@@ -50,11 +50,11 @@
 - Проверка type-tag prefix в `AnyValueTable` включается явно через
   `set_type_tag_check(true)` и по умолчанию выключена для совместимости с уже
   существующими raw-записями.
-- `VectorStore` — MVP embedded vector store для локального RAG: persistent
-  MDBX-хранилище с точным in-memory `FlatVectorIndex`.
+- `VectorStore` — минимальное встроенное векторное хранилище для локального RAG:
+  постоянное MDBX-хранилище с точным `FlatVectorIndex` в памяти.
 
 ### 🔁 Сериализация
-- Автоматическая сериализация trivially copyable типов.
+- Автоматическая сериализация тривиально копируемых типов.
 - Пользовательские типы через `to_bytes()` / `from_bytes()`.
 - Поддержка вложенных STL-контейнеров, например `std::vector` и `std::list`.
 
@@ -62,22 +62,22 @@
 - RAII-транзакции (`Transaction`).
 - Повторное использование автоматических и ручных транзакций, привязанных к
   текущему потоку.
-- Обычная модель: один общий `Connection` на MDBX environment и не более одной
+- Обычная модель: один общий `Connection` на MDBX-окружение и не более одной
   активной транзакции на поток.
 - `Transaction`, raw `MDBX_txn*` и курсоры MDBX нельзя передавать или
   использовать между потоками.
 - Переданный пользователем `Transaction` / raw `MDBX_txn*` также должен
-  принадлежать тому же MDBX environment, что и таблица или sync engine,
-  который его получает. Handles из другого environment отклоняются через
-  `std::invalid_argument` до использования DBI handles.
+  принадлежать тому же MDBX-окружению, что и таблица или engine sync,
+  который его получает. Дескрипторы из другого окружения отклоняются через
+  `std::invalid_argument` до использования дескрипторов DBI.
 - `configure()`, `connect()`, `disconnect()` и уничтожение `Connection` — это
-  lifecycle-операции вне параллельной работы с таблицами.
+  операции жизненного цикла вне параллельной работы с таблицами.
 - Используйте `shutdown()` для согласованной остановки: он запрещает новые
-  транзакции, ждёт закрытия transaction handles в их потоках-владельцах и
-  затем отключает environment. Используйте `shutdown_for(timeout)`, если нужно
+  транзакции, ждёт закрытия дескрипторов транзакций в их потоках-владельцах и
+  затем отключает окружение. Используйте `shutdown_for(timeout)`, если нужно
   ограничить время ожидания.
 - Используйте `disconnect()` только когда все транзакции/курсоры уже завершены;
-  он возвращает ошибку `MDBX_BUSY`, а не abort'ит транзакции из других потоков.
+  он возвращает ошибку `MDBX_BUSY`, а не прерывает транзакции из других потоков.
 - Модель следует правилам MDBX для `mdbx_txn_begin()` и `mdbx_env_close_ex()`:
   [Transactions](https://libmdbx.dqdkfa.ru/group__c__transactions.html) и
   [Opening & Closing](https://libmdbx.dqdkfa.ru/group__c__opening.html).
@@ -85,119 +85,121 @@
 ### 🔄 Sync-репликация
 - Экспериментальный sync включается явно: определите `MDBXC_SYNC_ENABLED=1`
   перед подключением `mdbx_containers/sync.hpp`.
-- v0.1 захватывает обычные write-path'ы `KeyValueTable`, `KeyTable`,
+- v0.1 захватывает обычные пути записи `KeyValueTable`, `KeyTable`,
   `ValueTable` и `SequenceTable`; `VectorStore` реплицируется косвенно через
-  внутренние `SequenceTable` и `KeyValueTable`. Дополнительно есть opt-in
-  schema-v1 `VectorStoreLogicalAdapter` для add, erase и clear по четырём DBI
-  коллекции с явными record id. Оба режима требуют leader/follower либо
-  внешней сериализации writer'ов; multi-writer conflict resolution не входит
+  внутренние `SequenceTable` и `KeyValueTable`. Дополнительно есть подключаемый
+  `VectorStoreLogicalAdapter` схемы v1 для add, erase и clear по четырём DBI
+  коллекции с явными id записей. Оба режима требуют ведущего/ведомого узла либо
+  внешней сериализации писателей; разрешение конфликтов нескольких писателей не входит
   в контракт.
 - `AnyValueTable`, `KeyMultiValueTable`, `KeyOrderedMultiValueTable` и
   `HashedKeyValueStore` не имеют raw-репликации в v0.1.
-  `KeyMultiValueTableLogicalAdapter` даёт opt-in capture неупорядоченного
-  multiset при одном writer'е либо причинно сериализованных обновлениях.
-  Schema v1 поддерживает `insert`, version-neutral batch `append()`, удаление
-  ключа, удаление всех совпадающих значений и clear; schema v2 добавляет
-  exact-one erase и `reconcile()`; schema v3 добавляет bounded typed
+  `KeyMultiValueTableLogicalAdapter` даёт подключаемый захват неупорядоченного
+  мультимножества при одном пишущем узле либо причинно сериализованных обновлениях.
+  Схема v1 поддерживает `insert`, нейтральный к версии пакетный `append()`, удаление
+  ключа, удаление всех совпадающих значений и clear; схема v2 добавляет
+  точное удаление одного значения и `reconcile()`; схема v3 добавляет ограниченный типизированный
   `erase_range()`, разложенный в точные удаления ключей.
-  `KeyOrderedMultiValueTableLogicalAdapter` даёт schema-v1 append-only ordered
-  delivery для одного authoritative origin. Его schema-v2 destructive adapter
-  добавляет persistent element identities, exact erasure, bounded selector
-  erasure, clear и single-origin `replace_with()`. Direct logical frames и
-  unordered delivery для ordered tables по-прежнему отклоняются. Для
-  `AnyValueTable` и `HashedKeyValueStore` ещё нужны дизайны type tags и
-  hash-index identity.
+  `KeyOrderedMultiValueTableLogicalAdapter` даёт упорядоченную доставку только
+  `append()` по схеме v1 для одного авторитетного origin. Его разрушающий
+  адаптер схемы v2 добавляет постоянные идентичности элементов, точное удаление,
+  ограниченное удаление селектором, clear и `replace_with()` одного origin.
+  Прямые логические фреймы и неупорядоченная доставка для упорядоченных таблиц
+  по-прежнему отклоняются. Для `AnyValueTable` и `HashedKeyValueStore` ещё нужны
+  решения для тегов типов и идентичности hash-индекса.
 - Для поддерживаемых таблиц прикладной CRUD-код не нужно оборачивать
   отдельными sync-вызовами на каждый метод. Прикрепите
   `ThreadLocalChangeAccumulator` к пишущему `Connection`; используйте
   `SyncCaptureScope` для ограниченных фаз записи или более низкоуровневую пару
   `attach_sync_capture()` / `detach_sync_capture()` для намеренно долгоживущего
-  lifecycle захвата на уровне приложения. Вложенные capture scopes должны
-  завершаться строго в обратном порядке; не меняйте capture sink соединения
-  напрямую, пока scope активен. Закоммиченные одиночные записи становятся
-  одиночными sync batches, а явная транзакция, объединяющая несколько
-  поддерживаемых таблиц, становится одним атомарным локальным batch.
-  Read/search-вызовы не захватываются. Отдельный `SyncWorker` плюс транспорт
-  `ISyncPeer` переносят закоммиченные batches между узлами.
-- `ConflictPolicy::LastWriterWins` имеет узкий путь source-version-wins для
-  mutable-регистров `KeyValueTable`. Используйте `VersionedKeyValueTable` для
+  времени жизни захвата на уровне приложения. Вложенные области захвата должны
+  завершаться строго в обратном порядке; не меняйте приёмник захвата соединения
+  напрямую, пока область активна. Зафиксированные одиночные записи становятся
+  одиночными пакетами sync, а явная транзакция, объединяющая несколько
+  поддерживаемых таблиц, становится одним атомарным локальным пакетом.
+  Вызовы чтения и поиска не захватываются. Отдельный `SyncWorker` и транспорт
+  `ISyncPeer` переносят зафиксированные пакеты между узлами.
+- `ConflictPolicy::LastWriterWins` имеет узкий путь «побеждает версия источника»
+  для изменяемых регистров `KeyValueTable`. Используйте `VersionedKeyValueTable` для
   точечных `insert_or_assign` и `erase`, передавая непустимую каноническую
-  source version в каждую операцию. Конструктор durable-регистрирует этот DBI;
-  каждый replica должен зарегистрировать ту же таблицу до приёма её batches.
-  Registered DBI отклоняет прямые raw writes, clear, bulk и range mutations.
-  Обычные raw DBI могут сосуществовать на том же engine. Version остаётся
-  sync-метаданными, а durable sidecars хранят versioned tombstones и
-  registrations. Full snapshots могут охватывать только raw-only manifest,
-  но не registered DBI. См. [deployment patterns](docs/sync-deployment-patterns-RU.md).
-- При активном sync capture мутирующие вызовы поддерживаемых таблиц должны
+  версию источника в каждую операцию. Конструктор постоянно регистрирует этот
+  DBI; каждая реплика должна зарегистрировать ту же таблицу до приёма её пакетов.
+  Зарегистрированный DBI отклоняет прямые raw-записи, clear, пакетные и диапазонные
+  мутации. Обычные raw DBI могут сосуществовать на том же engine. Версия остаётся
+  метаданными sync, а постоянные боковые данные хранят tombstone редакций и
+  регистрации. Полные снимки могут охватывать только manifest из raw DBI,
+  но не зарегистрированный DBI. См. [схемы развёртывания](docs/sync-deployment-patterns-RU.md).
+- При активном захвате sync мутирующие вызовы поддерживаемых таблиц должны
   использовать транзакции, созданные через `mdbx_containers::Transaction` или
-  `Connection::begin()` / `commit()`. Caller-created raw writable `MDBX_txn*`
-  не может вызвать capture pre-commit hook и отклоняется до мутации.
-  Caller-created raw read-only transactions остаются допустимыми для
-  read/search snapshot operations. Любое исключение из capture recording или
-  flush делает transaction rollback-only; повторный `commit()` отклоняется.
-- Raw catch-up использует replay сохранённого changelog. Если получателю нужна
-  уже удалённая история, он получает `SnapshotRequired`. `SyncWorker` может
-  включить fresh-replica fallback `CompleteUserDatabase`; `ManifestOnly`
-  является ручным режимом физической замены и никогда не продвигает global raw
-  cursor. Complete raw snapshot отклоняется, когда у источника есть persistent
-  logical sync state: он не может безопасно восстановить logical delivery
-  metadata.
-- `SyncEngine` предоставляет pull/push/apply primitives,
-  `register_logical_schema()` для committed setup logical schema markers и
-  `migrate_logical_schema()` для явной замены marker после exact preflight.
+  `Connection::begin()` / `commit()`. Сырой writable `MDBX_txn*`, созданный
+  вызывающим кодом, не может вызвать hook захвата до commit и отклоняется до
+  мутации. Сырые транзакции только для чтения, созданные вызывающим кодом,
+  остаются допустимыми для операций чтения, поиска и снимка. Любое исключение
+  при записи захвата или его сбросе делает транзакцию пригодной только для
+  отката; повторный `commit()` отклоняется.
+- Raw-догоняющее применение использует повторное применение сохранённого журнала
+  изменений. Если получателю нужна уже удалённая история, он получает
+  `SnapshotRequired`. `SyncWorker` может включить резервное восстановление свежей
+  реплики `CompleteUserDatabase`; `ManifestOnly` является ручным режимом
+  физической замены и никогда не продвигает общий raw-курсор. Полный raw-снимок
+  отклоняется, когда у источника есть постоянное состояние logical sync: он не
+  может безопасно восстановить метаданные логической доставки.
+- `SyncEngine` предоставляет примитивы pull/push/apply,
+  `register_logical_schema()` для зафиксированной настройки маркеров логической
+  схемы и `migrate_logical_schema()` для явной замены маркера после точной
+  предварительной проверки.
   `KeyValueTableLogicalAdapter`, `KeyTableLogicalAdapter` и
-  `VectorStoreLogicalAdapter` - concrete
-  logical adapter helpers для явных вызовов
+  `VectorStoreLogicalAdapter` — конкретные
+  логические адаптеры для явных вызовов
   `SyncEngine::apply_logical_changes()` или более низкоуровневого
-  `LogicalTableRegistry::preflight_then_apply()`. Их payload codecs отделены
-  от физического storage-формата таблиц и выбираются через явные codec tags
+  `LogicalTableRegistry::preflight_then_apply()`. Их кодеки нагрузки отделены
+  от физического формата хранения таблиц и выбираются через явные теги кодека
   вроде `KeyValueLogicalInt64Codec<long>` и
-  `KeyValueLogicalStringCodec<std::string>`. Codec tags являются частью
-  logical schema contract; их смена требует нового schema id или явной
-  schema-marker migration. Обычный вызов `register_logical_schema()` всё ещё
-  отклоняет смену `schema_version` под уже зарегистрированным schema id.
-  `apply_logical_changes()` перепроверяет persistent marker для каждой schema
-  до adapter preflight, поэтому stale in-memory adapter не может применять
-  changes после schema-marker migration. Integer payloads кодируются
-  little-endian. Входящий logical apply подавляет локальный raw capture для
-  затронутой транзакции. Это пока явный engine apply path; transport pull/push
-  pipeline остаётся raw-DBI only.
-  `DirectSyncPeer` используется для in-process синхронизации в тестах и примерах,
-  `HttpSyncPeer` задаёт HTTP-shaped adapter seam, `WebSocketSyncPeer` задаёт
-  binary message seam, а `SyncWorker` запускает фоновой polling.
-  `mdbx_containers/sync/transport.hpp` - umbrella header транспортного слоя.
-  Опциональные готовые Simple-Web HTTP/WebSocket binding headers находятся в
+  `KeyValueLogicalStringCodec<std::string>`. Теги кодека являются частью
+  контракта логической схемы; их смена требует нового id схемы или явной
+  миграции маркера схемы. Обычный вызов `register_logical_schema()` всё ещё
+  отклоняет смену `schema_version` под уже зарегистрированным id схемы.
+  `apply_logical_changes()` перепроверяет постоянный маркер для каждой схемы до
+  предварительной проверки адаптера, поэтому устаревший адаптер в памяти не
+  может применять изменения после миграции маркера схемы. Целочисленная нагрузка
+  кодируется в little-endian. Входящее логическое применение подавляет локальный
+  raw-захват для затронутой транзакции. Это пока явный путь применения engine;
+  транспортный контур pull/push остаётся только для raw DBI.
+   `DirectSyncPeer` используется для синхронизации в одном процессе в тестах и примерах,
+   `HttpSyncPeer` задаёт HTTP-образный стык адаптера, `WebSocketSyncPeer` задаёт
+   стык двоичных сообщений, а `SyncWorker` запускает фоновый polling.
+   `mdbx_containers/sync/transport.hpp` — агрегирующий заголовок транспортного слоя.
+   Подключаемые готовые заголовки привязок Simple-Web HTTP/WebSocket находятся в
   `mdbx_containers/sync/transports/simple_web/`, а опциональный Kurlyk/libcurl
-  HTTP client binding находится в `mdbx_containers/sync/transports/kurlyk/`.
+   привязка HTTP-клиента находится в `mdbx_containers/sync/transports/kurlyk/`.
   `MDBXC_SIMPLE_WEB_HTTP_TRANSPORT`,
   `MDBXC_SIMPLE_WEB_WEBSOCKET_TRANSPORT` и `MDBXC_KURLYK_HTTP_TRANSPORT`
-  включают эти dependency targets. Concrete backend targets задают
+   включают эти цели зависимостей. Цели конкретных backend'ов задают
   `MDBXC_HAS_SIMPLE_WEB_HTTP_TRANSPORT`,
   `MDBXC_HAS_SIMPLE_WEB_WEBSOCKET_TRANSPORT` или
-  `MDBXC_HAS_KURLYK_HTTP_TRANSPORT` для условного подключения backend headers.
-  Установленный package также экспортирует CMake provider functions для этих
-  готовых transport targets.
+   `MDBXC_HAS_KURLYK_HTTP_TRANSPORT` для условного подключения заголовков backend'ов.
+   Установленный пакет также экспортирует CMake-функции provider для этих
+   готовых транспортных целей.
   Начните с [карты архитектуры sync](guides/sync-architecture-RU.md), затем с
   [обзора sync](docs/sync-RU.md), используйте [руководство по сценариям
   sync](docs/sync-use-cases-RU.md) для выбора поддерживаемой модели данных и
-  [руководство по
-  deployment patterns](docs/sync-deployment-patterns-RU.md) для выбора
-  multi-origin data model, [руководство по logical и ordered sync](docs/sync-logical-RU.md)
-  либо [руководство по восстановлению и full snapshots](docs/sync-recovery-RU.md)
+   [руководство по
+   схемам развёртывания](docs/sync-deployment-patterns-RU.md) для выбора
+   модели данных с несколькими origin, [руководство по логической и упорядоченной
+   синхронизации](docs/sync-logical-RU.md) либо [руководство по восстановлению и полным снимкам](docs/sync-recovery-RU.md)
   для этих путей.
-  См. [sync transport production notes](guides/sync-transport-production.md)
-  про TLS/WSS, ротацию токенов, graceful shutdown, structured logging и
-  offline dependency builds. См.
-  [sync table coverage matrix](guides/sync-table-coverage.md) про текущий
-  статус поддержки wrapper'ов и
-  [sync v0.1 readiness checklist](guides/sync-v0.1-readiness.md) про
+   См. [заметки о промышленном транспорте sync](guides/sync-transport-production.md)
+   про TLS/WSS, ротацию токенов, согласованную остановку, структурированное
+   журналирование и автономную сборку зависимостей. См.
+   [матрицу покрытия таблиц sync](guides/sync-table-coverage.md) про текущий
+   статус поддержки обёрток и
+   [чек-лист готовности sync v0.1](guides/sync-v0.1-readiness.md) про
   готовность релиза и отложенные задачи.
-  Socket-backed примеры используют эти bindings вместо повторной реализации
-  транспорта в каждом файле. Wire-format для специализированных таблиц отложен.
-  HTTP auth,
-  remote-address checks и rate-limit headers живут в adapter-local policy
-  context, а не внутри sync DTO;
+   Примеры с сокетами используют эти привязки вместо повторной реализации
+   транспорта в каждом файле. Сетевой формат для специализированных таблиц отложен.
+   HTTP-аутентификация,
+   проверки удалённого адреса и заголовки ограничения частоты живут в локальном
+   контексте policy адаптера, а не внутри DTO sync;
   см. `include/mdbx_containers/sync/DESIGN.md`.
 
 ### 🗄️ Структура и конфигурация
@@ -315,11 +317,12 @@ metadata filtering и генерация embeddings не входят в обл�
 только из ASCII-букв, цифр, `_` и `-`.
 
 Сейчас sync воспроизводит четыре внутренних DBI этого store как raw physical
-изменения. На всех replica используйте одно имя коллекции и совместимый
-embedding codec. Vector metric является локальной конфигурацией query; если
-search ranking должен совпадать, настройте одинаковую metric на каждой replica.
-У коллекции должен быть один authoritative writer либо приложение должно
-внешне сериализовать всех writer'ов: локальный `add()` выделяет id из локального состояния и не даёт cross-node identity
+изменения. На всех репликах используйте одно имя коллекции и совместимый кодек
+embedding. Метрика вектора является локальной конфигурацией запроса; если
+ранжирование поиска должно совпадать, настройте одинаковую метрику на каждой
+реплике. У коллекции должен быть один авторитетный пишущий узел либо приложение
+должно внешне сериализовать всех писателей: локальный `add()` выделяет id из
+локального состояния и не даёт межузловой идентичности
 allocation или conflict resolution. Opt-in `VectorStoreLogicalAdapter`
 использует явные id и атомарно применяет add, erase и clear по всем четырём DBI.
 При erase id marker сохраняется как allocation high-water, а clear сбрасывает

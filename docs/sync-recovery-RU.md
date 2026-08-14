@@ -1,159 +1,164 @@
 # Восстановление синхронизации и полные снимки
 
-Raw-репликация обычно догоняет источник replay'ем retained changelog batches.
-Full snapshot - отдельный явный recovery protocol. Он не равен пустому raw
-cursor и не предназначен для ремонта произвольной уже существующей реплики.
+Raw-репликация обычно догоняет источник повторным применением сохранённых
+пакетов журнала изменений. Полный снимок — отдельный явный протокол
+восстановления. Он не равен пустому raw-курсору и не предназначен для ремонта
+произвольной уже существующей реплики.
 
-Сначала прочитайте [Sync-репликация](sync-RU.md). English version:
+Сначала прочитайте [Sync-репликация](sync-RU.md). Английская версия:
 [sync-recovery.md](sync-recovery.md).
 
 ## Обычное догоняющее применение
 
-Пустой raw cursor запрашивает у источника все *сохранённые* batches начиная с
-sequence one. Непустой cursor запрашивает batches новее durable per-origin
-cursor получателя. Оба случая - обычный changelog replay.
+Пустой raw-курсор запрашивает у источника все *сохранённые* пакеты, начиная с
+первого номера последовательности. Непустой курсор запрашивает пакеты новее
+постоянного покомпонентного курса origin получателя. Оба случая — обычное
+повторное применение журнала изменений.
 
-Если источник уже удалил batch, нужный для продолжения cursor получателя, pull
+Если источник уже удалил пакет, нужный для продолжения курсора получателя, pull
 возвращает `SnapshotRequired` и не отдаёт частичную более позднюю историю.
-Получатель должен выбрать recovery procedure, а не применять непрерывно
+Получатель должен выбрать процедуру восстановления, а не применять непрерывно
 нарушенный поток.
 
 ## Области снимка
 
-| Scope | Выбор источника | Результат на получателе | Эффект для cursor |
+| Область | Выбор источника | Результат на получателе | Эффект для курсора |
 | --- | --- | --- | --- |
-| `ManifestOnly` | Configured manifest именованных пользовательских DBI. | Заменяет только эти DBI. DBI вне manifest остаются нетронутыми. | Никогда не меняет global raw-sync progress. |
-| `CompleteUserDatabase` | Все именованные non-reserved user DBI, видимые в одной stable source read transaction. | Заменяет полный user-DBI inventory fresh receiver. | После финального успешного import записывает immutable source tail в `_mdbxc_applied`. |
+| `ManifestOnly` | Настроенный manifest именованных пользовательских DBI. | Заменяет только эти DBI. DBI вне manifest остаются нетронутыми. | Никогда не меняет общий ход raw-sync. |
+| `CompleteUserDatabase` | Все незарезервированные именованные пользовательские DBI, видимые в одной стабильной транзакции чтения источника. | Заменяет полный состав пользовательских DBI свежего получателя. | После финального успешного импорта записывает неизменяемый хвост источника в `_mdbxc_applied`. |
 
-`ManifestOnly` - manual physical replacement tool. Он не может bootstrap global
-raw cursor и никогда не используется `SyncWorker` как автоматическое recovery.
+`ManifestOnly` — ручной инструмент физической замены. Он не может инициализировать
+общий raw-курсор и никогда не используется `SyncWorker` для автоматического восстановления.
 
-`CompleteUserDatabase` - единственный worker fallback scope. Destination должен
-быть fresh: в нём не может быть user DBI вне exported inventory, local changelog
-history либо applied cursor progress. Это не in-place repair path для частично
-реплицированной БД.
+`CompleteUserDatabase` — единственная область резервного восстановления worker.
+Получатель должен быть свежим: в нём не может быть пользовательских DBI вне
+экспортированного состава, локальной истории журнала изменений либо продвижения
+применённого курсора. Это не путь ремонта на месте для частично реплицированной БД.
 
 ```mermaid
 sequenceDiagram
-    participant W as SyncWorker на fresh receiver
+    participant W as SyncWorker на свежем получателе
     participant S as Source SyncEngine
-    participant Stage as In-memory staging получателя
+    participant Stage as Подготовка в памяти получателя
     participant DB as User DBI получателя
 
-    W->>S: incremental pull
+    W->>S: последовательный pull
     S-->>W: SnapshotRequired
-    W->>S: явный CompleteUserDatabase request с empty cursor
-    S-->>W: stable snapshot page 0 и session id
-    W->>Stage: validation и staging каждой page
-    S-->>W: final page
-    W->>DB: одна final transaction: replace user DBI и bootstrap cursor
+    W->>S: явный запрос CompleteUserDatabase с пустым курсором
+    S-->>W: стабильная страница 0 снимка и id сессии
+    W->>Stage: проверка и подготовка каждой страницы
+    S-->>W: финальная страница
+    W->>DB: одна финальная транзакция: замена пользовательских DBI и инициализация курсора
 ```
 
-Получатель проверяет каждую page относительно immutable metadata page zero. До
-final page user DBI не изменяются. Interruption либо validation failure удаляет
-in-memory staging; persisted importer resume сейчас не реализован, поэтому
-последующая попытка начинает новую source session.
+Получатель проверяет каждую страницу относительно неизменяемых метаданных
+нулевой страницы. До финальной страницы пользовательские DBI не изменяются.
+Прерывание либо ошибка проверки удаляет подготовленные в памяти данные;
+возобновление постоянного импортёра сейчас не реализовано, поэтому последующая
+попытка начинает новую сессию источника.
 
 ## Граница логического состояния
 
-Raw `CompleteUserDatabase` предназначен только для raw sync. Источник отклоняет его
-с `SnapshotLogicalStateUnsupported`, когда находит любой persistent logical-sync
-state, в том числе:
+Raw `CompleteUserDatabase` предназначен только для raw sync. Источник отклоняет
+его с `SnapshotLogicalStateUnsupported`, когда находит любое постоянное состояние
+logical-sync, в том числе:
 
-- logical schema marker;
-- logical replay markers либо pruning watermark;
-- ordered-delivery frontier;
-- durable ordered-outbox metadata либо envelope.
+- маркер логической схемы;
+- маркеры повтора либо watermark очистки;
+- границу упорядоченной доставки;
+- постоянные метаданные упорядоченного outbox либо envelope.
 
-Raw-копия adapter-owned user DBI без logical delivery state не могла бы
-безопасно продолжить logical replication. `ManifestOnly` также не обещает
-восстановления или bootstrap logical state.
+Raw-копия пользовательского DBI, принадлежащего адаптеру, без состояния
+логической доставки не могла бы безопасно продолжить логическую репликацию.
+`ManifestOnly` также не обещает восстановления или инициализации логического состояния.
 
-## Logical-aware recovery для fresh replica
+## Восстановление с учётом логического состояния для свежей реплики
 
-`SyncWorkerOptions::enable_logical_recovery_fallback` - отдельный, по
-умолчанию выключенный путь для fresh replica после `SnapshotRequired`. Он
-использует отдельный peer contract `LogicalRecoveryRequest` /
-`LogicalRecoveryResponse` и не меняет raw `PullRequest`, `FullSnapshotChunk`
-или raw complete snapshot guard.
+`SyncWorkerOptions::enable_logical_recovery_fallback` — отдельный, по умолчанию
+выключенный путь для свежей реплики после `SnapshotRequired`. Он использует
+отдельный peer-контракт `LogicalRecoveryRequest` / `LogicalRecoveryResponse` и
+не меняет raw `PullRequest`, `FullSnapshotChunk` или ограничение полного raw-снимка.
 
 `DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer` используют один
-отдельный wire contract logical recovery. В запросе передаются node requester
-и целевой `DbId`; источник отклоняет несовпадающий database до materialization
-snapshot. HTTP bearer и WebSocket session identity policy применяют к этому
-`DbId` существующее per-principal правило доступа к database.
+отдельный сетевой контракт логического восстановления. В запросе передаются
+узел-запросчик и целевой `DbId`; источник отклоняет несовпадающую БД до
+материализации снимка. Политика идентичности HTTP bearer и WebSocket session
+применяет к этому `DbId` существующее правило доступа к БД для конкретного principal.
 
-Источник берёт один stable read baseline, в который входят:
+Источник берёт одну стабильную базу чтения, в которую входят:
 
-- complete non-reserved user-DBI snapshot и raw applied-cursor tail;
-- logical schema markers;
-- replay markers и pruning watermarks;
-- ordered-delivery receiver frontiers;
-- source outbox tail и ещё не подтверждённые envelopes для конкретного
-  requesting receiver node.
+- полный снимок незарезервированных пользовательских DBI и хвост применённых
+  raw-курсоров;
+- маркеры логических схем;
+- маркеры повтора и watermark очистки;
+- границы упорядоченной доставки получателя;
+- хвост outbox источника и ещё не подтверждённые envelope для конкретного
+  узла-получателя, запросившего восстановление.
 
-Pending source suffix непрерывен и заканчивается на known tail этого receiver.
-Он не общий с другой репликой, даже если у неё тот же database identity.
+Ожидающий суффикс источника непрерывен и заканчивается на известном хвосте этого
+получателя. Он не общий с другой репликой, даже если у неё та же идентичность БД.
 
-У упорядоченного logical event одна глобальная identity на database и origin:
+У упорядоченного логического события одна глобальная идентичность на БД и origin:
 `(DbId, origin_node_id, origin_sequence)`. Source не выделяет новый
-`origin_sequence`, когда в v0.1 переносится единственный receiver route. Pending
-outbox entries и acknowledgements остаются receiver-specific. Поэтому route с
-receiver B на fresh receiver C переносится только через logical-aware recovery
-из B в C. Он импортирует ordered frontiers B, после чего C принимает следующий
-global event от source. Отправка более позднего event сразу на не
-восстановленный C fail-closed отклоняется как ordered sequence gap.
+`origin_sequence`, когда в v0.1 переносится единственный маршрут получателя.
+Ожидающие записи outbox и подтверждения остаются специфичными для получателя.
+Поэтому маршрут с получателя B на свежего получателя C переносится только через
+восстановление с учётом логического состояния из B в C. Оно импортирует границы
+упорядоченной доставки B, после чего C принимает следующее глобальное событие
+от источника. Отправка более позднего события сразу на невосстановленный C
+отклоняется как пропуск упорядоченной последовательности.
 
-Получатель требует совместимый in-memory adapter для каждой schema из
-baseline. Физические страницы staging'уются в памяти. На final page он
-проверяет baseline, заменяет user DBI, bootstrap'ит raw cursor,
-восстанавливает logical metadata и создаёт replay markers для source
-envelopes, которые ещё не были acknowledged. Всё это commit'ится одной MDBX
-transaction. Source outbox не копируется как local outbox получателя.
+Получатель требует совместимый адаптер в памяти для каждой схемы из базы
+чтения. Физические страницы подготавливаются в памяти. На финальной странице он
+проверяет базу чтения, заменяет пользовательские DBI, инициализирует raw-курсор,
+восстанавливает логические метаданные и создаёт маркеры повтора для envelope
+источника, которые ещё не были подтверждены. Всё это фиксируется одной
+MDBX-транзакцией. Outbox источника не копируется как локальный outbox получателя.
 
-Благодаря этому повторная отправка старого pending source envelope получает
-replay acknowledgement, а не второе изменение; следующий source sequence
-применяется обычно. Повреждённый baseline, отсутствующий adapter или не fresh
-logical state получателя откатывают final transaction.
+Благодаря этому повторная отправка старого ожидающего envelope источника
+получает подтверждение повтора, а не второе изменение; следующая
+последовательность источника применяется обычно. Повреждённая база чтения,
+отсутствующий адаптер или не свежее логическое состояние получателя откатывают
+финальную транзакцию.
 
-Source materialization bounds покрывают physical snapshot operations и
-учитываемое logical-baseline representation: fixed records, dynamic container
-elements и serialized variable payloads. Receiver применяет тот же combined
-bound к staged physical pages и final baseline до открытия destination write
-transaction. Это structural materialization accounting limit, а не гарантированный
-process-heap ceiling: allocator overhead, container capacities и temporary
-copies зависят от реализации. `LogicalRecoveryPeer` принимает cooperative
-cancellation token для recovery call; cancellation даёт retryable response и
-отбрасывает неопубликованную source session. Этот контракт поддерживает
-`DirectSyncPeer`.
+Ограничения материализации источника покрывают операции физического снимка и
+учитываемое представление логической базы: фиксированные записи, динамические
+элементы контейнеров и сериализованные нагрузки переменной длины. Получатель
+применяет то же объединённое ограничение к подготовленным физическим страницам
+и финальной базе до открытия транзакции записи получателя. Это структурное
+ограничение учёта материализации, а не гарантированный потолок кучи процесса:
+накладные расходы allocator, ёмкости контейнеров и временные копии зависят от
+реализации. `LogicalRecoveryPeer` принимает cooperative token отмены для вызова
+восстановления; отмена даёт ответ, допускающий повтор, и отбрасывает
+неопубликованную сессию источника. Этот контракт поддерживает `DirectSyncPeer`.
 
 ## Процедура оператора
 
-1. Для новой реплики начните с пустого raw cursor и используйте обычный
-   changelog replay, пока источник хранит необходимую историю.
+1. Для новой реплики начните с пустого raw-курсора и используйте обычное
+   повторное применение журнала изменений, пока источник хранит необходимую историю.
 2. Если pull возвращает `SnapshotRequired`, решите, можно ли удалить получатель
-   и создать его как fresh replica.
+   и создать его как свежую реплику.
 3. Настройте источник на `CompleteUserDatabase` и включите
    `SyncWorkerOptions::enable_full_snapshot_fallback`, либо ведите явный
-   snapshot request из application code.
-4. Считайте `SnapshotLogicalStateUnsupported` сменой recovery method, а не
-   retryable transport error. Для fresh receiver с capable peer используйте
-   explicit logical-aware fallback; в остальных случаях нужен
-   application-specific logical recovery process.
+   запрос снимка из кода приложения.
+4. Считайте `SnapshotLogicalStateUnsupported` сменой способа восстановления, а
+   не ошибкой транспорта, допускающей повтор. Для свежего получателя с peer,
+   поддерживающим этот путь, используйте явное резервное логическое
+   восстановление; в остальных случаях нужен процесс восстановления приложения.
 5. Используйте `ManifestOnly` только тогда, когда замена перечисленных
-   физических DBI является нужной application operation и корректно оставить
-   global replication cursor без изменений.
+   физических DBI является нужной операцией приложения и корректно оставить
+   общий курсор репликации без изменений.
 
 ## Другие ошибки
 
-| Response | Значение | Обычное действие |
+| Ответ | Значение | Обычное действие |
 | --- | --- | --- |
-| `SnapshotRequired` | Запрошенная raw history больше не сохранена. | Запустите явное fresh-replica recovery, когда это допустимо. |
-| `SnapshotNotConfigured` | У источника нет подходящей snapshot export configuration. | Настройте нужный source scope либо выберите другой recovery process. |
-| `SnapshotSessionBusy` | Источник достиг bounded active-session capacity. | Повторите позже. |
-| `SnapshotSessionInvalid` | Передан expired, foreign либо malformed continuation. | Начните новую snapshot session. |
-| `SnapshotLogicalStateUnsupported` | У источника есть durable logical-sync state, который raw complete snapshot не может представить. | Не повторяйте raw snapshot; используйте logical-aware procedure. |
+| `SnapshotRequired` | Запрошенная raw-история больше не сохранена. | Запустите явное восстановление свежей реплики, когда это допустимо. |
+| `SnapshotNotConfigured` | У источника нет подходящей настройки экспорта снимка. | Настройте нужную область источника либо выберите другой процесс восстановления. |
+| `SnapshotSessionBusy` | Источник достиг ограниченной ёмкости активных сессий. | Повторите позже. |
+| `SnapshotSessionInvalid` | Передано устаревшее, чужое либо некорректное продолжение. | Начните новую сессию снимка. |
+| `SnapshotLogicalStateUnsupported` | У источника есть постоянное состояние logical-sync, которое полный raw-снимок не может представить. | Не повторяйте raw-снимок; используйте процедуру с учётом логического состояния. |
 
-Точную retry classification транспорта, cancellation, TLS, authentication и
-production deployment boundaries см. в
+Точную классификацию повторов транспорта, отмену, TLS, аутентификацию и границы
+промышленного развёртывания см. в
 [sync-transport-production.md](../guides/sync-transport-production.md).

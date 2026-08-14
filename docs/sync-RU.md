@@ -1,33 +1,33 @@
 # Sync-репликация
 
 `mdbx-containers` предоставляет подключаемую подсистему репликации для
-приложений на MDBX. Она не привязана к транспорту: ядро отвечает за capture,
-постоянное состояние, постраничную выдачу, проверку и apply-транзакции, а
-приложение выбирает реализацию `ISyncPeer` либо один из опциональных HTTP/
-WebSocket binding.
+приложений на MDBX. Она не привязана к транспорту: ядро отвечает за захват,
+постоянное состояние, постраничную выдачу, проверку и транзакции применения, а
+приложение выбирает реализацию `ISyncPeer` либо одну из подключаемых привязок
+HTTP/WebSocket.
 
 Это вводная страница для разработчика приложения. Здесь описан реализованный
-контракт. Решения, влияющие на wire- и disk-форматы, отдельно зафиксированы в
+контракт. Решения, влияющие на сетевой и дисковый форматы, отдельно зафиксированы в
 [`include/mdbx_containers/sync/DESIGN.md`](../include/mdbx_containers/sync/DESIGN.md).
 
-English version: [sync.md](sync.md).
+Английская версия: [sync.md](sync.md).
 
 ## Выбор режима
 
 | Задача | Режим | Точки входа |
 | --- | --- | --- |
 | Реплицировать обычные записи таблиц между копиями БД | Raw-репликация | `ThreadLocalChangeAccumulator`, `SyncCaptureScope`, `SyncWorker`, `ISyncPeer` |
-| Разрешать один mutable key по upstream source version | Узкий LWW register | `ConflictPolicy::LastWriterWins`, `VersionedKeyValueTable` |
-| Реплицировать таблицу через явную типизированную схему приложения | Logical frames | Logical adapter таблицы, `LogicalChangeFrameCodec`, `SyncEngine::apply_logical_frame_bytes()` |
-| Сохранить одну авторитетную упорядоченную историю и безопасно повторять её доставку | Ordered logical delivery | Durable outbox, logical-capable `ISyncPeer`, `SyncWorkerOptions::enable_logical_delivery` |
-| Восстановить свежую raw-реплику после удаления нужной истории из changelog | Full snapshot recovery | `SyncWorkerOptions::enable_full_snapshot_fallback`, `CompleteUserDatabase` |
+| Разрешать один изменяемый ключ по версии источника | Узкий LWW-регистр | `ConflictPolicy::LastWriterWins`, `VersionedKeyValueTable` |
+| Реплицировать таблицу через явную типизированную схему приложения | Логические фреймы | Логический адаптер таблицы, `LogicalChangeFrameCodec`, `SyncEngine::apply_logical_frame_bytes()` |
+| Сохранить одну авторитетную упорядоченную историю и безопасно повторять её доставку | Упорядоченная логическая доставка | Постоянный outbox, `ISyncPeer` с логической доставкой, `SyncWorkerOptions::enable_logical_delivery` |
+| Восстановить свежую raw-реплику после удаления нужной истории из журнала | Восстановление полным снимком | `SyncWorkerOptions::enable_full_snapshot_fallback`, `CompleteUserDatabase` |
 
-Эти режимы намеренно разделены. Обычный pull/push transport protocol несёт
-только raw DBI operations. Ordered logical delivery использует отдельный
-capability-negotiated protocol и явно включается в `SyncWorker`; он не
-преобразуется молча в raw операции и не попадает в обычный `ChangeBatch`.
-Direct logical frames остаются application-delivered, когда routing, порядок и
-retry policy принадлежат самому приложению.
+Эти режимы намеренно разделены. Обычный транспортный протокол pull/push несёт
+только raw-операции DBI. Упорядоченная логическая доставка использует отдельный
+протокол с согласованием возможностей и явно включается в `SyncWorker`; она не
+преобразуется молча в raw-операции и не попадает в обычный `ChangeBatch`.
+Прямые логические фреймы доставляет само приложение, когда ему принадлежат
+маршрутизация, порядок и политика повторов.
 
 ## Основные понятия
 
@@ -36,35 +36,35 @@ retry policy принадлежат самому приложению.
   после перезапуска.
 - **DbId** идентифицирует одну логическую реплицируемую БД. У всех участников
   этого набора репликации он должен совпадать.
-- **Origin sequence** упорядочивает raw batches одного узла. Получатель хранит
-  applied cursor для каждого origin и принимает только непрерывные новые
+- **Последовательность origin** упорядочивает raw-пакеты одного узла. Получатель хранит
+  применённый курсор для каждого origin и принимает только непрерывные новые
   последовательности.
-- **Capture** записывает поддерживаемые локальные изменения в той же
+- **Захват** записывает поддерживаемые локальные изменения в той же
   транзакции, которая их сделала. При локальном commit он не связывается с
   удалённым узлом.
-- **Apply** - это MDBX-транзакция получателя, проверяющая и фиксирующая
-  полученную страницу, после чего продвигается durable cursor.
+- **Применение** — это MDBX-транзакция получателя, проверяющая и фиксирующая
+  полученную страницу, после чего продвигается постоянный курсор.
 
 ## Архитектура
 
 ```mermaid
 flowchart LR
-    AppA[Приложение A] --> Capture[Raw capture или typed logical session]
+    AppA[Приложение A] --> Capture[Raw-захват или типизированная логическая сессия]
     Capture --> RawLog[_mdbxc_changelog]
-    Capture --> Outbox[Ordered logical outbox]
-    RawLog --> Peer[ISyncPeer или transport binding]
-    Outbox --> LogicalTransport[Logical-capable peer]
+    Capture --> Outbox[Outbox упорядоченной логической доставки]
+    RawLog --> Peer[ISyncPeer или привязка транспорта]
+    Outbox --> LogicalTransport[Peer с поддержкой логической доставки]
     Peer --> EngineB[SyncEngine на B]
     LogicalTransport --> EngineB
     EngineB --> UserDb[Пользовательские DBI]
-    EngineB --> State[_mdbxc_applied и logical state]
+    EngineB --> State[_mdbxc_applied и логическое состояние]
 ```
 
-Две стрелки в `EngineB` означают разные admission paths. Raw-страница идёт
-через `handle_push()`. Direct logical frame использует явный logical apply
-method. Ordered envelope проходит через logical peer protocol; дополнительно
-проверяются destination, порядок origin, replay state и persistent schema
-marker.
+Две стрелки в `EngineB` означают разные пути допуска. Raw-страница идёт через
+`handle_push()`. Прямой логический фрейм использует явный метод применения.
+Упорядоченный envelope проходит через протокол logical peer; дополнительно
+проверяются получатель, порядок origin, состояние повтора и постоянный маркер
+схемы.
 
 ## Raw-репликация
 
@@ -75,11 +75,11 @@ marker.
 #include <mdbx_containers/sync.hpp>
 ```
 
-Обычная настройка создаёт `SyncEngine` для каждого connection, инициализирует
-постоянную local identity, подключает `ThreadLocalChangeAccumulator` на
-writer'ах и запускает `SyncWorker` на получателях. `SyncNodeSession` объединяет
-типичный application lifecycle: подключение capture и запуск уже созданного
-worker.
+Обычная настройка создаёт `SyncEngine` для каждого соединения, инициализирует
+постоянную локальную идентичность, подключает `ThreadLocalChangeAccumulator`
+на пишущих узлах и запускает `SyncWorker` на получателях. `SyncNodeSession`
+объединяет типичный жизненный цикл приложения: подключение захвата и запуск уже
+созданного worker.
 
 ```mermaid
 sequenceDiagram
@@ -88,99 +88,101 @@ sequenceDiagram
     participant P as ISyncPeer
     participant B as Получатель B
 
-    A->>Log: commit локальной транзакции и captured ChangeBatch
-    B->>P: pull(cursor B has)
-    P->>Log: чтение retained batches после cursor
-    Log-->>B: PullResponse page
-    B->>B: handle_push(page) в одной MDBX write transaction
-    B->>B: apply операций и продвижение applied cursor
+    A->>Log: commit локальной транзакции и захваченный ChangeBatch
+    B->>P: pull (курсор B)
+    P->>Log: чтение сохранённых пакетов после курсора
+    Log-->>B: страница PullResponse
+    B->>B: handle_push(page) в одной MDBX-транзакции записи
+    B->>B: применение операций и продвижение применённого курсора
 ```
 
-Одиночная поддерживаемая запись создаёт один local batch. Несколько
-поддерживаемых записей в явной connection-managed transaction создают один
-атомарный local batch. Ошибочные или откатанные транзакции batch не создают.
+Одиночная поддерживаемая запись создаёт один локальный пакет. Несколько
+поддерживаемых записей в явной транзакции под управлением соединения создают
+один атомарный локальный пакет. Ошибочные или откатанные транзакции пакет не создают.
 
 Когда capture подключён, операции записи должны использовать `Transaction`
 либо `Connection::begin()` / `commit()`. Writable `MDBX_txn*`, созданные самим
-вызывающим кодом, отклоняются до mutation: они не могут вызвать capture
-pre-commit hook. Read-only handles вызывающего кода остаются пригодными для
-чтения и snapshot operations.
+вызывающим кодом, отклоняются до мутации: они не могут вызвать hook захвата до
+commit. Дескрипторы только для чтения, созданные вызывающим кодом, остаются
+пригодными для чтения и операций снимка.
 
 ### Поддержка raw-репликации
 
 | Семейство таблиц | Raw-статус | Важная граница |
 | --- | --- | --- |
 | `KeyValueTable`, `KeyTable`, `ValueTable`, `SequenceTable` | Поддерживается | Операции захватываются как физические изменения DBI. |
-| `VersionedKeyValueTable` | Узкий LWW v1 adapter | Только точечные versioned put/delete для source-version-wins register. |
-| `VectorStore` | Поддерживается через owned tables | Raw-репликация обновляет четыре underlying DBI; уже открытые экземпляры лениво пересобирают in-memory index после remote apply. |
-| `KeyMultiValueTable` | Не реплицируется как raw | Используйте явный logical adapter, если подходит его documented typed contract. |
-| `KeyOrderedMultiValueTable` | Не реплицируется как raw | Для поддерживаемых схем используйте ordered logical delivery. |
-| `AnyValueTable`, `HashedKeyValueStore` | Отложено | Контракта raw capture пока нет. |
+| `VersionedKeyValueTable` | Узкий LWW v1-адаптер | Только точечные versioned put/delete для регистра «побеждает версия источника». |
+| `VectorStore` | Поддерживается через принадлежащие таблицы | Raw-репликация обновляет четыре внутренние DBI; уже открытые экземпляры лениво пересобирают индекс в памяти после удалённого применения. |
+| `KeyMultiValueTable` | Не реплицируется как raw | Используйте явный логический адаптер, если подходит его документированный типизированный контракт. |
+| `KeyOrderedMultiValueTable` | Не реплицируется как raw | Для поддерживаемых схем используйте упорядоченную логическую доставку. |
+| `AnyValueTable`, `HashedKeyValueStore` | Отложено | Контракта raw-захвата пока нет. |
 
-Raw-репликация сохраняет contract операций на уровне storage и отклоняет
-sequence gaps. Узкое исключение для concurrent writes — register
-`VersionedKeyValueTable`: с `ConflictPolicy::LastWriterWins` каждая точечная
-put/delete-операция несёт непустимую application-owned version, которая
-сравнивается лексикографически, затем по `NodeId` origin-а. Version остаётся
-вне user value, а durable sidecar tombstone не позволяет старому put воскресить
-delete.
+Raw-репликация сохраняет контракт операций на уровне хранения и отклоняет
+пропуски последовательности. Узкое исключение для конкурентных записей —
+регистр `VersionedKeyValueTable`: с `ConflictPolicy::LastWriterWins` каждая
+точечная put/delete-операция несёт непустимую версию, принадлежащую приложению,
+которая сравнивается лексикографически, затем по `NodeId` origin. Версия
+остаётся вне значения пользователя, а постоянный tombstone не позволяет старому
+put воскресить delete.
 
-Это не generic conflict resolution. `VersionedKeyValueTable` durable-регистрирует
-только свой DBI; каждый replica должен сконструировать adapter до приёма
-revisioned operations. Registered DBI принимает только adapter-emitted point
-put/delete changes и отклоняет direct raw, clear, bulk и range writes. Обычные
-raw DBI могут сосуществовать на том же LWW engine и принимать unversioned raw
-operations. Full snapshots могут использовать manifest обычных DBI, но не могут
-включать registered DBI. Выберите upstream sequence либо другую canonical
-authority; wall-clock узла authority не является. Operational model приведён в
-[deployment patterns](sync-deployment-patterns-RU.md).
+Это не универсальное разрешение конфликтов. `VersionedKeyValueTable` постоянно
+регистрирует только свой DBI; каждая реплика должна сконструировать адаптер до
+приёма операций редакций. Зарегистрированный DBI принимает только точечные
+put/delete-изменения, созданные адаптером, и отклоняет прямые raw-записи, clear,
+пакетные и диапазонные записи. Обычные raw DBI могут сосуществовать на том же
+LWW engine и принимать raw-операции без версии. Полные снимки могут использовать
+manifest обычных DBI, но не могут включать зарегистрированный DBI. Выберите
+последовательность источника либо другой канонический порядок; часы узла его не
+задают. Эксплуатационная модель приведена в
+[схемах развёртывания](sync-deployment-patterns-RU.md).
 
 ## Транспорт и эксплуатация
 
-`DirectSyncPeer` - in-process peer для вводных примеров. Framework-neutral
-HTTP- и WebSocket-seams используют `TransportMessageCodec`; опциональные
-Simple-Web и Kurlyk bindings дают concrete transport, не меняя core messages.
+`DirectSyncPeer` — peer в одном процессе для вводных примеров. Независимые от
+фреймворка стыки HTTP и WebSocket используют `TransportMessageCodec`;
+подключаемые привязки Simple-Web и Kurlyk дают конкретный транспорт, не меняя
+сообщения ядра.
 
 ### Упорядоченная логическая доставка
 
-`ISyncPeer` также имеет optional logical-delivery capability. Его реализуют
-`DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer`. HTTP использует
-отдельные logical hello и delivery routes; WebSocket определяет logical
-protocol по собственному magic. Ни `TransportMessageCodec`, ни raw pull/push
-wire layout при этом не меняются.
+`ISyncPeer` также имеет подключаемую возможность логической доставки. Её
+реализуют `DirectSyncPeer`, `HttpSyncPeer` и `WebSocketSyncPeer`. HTTP
+использует отдельные маршруты logical hello и доставки; WebSocket определяет
+логический протокол по собственному magic. Ни `TransportMessageCodec`, ни
+сетевой формат raw pull/push при этом не меняются.
 
 Установите `SyncWorkerOptions::enable_logical_delivery = true`, чтобы worker
-после полного raw pull round отправлял durable outbox local engine. В качестве
-logical destination используется текущий replication `DbId`; worker
-согласует ordered delivery и cumulative acknowledgements и удаляет только
-acknowledged outbox prefix. `max_logical_deliveries` при необходимости
-ограничивает один round; ноль означает отправить весь pending prefix. Raw-only
-peer допускается, пока outbox пуст, но при pending delivery round завершается
-ошибкой без удаления queued frames. Retryable acknowledgement failure также
-сохраняет unacknowledged suffix для следующего round.
+после полного raw-обхода pull отправлял постоянный outbox локального engine. В
+качестве логического получателя используется текущий `DbId` репликации; worker
+согласует упорядоченную доставку и накопительные подтверждения и удаляет только
+подтверждённый префикс outbox. `max_logical_deliveries` при необходимости
+ограничивает один обход; ноль означает отправить весь ожидающий префикс. Peer
+только с raw-доставкой допускается, пока outbox пуст, но при ожидающей доставке
+обход завершается ошибкой без удаления фреймов из очереди. Ошибка подтверждения,
+допускающая повтор, также сохраняет неподтверждённый суффикс для следующего обхода.
 
-Transport authentication, TLS, remote-address policy, rate limiting, request
-id и HTTP/WebSocket status mapping остаются на стороне adapter. Они намеренно
-не сериализуются в replication DTO. Настройка эксплуатации описана в
+Аутентификация транспорта, TLS, политика удалённого адреса, ограничение частоты,
+id запроса и сопоставление статусов HTTP/WebSocket остаются на стороне адаптера.
+Они намеренно не сериализуются в DTO репликации. Настройка эксплуатации описана в
 [sync-transport-production.md](../guides/sync-transport-production.md).
 
-Полезные runnable starting points:
+Полезные рабочие примеры:
 
-- [`sync_01_lifecycle_direct_peer.cpp`](../examples/sync_01_lifecycle_direct_peer.cpp): один ручной raw pull/push cycle.
-- [`sync_22_node_session_minimal.cpp`](../examples/sync_22_node_session_minimal.cpp): минимальная wiring-схема `SyncNodeSession`.
-- [`sync_07_worker_observer.cpp`](../examples/sync_07_worker_observer.cpp): status и callbacks worker'а.
+- [`sync_01_lifecycle_direct_peer.cpp`](../examples/sync_01_lifecycle_direct_peer.cpp): один ручной цикл raw pull/push.
+- [`sync_22_node_session_minimal.cpp`](../examples/sync_22_node_session_minimal.cpp): минимальная схема подключения `SyncNodeSession`.
+- [`sync_07_worker_observer.cpp`](../examples/sync_07_worker_observer.cpp): состояние и callbacks worker.
 
 ## Дальнейшее чтение
 
 - [Сценарии использования sync](sync-use-cases-RU.md): выбор поддерживаемого
-  контракта для одного writer, immutable multi-origin events, LWW registers и
-  RAG corpus.
+  контракта для одного пишущего узла, неизменяемых событий нескольких origin,
+  LWW-регистров и корпуса RAG.
 - [Практические схемы развёртывания](sync-deployment-patterns-RU.md): модели
-  данных и ownership writers для multi-origin datasets.
-- [Logical и ordered delivery](sync-logical-RU.md): typed schemas, adapter
-  capture, ordered outbox delivery и границы concurrency.
-- [Восстановление и full snapshots](sync-recovery-RU.md): recovery retained
-  history, snapshot scopes и правила fresh replica.
+  данных и владение записями для наборов данных с несколькими origin.
+- [Логическая и упорядоченная доставка](sync-logical-RU.md): типизированные
+  схемы, захват адаптера, доставка из упорядоченного outbox и границы конкурентности.
+- [Восстановление и полные снимки](sync-recovery-RU.md): восстановление
+  сохранённой истории, области снимков и правила свежей реплики.
 - [Матрица покрытия таблиц sync](../guides/sync-table-coverage.md): точный
   уровень поддержки операций и отложенная работа.
 - [Примеры sync](../examples/README-sync-RU.md): команды сборки и порядок
