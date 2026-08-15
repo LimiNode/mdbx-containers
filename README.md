@@ -149,7 +149,10 @@
   `MDBXC_HAS_KURLYK_HTTP_TRANSPORT` for conditional backend includes.
   Installed packages also export CMake provider functions for these ready-made
   transport targets.
-  Start with the human-facing [sync overview](docs/sync.md), then use the
+  Start with the [sync architecture map](guides/sync-architecture.md), then
+  the human-facing [sync overview](docs/sync.md), use the
+  [sync use-case guide](docs/sync-use-cases.md) to select a supported data
+  model, and use the
   [deployment-pattern guide](docs/sync-deployment-patterns.md) to select a
   multi-origin data model, the [logical and ordered sync guide](docs/sync-logical.md),
   or the [recovery and full snapshot guide](docs/sync-recovery.md) for those paths.

@@ -4,9 +4,9 @@
 конкретному транспорту. Большинство примеров используют `DirectSyncPeer` или
 небольшой буфер в памяти, чтобы поток протокола был виден без HTTP, WebSocket
 или IPC-кода. Опциональные HTTP- и WebSocket-примеры используют готовые
-Simple-Web binding headers из `mdbx_containers/sync/transports/simple_web/` поверх
-Simple-Web-Server, Simple-WebSocket-Server и standalone Asio. Пример Kurlyk
-использует опциональный HTTP client binding из
+заголовки привязки Simple-Web из `mdbx_containers/sync/transports/simple_web/`
+поверх Simple-Web-Server, Simple-WebSocket-Server и автономного Asio. Пример
+Kurlyk использует подключаемую привязку HTTP-клиента из
 `mdbx_containers/sync/transports/kurlyk/` поверх libcurl.
 
 Синхронизация включается явно. Примеры собираются с `MDBXC_SYNC_ENABLED=1`;
@@ -33,8 +33,9 @@ tmp/build-examples/bin/examples/sync_01_lifecycle_direct_peer
 .\tmp\build-examples\bin\examples\sync_01_lifecycle_direct_peer.exe
 ```
 
-Реальные HTTP binding examples включаются отдельно, потому что они скачивают
-headers standalone Asio, Simple-Web-Server и, для process-supervised demo,
+Реальные примеры с HTTP включаются отдельно, потому что они скачивают
+заголовки автономного Asio, Simple-Web-Server и для демонстрации с управлением
+процессом
 tiny-process-library:
 
 ```bash
@@ -58,7 +59,7 @@ tmp/build-http-example/bin/examples/sync_18_http_node_fleet \
     mesh 3
 ```
 
-Готовый HTTP binding подключается так:
+Готовая привязка HTTP подключается так:
 
 ```cpp
 #if defined(MDBXC_HAS_SIMPLE_WEB_HTTP_TRANSPORT) && \
@@ -67,10 +68,10 @@ tmp/build-http-example/bin/examples/sync_18_http_node_fleet \
 #endif
 ```
 
-Kurlyk/libcurl HTTP client binding тоже включается отдельно. Он использует тот
-же framework-neutral `HttpSyncPeer` API и меняет только конкретную реализацию
+Привязка HTTP-клиента Kurlyk/libcurl тоже включается отдельно. Она использует
+тот же независимый от фреймворка API `HttpSyncPeer` и меняет только реализацию
 `IHttpSyncClient`. На Windows/MinGW пример может скачать зафиксированный
-готовый Win64 libcurl package, когда
+готовый пакет Win64 libcurl, когда
 `MDBXC_KURLYK_HTTP_SYNC_MINGW_CURL_FALLBACK=ON` (по умолчанию):
 
 ```bash
@@ -85,7 +86,7 @@ cmake --build tmp/build-kurlyk-http --target sync_19_kurlyk_http_client
 tmp/build-kurlyk-http/bin/examples/sync_19_kurlyk_http_client
 ```
 
-Готовый Kurlyk HTTP client binding подключается так:
+Готовая привязка HTTP-клиента Kurlyk подключается так:
 
 ```cpp
 #if defined(MDBXC_HAS_KURLYK_HTTP_TRANSPORT) && \
@@ -94,8 +95,8 @@ tmp/build-kurlyk-http/bin/examples/sync_19_kurlyk_http_client
 #endif
 ```
 
-Targets, которым нужны и Simple-Web HTTP, и WebSocket bindings, могут
-подключать backend umbrella:
+Цели, которым нужны и привязка Simple-Web HTTP, и WebSocket, могут
+подключать агрегирующий заголовок backend:
 
 ```cpp
 #if defined(MDBXC_HAS_SIMPLE_WEB_HTTP_TRANSPORT) && \
@@ -108,17 +109,17 @@ Targets, которым нужны и Simple-Web HTTP, и WebSocket bindings, м
 
 `MDBXC_SIMPLE_WEB_HTTP_TRANSPORT`,
 `MDBXC_SIMPLE_WEB_WEBSOCKET_TRANSPORT` и `MDBXC_KURLYK_HTTP_TRANSPORT`
-включают optional dependency targets и их backend smoke tests.
-`MDBXC_*_SYNC_EXAMPLE` options только добавляют examples из этого repository
-поверх этих backends; когда examples включены, старые example options всё ещё
+включают подключаемые цели зависимостей и их быстрые проверки backend.
+Параметры `MDBXC_*_SYNC_EXAMPLE` только добавляют примеры из этого репозитория
+поверх этих backend; когда примеры включены, старые параметры примеров всё ещё
 включают соответствующий backend для совместимости со старыми командами.
-Consumer targets получают `MDBXC_HAS_SIMPLE_WEB_HTTP_TRANSPORT`,
+Цели потребителя получают `MDBXC_HAS_SIMPLE_WEB_HTTP_TRANSPORT`,
 `MDBXC_HAS_SIMPLE_WEB_WEBSOCKET_TRANSPORT` или
-`MDBXC_HAS_KURLYK_HTTP_TRANSPORT` от concrete dependency target, к которому
+`MDBXC_HAS_KURLYK_HTTP_TRANSPORT` от конкретной цели зависимости, с которой
 они линкуются.
 
-При использовании установленного package эти targets можно создать через
-экспортированные provider functions:
+При использовании установленного пакета эти цели можно создать через
+экспортированные функции provider:
 
 ```cmake
 find_package(mdbx_containers CONFIG REQUIRED)
@@ -133,18 +134,18 @@ mdbx_containers_kurlyk_http_transport_provide(OUT_TARGET kurlyk_target)
 target_link_libraries(my_kurlyk_client PRIVATE ${kurlyk_target})
 ```
 
-Возвращаемые targets включают `MDBXC_SYNC_ENABLED`, линкуют core package target
+Возвращаемые цели включают `MDBXC_SYNC_ENABLED`, линкуют цель пакета ядра
 и распространяют соответствующий `MDBXC_HAS_*_TRANSPORT` macro.
 
-Реальный WebSocket binding example тоже включается отдельно, потому что он
-скачивает headers standalone Asio и Simple-WebSocket-Server.
+Реальный пример с WebSocket тоже включается отдельно, потому что он скачивает
+заголовки автономного Asio и Simple-WebSocket-Server.
 Simple-WebSocket-Server использует OpenSSL Crypto для WebSocket handshake,
 поэтому задайте `OPENSSL_ROOT_DIR`, если CMake не найдёт OpenSSL автоматически.
 На Windows/MinGW пример может скачать зафиксированный готовый Win64 OpenSSL
-package, когда `MDBXC_WEBSOCKET_SYNC_MINGW_OPENSSL_FALLBACK=ON` (по умолчанию):
+пакет, когда `MDBXC_WEBSOCKET_SYNC_MINGW_OPENSSL_FALLBACK=ON` (по умолчанию):
 
-Зафиксированный fallback package предоставляет `lib/VC/x64/MD/libcrypto.lib`;
-такой layout import library проверен с MinGW-w64 toolchain, который используется
+Зафиксированный резервный пакет предоставляет `lib/VC/x64/MD/libcrypto.lib`;
+такой layout библиотеки импорта проверен с toolchain MinGW-w64, который используется
 в CI проекта. Пример использует обычный `ws://`, а не WSS/TLS, поэтому рядом с
 исполняемым файлом копируется только `libcrypto-3-x64.dll`.
 
@@ -161,7 +162,7 @@ tmp/build-ws-example/bin/examples/sync_17_websocket_simple_web_server \
     127.0.0.1 18194
 ```
 
-Готовый WebSocket binding подключается так:
+Готовая привязка WebSocket подключается так:
 
 ```cpp
 #if defined(MDBXC_HAS_SIMPLE_WEB_WEBSOCKET_TRANSPORT) && \
@@ -190,7 +191,7 @@ cmake -S . -B tmp/build-ws-example `
 | `sync_01_lifecycle_direct_peer.cpp` | Один явный цикл write -> pull -> push -> read. | Начальный |
 | `sync_02_incremental_direct_peer.cpp` | Курсор получателя и инкрементальные pull-запросы. | Начальный |
 | `sync_03_multi_table.cpp` | Поддерживаемые типы таблиц и постраничный pull. | Средний |
-| `sync_04_primary_to_replicas.cpp` | Один primary и несколько реплик с независимыми курсорами. | Средний |
+| `sync_04_primary_to_replicas.cpp` | Один основной узел и несколько реплик с независимыми курсорами. | Средний |
 | `sync_05_three_node_mesh.cpp` | Попарный обмен без пересылки batches, полученных от других origin-узлов. | Продвинутый |
 | `sync_06_threaded_transport.cpp` | Владение объектами по потокам и буфер запросов и ответов в памяти. | Продвинутый |
 | `sync_07_worker_observer.cpp` | Фоновый `SyncWorker` и уведомления о прогрессе через `ISyncWorkerObserver`. | Продвинутый |
@@ -225,8 +226,8 @@ cmake -S . -B tmp/build-ws-example `
   записи: например, seed-данными, одной локальной бизнес-операцией или
   временной подменой sink в тестах. Ручные `attach_sync_capture()` /
   `detach_sync_capture()` лучше оставлять для более широкого lifecycle
-  компонента, например process-local writer service, который прикрепляет
-  capture один раз после старта и отсоединяет его при shutdown.
+  компонента, например службы записи в рамках процесса, которая прикрепляет
+  захват один раз после старта и отсоединяет его при остановке.
 - Вложенные `SyncCaptureScope` должны завершаться строго в обратном порядке.
   Явный out-of-order `detach()` отклоняется, а raw-вызовы
   `attach_sync_capture()` / `detach_sync_capture()` не должны подменять sink
@@ -276,11 +277,11 @@ cmake -S . -B tmp/build-ws-example `
   `SequenceTable` и `VectorStore` через его внутренние поддерживаемые таблицы.
   `AnyValueTable`, `KeyMultiValueTable` и `HashedKeyValueStore` не
   реплицируются в v0.1. Для `KeyMultiValueTable` в `sync/DESIGN.md` описан
-  отложенный unordered multiset design для single-writer или causally
-  serialized updates; concurrent multi-writer conflicts и сохраняющие порядок
-  распределённые histories отложены в будущую работу, например
-  `KeyOrderedMultiValueTable<K, V>`. Capture остаётся выключенным до появления
-  реализации и round-trip tests.
+  отложенная семантика неупорядоченного мультимножества для одного пишущего
+  узла либо причинно сериализованных обновлений; конкурентные конфликты
+  нескольких пишущих узлов и сохраняющие порядок распределённые истории отложены
+  в будущую работу, например `KeyOrderedMultiValueTable<K, V>`. Захват остаётся
+  выключенным до появления реализации и тестов полного цикла.
 
 ## Граница транспорта
 
@@ -289,12 +290,12 @@ cmake -S . -B tmp/build-ws-example `
 ответов как данные, которые передаются транспортом:
 
 ```text
-replica формирует PullRequest
+реплика формирует PullRequest
 -> транспорт передаёт его исходному узлу
 -> исходный узел вызывает SyncEngine::handle_pull()
 -> транспорт возвращает PullResponse
--> replica помещает batches в PushRequest
--> replica вызывает SyncEngine::handle_push()
+-> реплика помещает пакеты в PushRequest
+-> реплика вызывает SyncEngine::handle_push()
 ```
 
 Многопоточный пример держит каждый `Connection` и `SyncEngine` в том потоке,
@@ -358,8 +359,8 @@ header `Retry-After`, когда fixed-window limiter отклоняет зап�
 
 `sync_16_worker_http_transport.cpp` объединяет фоновый worker с HTTP-shaped
 adapter внутри одного процесса. Replica владеет `SyncWorker` и `HttpSyncPeer`;
-middleware на стороне primary аутентифицирует bearer token как `NodeId`
-replica перед тем, как `HttpSyncServer` передаст запрос в `SyncEngine`.
+middleware на стороне основного узла аутентифицирует bearer token как `NodeId`
+реплики перед тем, как `HttpSyncServer` передаст запрос в `SyncEngine`.
 
 `sync_13_http_simple_web_server.cpp worker-demo` запускает тот же worker path
 через настоящие loopback HTTP sockets. Он использует bearer identity,
@@ -372,7 +373,7 @@ message-size guard, страничные pull-запросы и callbacks observ
 MDBX environment, готовым Simple-Web HTTP listener/client, sync engine,
 capture sink и application loop;
 родительский процесс только стартует ноды и отправляет команды `pause` / `stop`
-через stdin. Режим `master-replica` показывает одного активного писателя и
+через stdin. Режим `master-replica` показывает один активный пишущий узел и
 одного пассивного получателя. Режим `mesh` позволяет обеим нодам писать
 локально, пока каждая нода подтягивает изменения другой по HTTP.
 
@@ -393,7 +394,7 @@ request/trace IDs в HTTP-shaped client, логирует request context чер
 Он использует `mdbxc::sync::simple_web::WebSocketSyncChannel` и
 `mdbxc::sync::simple_web::WebSocketSyncListener`, отправляет binary frames,
 проверяет bearer token во
-время WebSocket handshake, передаёт аутентифицированный `NodeId` replica вместе
+время WebSocket handshake, передаёт аутентифицированный `NodeId` реплики вместе
 с явным `SyncDbAccess` в `WebSocketSyncServerMiddleware`, отклоняет слишком
 большие сообщения до decode и классифицирует close codes для диагностики
 клиента.

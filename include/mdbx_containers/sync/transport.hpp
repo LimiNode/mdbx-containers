@@ -13,6 +13,7 @@
 #include "config.hpp"
 
 #if MDBXC_SYNC_ENABLED
+#include "logical.hpp"
 #include "engine.hpp"
 #include "transport/TransportMessageCodec.hpp"
 #include "transport/HttpTransport.hpp"

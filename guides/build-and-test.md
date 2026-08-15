@@ -98,6 +98,17 @@ cmake --build tmp/build-cpp11
 ctest --test-dir tmp/build-cpp11 --output-on-failure
 ```
 
+Run local tests through `ctest --test-dir ...`, not by launching a test
+executable from the repository root. CTest gives every test an isolated
+`<build>/test-data/<test-name>` working directory and removes it through a
+fixture after the run. Several tests intentionally use relative MDBX paths;
+launching their executable directly from the root bypasses that isolation and
+leaves `test_*.mdbx` and lock files there.
+
+For direct debugging, change first to a disposable directory under the build
+tree, for example `tmp/build-cpp17/test-data/manual-debug`, before launching
+the executable.
+
 On Windows, the repository includes helper scripts such as
 `build-mingw-17-tests.bat`, `build-mingw-11-tests.bat`, and
 `build-mingw-17-examples.bat`.

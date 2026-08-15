@@ -1,4 +1,4 @@
-# Benchmark синхронизации
+# Измерение производительности синхронизации
 
 `sync_tick_hub_benchmark` измеряет производительность основных операций
 синхронизации в сценарии, где центральный узел хранит порции тиковых данных от
@@ -61,23 +61,23 @@ tmp/build-bench/bin/benchmarks/sync_tick_hub_benchmark \
 
 | Аргумент | По умолчанию | Значение |
 | --- | ---: | --- |
-| `origins` | 16 | Количество независимых origin-узлов, чьи batches находятся в changelog. |
-| `historical_chunks_per_origin` | 512 | Число уже существующих batches каждого origin перед первым pull. |
-| `new_chunks_per_origin` | 8 | Число новых batches каждого origin в каждой инкрементальной фазе. Значение используется дважды: в `incremental_hot` и после перезапуска. |
-| `ticks_per_chunk` | 128 | Число тиковых записей внутри одного batch. |
-| `max_batches` | 64 | Максимальное число batches в одной странице `PullResponse`. |
+| `origins` | 16 | Количество независимых origin-узлов, чьи пакеты находятся в журнале изменений. |
+| `historical_chunks_per_origin` | 512 | Число уже существующих пакетов каждого origin перед первым pull. |
+| `new_chunks_per_origin` | 8 | Число новых пакетов каждого origin в каждой последовательной фазе. Значение используется дважды: в `incremental_hot` и после перезапуска. |
+| `ticks_per_chunk` | 128 | Число тиковых записей внутри одного пакета. |
+| `max_batches` | 64 | Максимальное число пакетов в одной странице `PullResponse`. |
 | `max_bytes` | 4194304 | Приблизительный предел размера одной страницы в байтах. |
 
 ## CSV
 
 Каждый сценарий печатает три фазы:
 
-- `full_cold_replica` - первичная синхронизация пустой реплики со всей
+- `full_cold_replica` — первичная синхронизация пустой реплики со всей
   накопленной историей.
-- `incremental_hot` - добавление новых batches и повторная синхронизация без
+- `incremental_hot` — добавление новых пакетов и повторная синхронизация без
   закрытия соединений и пересоздания `SyncEngine`.
 - `incremental_after_restart` - закрытие и повторное открытие обеих БД,
-  пересоздание `SyncEngine`, добавление ещё одного диапазона batches и
+  пересоздание `SyncEngine`, добавление ещё одного диапазона пакетов и
   инкрементальная синхронизация от сохранённого курсора получателя.
 
 | Колонка | Значение |
@@ -85,17 +85,17 @@ tmp/build-bench/bin/benchmarks/sync_tick_hub_benchmark \
 | `scenario` | Имя сценария. |
 | `phase` | Одна из трёх фаз, перечисленных выше. |
 | `origins` | Количество origin-узлов в сценарии. |
-| `historical_chunks_per_origin` | Исторические batches каждого origin перед первичной синхронизацией. |
-| `new_chunks_per_origin` | Новые batches каждого origin для каждой инкрементальной фазы. |
-| `chunks_per_origin` | Batches каждого origin, существующие в измеряемой фазе. |
-| `ticks_per_chunk` | Тиковые записи внутри одного batch. |
-| `max_batches` | Ограничение страницы по числу batches. |
+| `historical_chunks_per_origin` | Исторические пакеты каждого origin перед первичной синхронизацией. |
+| `new_chunks_per_origin` | Новые пакеты каждого origin для каждой последовательной фазы. |
+| `chunks_per_origin` | Пакеты каждого origin, существующие в измеряемой фазе. |
+| `ticks_per_chunk` | Тиковые записи внутри одного пакета. |
+| `max_batches` | Ограничение страницы по числу пакетов. |
 | `max_bytes` | Приблизительное ограничение страницы по числу байтов. |
-| `seeded_batches` | Batches, записанные локально перед измеряемым pull. |
-| `pulled_batches` | Batches, полученные через страницы `PullResponse`. |
-| `applied_batches` | Batches, применённые через `SyncEngine::handle_push()`. |
+| `seeded_batches` | Пакеты, записанные локально перед измеряемым pull. |
+| `pulled_batches` | Пакеты, полученные через страницы `PullResponse`. |
+| `applied_batches` | Пакеты, применённые через `SyncEngine::handle_push()`. |
 | `pull_pages` | Число pull-запросов, нужных для завершения фазы. |
-| `origin_index_entries` | Число origin-узлов, зарегистрированных в `_mdbxc_origins` на primary. |
+| `origin_index_entries` | Число origin-узлов, зарегистрированных в `_mdbxc_origins` на основном узле. |
 | `seed_ms` | Время локальной записи данных для фазы. |
 | `restart_ms` | Время закрытия, повторного открытия и пересоздания объектов в фазе перезапуска. В остальных фазах равно нулю. |
 | `pull_ms` | Время, затраченное на вызовы `DirectSyncPeer::pull()`. |
@@ -106,8 +106,8 @@ tmp/build-bench/bin/benchmarks/sync_tick_hub_benchmark \
 | `apply_pct` | Доля `sync_ms`, затраченная на локальное применение страниц. |
 | `batches_per_page` | Среднее значение `pulled_batches / pull_pages`. |
 | `batches_per_sec` | `applied_batches / (pull_ms + apply_ms)`. Время подготовки данных и перезапуска не учитывается. |
-| `primary_bytes` | Размер занятых страниц MDBX у primary после фазы. |
-| `replica_bytes` | Размер занятых страниц MDBX у replica после фазы. |
+| `primary_bytes` | Размер занятых страниц MDBX у основного узла после фазы. |
+| `replica_bytes` | Размер занятых страниц MDBX у реплики после фазы. |
 
 `origin_index_entries` после заполнения исторических данных обычно совпадает с
 `origins`. Этот индекс позволяет `SyncEngine::handle_pull()` не открывать и не

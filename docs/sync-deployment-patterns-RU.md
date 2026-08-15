@@ -1,26 +1,26 @@
 # Практические схемы развёртывания sync
 
-Sync в `mdbx-containers` поддерживает multi-origin transport: реплика может
-принимать закоммиченные истории изменений от нескольких устойчивых origin с
-`NodeId`. Это делает несколько пишущих узлов практичными, когда их записи не
-конкурируют за одну logical record.
+Sync в `mdbx-containers` поддерживает транспорт с несколькими origin: реплика
+может принимать зафиксированные истории изменений от нескольких устойчивых
+origin с `NodeId`. Это делает несколько пишущих узлов практичными, когда их
+записи не конкурируют за одну логическую запись.
 
 По умолчанию в v0.1 остаётся `ConflictPolicy::Reject`. Для одного узкого случая
-mutable register доступен `ConflictPolicy::LastWriterWins` вместе с
-`VersionedKeyValueTable`: он сравнивает application-provided source-version
-bytes, а не wall-clock узла. У всех остальных raw-путей concurrent
-conflict-resolution semantics по-прежнему нет. Multi-origin transport не
-является generic CRDT-контрактом.
+изменяемого регистра доступен `ConflictPolicy::LastWriterWins` вместе с
+`VersionedKeyValueTable`: он сравнивает байты версии источника, переданные
+приложением, а не часы узла. У всех остальных raw-путей семантики разрешения
+конкурентных конфликтов по-прежнему нет. Транспорт с несколькими origin не
+является универсальным CRDT-контрактом.
 
-English version: [sync-deployment-patterns.md](sync-deployment-patterns.md).
+Английская версия: [sync-deployment-patterns.md](sync-deployment-patterns.md).
 
-## Одна БД получателя, несколько origins
+## Одна БД получателя, несколько origin
 
-Несколько origins не требуют нескольких пользовательских БД у получателя. Их
-истории, progress и replay state ведёт sync subsystem; входящие operations
-применяются к одним и тем же пользовательским MDBX tables, выбранным по DBI
-name. Поэтому storage node может принимать данные redundant collectors в одну
-canonical database.
+Несколько origin не требуют нескольких пользовательских БД у получателя. Их
+истории, ход выполнения и состояние повторного применения ведёт подсистема sync;
+входящие операции применяются к одним и тем же пользовательским MDBX-таблицам,
+выбранным по имени DBI. Поэтому узел хранения может принимать данные резервных
+коллекторов в одну каноническую БД.
 
 ```text
 collector A ──┐
@@ -28,144 +28,148 @@ collector A ──┐
 collector B ──┘       user table: trades
 ```
 
-Модель данных приложения, а не origin id, определяет, являются ли records одним
-logical event. Identity origin-а сохраняет значение для delivery и diagnostics,
-а при необходимости может быть отдельно записана как provenance data.
+Модель данных приложения, а не id origin, определяет, являются ли записи одним
+логическим событием. Идентичность origin сохраняет значение для доставки и
+диагностики, а при необходимости может быть отдельно записана как данные о
+происхождении.
 
 ## Сначала выберите модель данных, затем топологию
 
 Для реплицируемого набора данных используйте одну из двух схем:
 
-1. Назначьте каждому writer непересекающийся диапазон logical keys.
-2. Храните immutable records с глобально однозначными identities.
+1. Назначьте каждому пишущему узлу непересекающийся диапазон логических ключей.
+2. Храните неизменяемые записи с глобально однозначными идентичностями.
 
-Вторая схема часто лучше подходит для event data. Она позволяет нескольким
-writers работать без необходимости определять победителя среди concurrent
-updates одной mutable record.
+Вторая схема часто лучше подходит для данных о событиях. Она позволяет
+нескольким пишущим узлам работать без необходимости определять победителя среди
+конкурентных обновлений одной изменяемой записи.
 
 | Сценарий | Текущий контракт sync |
 | --- | --- |
-| Разные nodes пишут разные logical keys | Поддерживаемая multi-origin topology |
-| Несколько nodes создают uniquely identified immutable records | Практичная multi-writer topology |
-| Два nodes одновременно меняют один logical key | Нет определённой conflict-resolution semantics |
-| Один node удаляет, а другой пишет тот же logical key | Нет гарантированной convergence semantics |
-| Versioned `KeyValueTable` put/erase с source authority | Узкий source-version-wins register |
-| Независимые вызовы `SequenceTable::append()` | Только single-writer; appenders надо сериализовать внешне |
-| Destructive multi-writer операции `KeyMultiValueTable` | Нужен один writer или application-level causal serialization |
+| Разные узлы пишут разные логические ключи | Поддерживаемая топология с несколькими origin |
+| Несколько узлов создают однозначно идентифицируемые неизменяемые записи | Практичная топология с несколькими пишущими узлами |
+| Два узла одновременно меняют один логический ключ | Нет определённой семантики разрешения конфликта |
+| Один узел удаляет, а другой пишет тот же логический ключ | Нет гарантированной сходимости |
+| Versioned `KeyValueTable` put/erase с порядком от источника | Узкий регистр «побеждает версия источника» |
+| Независимые вызовы `SequenceTable::append()` | Только один пишущий узел; вызовы `append()` надо сериализовать внешне |
+| Разрушающие операции `KeyMultiValueTable` от нескольких пишущих узлов | Нужен один пишущий узел или причинная сериализация на уровне приложения |
 
-Не используйте только wall-clock time как authority порядка: часы разных nodes
-могут расходиться. Если приложению нужно выбрать победителя, до обработки
-данных как mutable replicated state определите и сохраните authority уровня
-приложения, например upstream sequence number или deterministic version tuple.
+Не используйте только время настенных часов как порядок: часы разных узлов могут
+расходиться. Если приложению нужно выбрать победителя, до обработки данных как
+изменяемого реплицируемого состояния определите и сохраните порядок уровня
+приложения, например последовательность источника или детерминированный кортеж версий.
 
 ## Отказоустойчивые рыночные данные
 
-### Primary и hot standby
+### Основной и горячий резервный коллектор
 
-Один active collector публикует dataset, а standby следит за upstream feed и
-может стать active после application-coordinated failover. Это простейшая
-topology, потому что для каждого key range одновременно работает один writer.
-Приложению всё ещё нужна failover procedure, которая продолжает upstream feed
-без неучтённого gap.
+Один активный коллектор публикует набор данных, а резервный следит за потоком
+источника и может стать активным после переключения, координируемого
+приложением. Это простейшая топология, потому что для каждого диапазона ключей
+одновременно работает один пишущий узел. Приложению всё ещё нужна процедура
+переключения, которая продолжает поток источника без неучтённого пропуска.
 
-### Active-active collectors для immutable events
+### Активные коллекторы для неизменяемых событий
 
-Для trades и других immutable upstream events используйте canonical identity
-биржи как ключ user table, например:
+Для сделок и других неизменяемых событий источника используйте каноническую
+идентичность биржи как ключ пользовательской таблицы, например:
 
 ```text
 (exchange, symbol, trade_id) -> Trade
 ```
 
-Два collectors, получившие один trade, должны дать один logical key и одинаковый
-serialized payload. Тогда любой из collectors может заполнить event gap другого
-в одной БД получателя.
+Два коллектора, получившие одну сделку, должны дать один логический ключ и
+одинаковую сериализованную нагрузку. Тогда любой из них может заполнить пропуск
+в истории другого в одной БД получателя.
 
-Текущий raw sync ещё не реализует canonical-event deduplication и integrity
-error для одинаковых keys с разными payloads. Поэтому active-active deployment
-должен проверять такую divergence в application code и не должен считать raw
-upsert ordering integrity- или conflict-resolution guarantee. Одинаковый event
-identity с разными payloads — это data-integrity anomaly, а не случай для
-молчаливого выбора writer-а.
+Текущий raw sync ещё не реализует устранение повторов канонических событий и
+ошибку целостности для одинаковых ключей с разными нагрузками. Поэтому активная
+схема должна проверять такое расхождение в коде приложения и не должна считать
+порядок raw-upsert гарантией целостности или разрешения конфликта. Одинаковая
+идентичность события с разными нагрузками — это аномалия целостности данных, а
+не случай для молчаливого выбора пишущего узла.
 
-### Сохраняйте provenance observations, когда она нужна
+### Сохраняйте наблюдения с происхождением, когда оно нужно
 
-Храните canonical events и observations collectors отдельно, когда нужно
-измерять coverage или latency feed-а:
+Храните канонические события и наблюдения коллекторов отдельно, когда нужно
+измерять покрытие или задержку фида:
 
 ```text
 trades:       trade_id -> Trade
 observations: (trade_id, collector_id) -> Observation
 ```
 
-Так сохраняется одна история рынка и достаточно данных для расчёта missing
-coverage, collector lag или source divergence.
+Так сохраняется одна история рынка и достаточно данных для расчёта непокрытых
+событий, отставания коллектора или расхождения источников.
 
-### Mutable bars и snapshots
+### Изменяемые бары и снимки
 
-Open bar, latest quote или upstream snapshot не являются immutable event. Два
-collectors могут законно увидеть разные состояния одного key. Для этого узкого
+Открытый бар, последняя котировка или снимок источника не являются неизменяемым
+событием. Два коллектора могут законно увидеть разные состояния одного ключа. Для этого узкого
 случая настройте у всех участников `ConflictPolicy::LastWriterWins` и пишите
 только через `VersionedKeyValueTable<K, V>`. Его `insert_or_assign` и `erase`
-принимают непустимую canonical source-version byte sequence. Version является
-sync-метаданными, а не частью `V`; получатель durable хранит победителя и
-delete tombstone в `_mdbxc_identity_index` в той же транзакции, что и user data.
+принимают непустимую каноническую последовательность байтов версии источника.
+Версия является метаданными sync, а не частью `V`; получатель постоянно хранит
+победителя и tombstone удаления в `_mdbxc_identity_index` в той же транзакции,
+что и пользовательские данные.
 
-Побеждает лексикографически наибольшая source version; при равных versions
-детерминированный tie-break выполняется по `NodeId` origin-а. Одна version должна
-описывать одно состояние одного source: её повторное использование для другого
-local state отклоняется. Broker timestamp может быть компонентом, но при равных
-timestamps необходим upstream sequence или deterministic tuple. Wall-clock
-writer-а и packet-receipt time не являются authority.
+Побеждает лексикографически наибольшая версия источника; при равных версиях
+детерминированное разрешение выполняется по `NodeId` origin. Одна версия должна
+описывать одно состояние одного источника: её повторное использование для другого
+локального состояния отклоняется. Временная метка брокера может быть компонентом,
+но при равных метках необходима последовательность источника или детерминированный
+кортеж. Время настенных часов пишущего узла и время приёма пакета не задают порядок.
 
-Этот register v1 durable-помечает свой DBI в `_mdbxc_versioned_dbis`. Каждый
-replica должен сконструировать adapter до приёма revisioned batches. Прямые raw
-`KeyValueTable` writes, `clear` и bulk/range mutations для этого DBI fail closed;
-используйте вместо них point operations adapter-а. Другие, unregistered DBI
-могут использовать ordinary raw capture на том же LWW engine. Unversioned
-incoming operations для registered DBI и revisioned operations для normal DBI
-отклоняются. Full snapshots могут включать только unregistered DBI. Tombstones
-сохраняются; для их compaction требуется отдельно определённый replica horizon.
-Зарезервируйте два дополнительных MDBX DBI slots для `_mdbxc_identity_index` и
+Этот регистр v1 постоянно помечает свой DBI в `_mdbxc_versioned_dbis`. Каждая
+реплика должна сконструировать адаптер до приёма пакетов версионированных изменений. Прямые raw-
+записи `KeyValueTable`, `clear` и пакетные/диапазонные мутации для этого DBI
+отклоняются; используйте вместо них точечные операции адаптера. Другие,
+незарегистрированные DBI могут использовать обычный raw-захват на том же LWW
+engine. Входящие операции без версии для зарегистрированного DBI и операции с
+версией источника для обычного DBI отклоняются. Полные снимки могут включать только
+незарегистрированные DBI. Tombstone сохраняются; для их уплотнения требуется
+отдельно определённый горизонт реплик. Зарезервируйте два дополнительных слота
+MDBX DBI для `_mdbxc_identity_index` и
 `_mdbxc_versioned_dbis` в `Config::max_dbs`.
 
 ## Поддерживаемые пути таблиц
 
-Raw capture v0.1 записывает обычные writes `KeyValueTable`, `KeyTable`,
+Raw-захват v0.1 записывает обычные операции записи `KeyValueTable`, `KeyTable`,
 `ValueTable` и `SequenceTable`, когда к пишущему `Connection` прикреплён
 `ThreadLocalChangeAccumulator`.
 
-`KeyMultiValueTable` использует explicit logical adapter вместо raw capture.
-Его destructive operations требуют одного writer или application-level causal
-serialization. Для raw replication `VectorStore` и его logical adapter также
-нужен один authoritative либо externally serialized writer на collection.
+`KeyMultiValueTable` использует явный логический адаптер вместо raw-захвата.
+Его разрушающие операции требуют одного пишущего узла или причинной
+сериализации на уровне приложения. Для raw-репликации `VectorStore` и его
+логическому адаптеру также нужен один назначенный либо внешне сериализованный
+пишущий узел на коллекцию.
 Полный контракт для каждой таблицы приведён в
-[sync table coverage matrix](../guides/sync-table-coverage.md).
+[матрице покрытия таблиц sync](../guides/sync-table-coverage.md).
 
 ## Коллекторы рыночных данных
 
-Моделируйте raw market-data layer как immutable events. Каждый collector может
-писать свои records и синхронизировать их с aggregation или storage nodes.
+Моделируйте слой raw-рыночных данных как неизменяемые события. Каждый коллектор
+может писать свои записи и синхронизировать их с узлами агрегации или хранения.
 
-Для фидов с authoritative upstream sequence identity записи может быть такой:
+Для фидов с последовательностью источника, задающей порядок, идентичность записи может быть такой:
 
 ```text
 (exchange, symbol, stream, exchange_timestamp, exchange_sequence)
 ```
 
-Если два collectors намеренно наблюдают один feed для redundancy, выберите одну
+Если два коллектора намеренно наблюдают один фид для резервирования, выберите одну
 из двух явных моделей:
 
-- сохранять оба observations с `(source_node, exchange, symbol,
+- сохранять оба наблюдения с `(source_node, exchange, symbol,
   exchange_event_id)`;
-- дедуплицировать по `(exchange, symbol, exchange_event_id)`, если биржа даёт
-  стабильную event identity.
+- устранять повторы по `(exchange, symbol, exchange_event_id)`, если биржа даёт
+  устойчивую идентичность события.
 
-Не позволяйте collectors конкурентно перезаписывать mutable records наподобие
-`latest_quote["BTCUSDT"]` или формирующейся OHLCV candle. Рассматривайте latest
-quotes, candles и похожие aggregates как derived state: пересчитывайте их из
-immutable ticks и trades либо назначайте одного authoritative projector для
-каждого derived key.
+Не позволяйте коллекторам конкурентно перезаписывать изменяемые записи наподобие
+`latest_quote["BTCUSDT"]` или формирующейся OHLCV-свечи. Рассматривайте последние
+котировки, свечи и похожие агрегаты как производное состояние: пересчитывайте
+их из неизменяемых тиков и сделок либо назначайте одного проектора
+для каждого производного ключа.
 
 ```text
 collector A ── immutable events ──┐
@@ -173,52 +177,53 @@ collector A ── immutable events ──┐
 collector B ── immutable events ──┘
 ```
 
-Эта схема также поддерживает ownership или sharding, например по exchange,
-symbol range, market type или identity collector-а.
+Эта схема также поддерживает владение или шардирование, например по бирже,
+диапазону символов, типу рынка или идентичности коллектора.
 
-## Records трейдеров и платформы
+## Записи трейдеров и платформы
 
-Представляйте trades, fills, ledger events и audit records как immutable events
-с globally unique identities. Identity может включать выданный платформой trade
-или execution id либо сгенерированный приложением id, scoped by origin.
-Явно назначайте ownership, когда одна business record может появиться более чем
-на одном node.
+Представляйте сделки, исполнения, события журнала и записи аудита как
+неизменяемые события с глобально уникальными идентичностями. Идентичность может
+включать выданный платформой id сделки или исполнения либо id, сгенерированный
+приложением и ограниченный origin. Явно назначайте владение, когда одна деловая
+запись может появиться более чем на одном узле.
 
-Реплицируйте event history, а balances, positions и reporting views выводите из
-этой истории либо обновляйте через одного authoritative writer. Не полагайтесь
-на raw sync для координации concurrent mutations одного account balance, order
-state или risk limit: такое решение требует application-level ownership,
-serialization или отдельно спроектированного conflict protocol.
+Реплицируйте историю событий, а балансы, позиции и отчётные представления
+выводите из этой истории либо обновляйте через одного назначенного пишущего
+узла. Не полагайтесь на raw sync для координации конкурентных изменений одного
+баланса счёта, состояния заявки или лимита риска: такое решение требует
+владения, сериализации на уровне приложения или отдельно спроектированного
+протокола конфликтов.
 
-## Базы знаний и RAG chunks
+## Базы знаний и фрагменты RAG
 
-Храните source material и chunk revisions как immutable, versioned records.
-Identity chunk-а может объединять stable document id, source revision и chunk
-ordinal либо использовать content hash вместе с версиями codec и embedding.
-Так разные ingestion nodes смогут добавлять отдельные document revisions без
-конкуренции за один mutable key.
+Храните исходный материал и редакции фрагментов как неизменяемые записи с
+версиями. Идентичность фрагмента может объединять устойчивый id документа,
+редакцию источника и номер фрагмента либо использовать хеш содержимого вместе с
+версиями кодека и embedding. Так разные узлы загрузки смогут добавлять отдельные
+редакции документов без конкуренции за один изменяемый ключ.
 
-Считайте mutable projections derived state. К ним относятся current-document
-pointer, search index, cached retrieval scores и vector collection, построенная
-из chunks. Перестраивайте такие projections из immutable corpus либо назначайте
-одного authoritative writer. В частности, текущие пути sync `VectorStore` не
-дают independent multi-writer id allocation или conflict resolution для одной
-collection.
+Считайте изменяемые проекции производным состоянием. К ним относятся указатель
+на текущий документ, поисковый индекс, кэшированные оценки поиска и векторная
+коллекция, построенная из фрагментов. Перестраивайте такие проекции из
+неизменяемого корпуса либо назначайте одного пишущего узла. В
+частности, текущие пути sync `VectorStore` не дают независимого выделения id
+несколькими пишущими узлами или разрешения конфликтов в одной коллекции.
 
 ## Чек-лист развёртывания
 
 Перед включением sync для набора данных определите:
 
-- durable `NodeId` каждого writer-а и общий `DbId` replication set-а;
-- logical identity каждой реплицируемой record и writer-а, которому она
+- постоянный `NodeId` каждого пишущего узла и общий `DbId` набора реплик;
+- логическую идентичность каждой реплицируемой записи и пишущего узла, которому она
   принадлежит;
-- является ли record immutable либо какая application authority сериализует её
-  mutations и deletions;
-- стратегию rebuild или ownership для derived state;
-- table-specific sync path из
-  [coverage matrix](../guides/sync-table-coverage.md).
+- является ли запись неизменяемой либо какой порядок уровня приложения
+  сериализует её изменения и удаления;
+- стратегию перестроения или владение для производного состояния;
+- подходящий для таблицы путь sync из
+  [матрицы покрытия](../guides/sync-table-coverage.md).
 
-Настройка capture, transport deployment и recovery описаны в
-[sync overview](sync-RU.md),
-[transport production notes](../guides/sync-transport-production.md) и
-[recovery guide](sync-recovery-RU.md).
+Настройка захвата, развёртывания транспорта и восстановления описана в
+[обзоре sync](sync-RU.md),
+[заметках о промышленном транспорте](../guides/sync-transport-production.md) и
+[руководстве по восстановлению](sync-recovery-RU.md).

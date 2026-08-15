@@ -10,7 +10,7 @@
 /// handshake dependencies into an HTTP-only target, include the backend-specific
 /// header from \c sync/transports/simple_web/ instead.
 
-#include <mdbx_containers/sync/transports/simple_web/HttpTransport.hpp>
-#include <mdbx_containers/sync/transports/simple_web/WebSocketTransport.hpp>
+#include "simple_web/HttpTransport.hpp"
+#include "simple_web/WebSocketTransport.hpp"
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_TRANSPORTS_SIMPLE_WEB_HPP_INCLUDED

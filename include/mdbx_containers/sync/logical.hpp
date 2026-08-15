@@ -8,6 +8,9 @@
 #include "config.hpp"
 
 #if MDBXC_SYNC_ENABLED
+#include <mdbx_containers/common/MdbxException.hpp>
+#include <mdbx_containers/detail/utils.hpp>
+#include "common.hpp"
 #include "protocol.hpp"
 #include "storage.hpp"
 #include "logical/LogicalSchema.hpp"

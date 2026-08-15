@@ -56,9 +56,12 @@
 #include "common/Transaction.hpp"
 #include "detail/path_utils.hpp"
 #if MDBXC_SYNC_ENABLED
+#include "sync/common.hpp"
 #include "sync/protocol/ChangeOp.hpp"
 #include "sync/capture/ISyncCaptureSink.hpp"
 #include "sync/core/SyncApplyObserver.hpp"
+// Explicit header-only Connection seam for sync capture hooks.
+#include "sync/connection_hooks.hpp"
 #endif
 #include "common/Connection.hpp"
 #include "detail/BaseTable.hpp"

@@ -15,7 +15,6 @@
 #include <mdbx.h>
 
 #include "detail/NamedDbiLookup.hpp"
-#include "../LogicalDeliveryEnvelopeCodec.hpp"
 
 namespace mdbxc {
 namespace sync {

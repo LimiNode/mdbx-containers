@@ -9,8 +9,6 @@
 #include <string>
 #include <vector>
 
-#include "../protocol.hpp"
-#include "../protocol/FullSnapshotProtocol.hpp"
 #include "stores/LogicalDeliveryOrderStore.hpp"
 #include "stores/LogicalDeliveryStore.hpp"
 #include "stores/SchemaRegistryStore.hpp"
