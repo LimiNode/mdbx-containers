@@ -29,19 +29,19 @@ delete. Он использует явный маркер схемы и нагр
 
 ```mermaid
 sequenceDiagram
-    participant S as Source adapter session
+    participant S as Сессия адаптера источника
     participant Schema as _mdbxc_sync_schema
-    participant Wire as Application delivery или logical peer
-    participant E as Receiver SyncEngine
-    participant A as Receiver adapter
+    participant Wire as Доставка приложения или logical peer
+    participant E as SyncEngine получателя
+    participant A as Адаптер получателя
 
-    S->>Schema: проверка registered schema
-    S->>S: mutation local table и сбор typed changes
-    S-->>Wire: LogicalChangeFrame или durable delivery envelope
-    Wire->>E: явный apply call
-    E->>Schema: проверка persistent marker
-    E->>A: preflight каждого change
-    E->>A: apply в одной MDBX transaction
+    S->>Schema: проверка зарегистрированной схемы
+    S->>S: мутация локальной таблицы и сбор типизированных изменений
+    S-->>Wire: LogicalChangeFrame или постоянный envelope доставки
+    Wire->>E: явный вызов применения
+    E->>Schema: проверка постоянного маркера
+    E->>A: предварительная проверка каждого изменения
+    E->>A: применение в одной MDBX-транзакции
 ```
 
 Маркер схемы хранит id схемы приложения, вид, версию, основной DBI и набор
@@ -75,19 +75,19 @@ pull/push или envelope упорядоченной доставки.
 
 ```mermaid
 sequenceDiagram
-    participant O as Authoritative origin
-    participant Outbox as Durable ordered outbox
-    participant D as SyncWorker или application dispatcher
-    participant R as Replica SyncEngine
-    participant State as Replay marker и frontier
+    participant O as Назначенный origin
+    participant Outbox as Постоянный упорядоченный outbox
+    participant D as SyncWorker или диспетчер приложения
+    participant R as SyncEngine реплики
+    participant State as Маркер повтора и граница последовательности
 
-    O->>Outbox: атомарный commit local change и envelope
-    D->>R: доставка envelope следующей origin sequence
-    R->>State: проверка destination, replay identity и order
-    R->>R: preflight и apply точных changes
-    R->>State: commit marker и contiguous frontier
-    R-->>D: acknowledgement
-    D->>Outbox: acknowledgement доставленного envelope
+    O->>Outbox: атомарный commit локального изменения и envelope
+    D->>R: доставка envelope следующей последовательности origin
+    R->>State: проверка получателя, идентичности повтора и порядка
+    R->>R: предварительная проверка и применение точных изменений
+    R->>State: commit маркера и непрерывной границы
+    R-->>D: подтверждение
+    D->>Outbox: подтверждение доставленного envelope
 ```
 
 Получатель считает повторную доставку уже зафиксированного envelope успешным

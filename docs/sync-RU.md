@@ -84,7 +84,7 @@ flowchart LR
 ```mermaid
 sequenceDiagram
     participant A as Пишущий узел A
-    participant Log as Changelog A
+    participant Log as Журнал изменений A
     participant P as ISyncPeer
     participant B as Получатель B
 

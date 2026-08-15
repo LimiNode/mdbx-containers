@@ -38,9 +38,9 @@ Raw-репликация обычно догоняет источник повт
 ```mermaid
 sequenceDiagram
     participant W as SyncWorker на свежем получателе
-    participant S as Source SyncEngine
+    participant S as SyncEngine источника
     participant Stage as Подготовка в памяти получателя
-    participant DB as User DBI получателя
+    participant DB as Пользовательские DBI получателя
 
     W->>S: последовательный pull
     S-->>W: SnapshotRequired
