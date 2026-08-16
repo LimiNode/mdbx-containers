@@ -43,6 +43,11 @@ rules, see [Sync table coverage matrix](sync-table-coverage.md).
 - HTTP and WebSocket framework-neutral seams use `TransportMessageCodec`; DTOs
   do not carry bearer tokens, cookies, remote addresses, request ids, or trace
   ids.
+- `DirectSyncPeer`, `HttpSyncPeer`, and `WebSocketSyncPeer` implement the
+  separate logical-aware fresh-recovery protocol. It transfers the raw
+  baseline together with logical schema, replay, ordering, and
+  receiver-specific pending-delivery state; see [Sync Recovery And Full
+  Snapshots](../docs/sync-recovery.md).
 - Ready-made optional backends exist for Simple-Web HTTP, Simple-WebSocket, and
   Kurlyk/libcurl HTTP through feature-gated provider targets.
 - Installed-package smoke tests cover exported transport provider targets and
@@ -171,11 +176,6 @@ tables.
 - Extend logical-frame capability negotiation only when a new adapter requires
   a compatibility distinction beyond the existing schema marker and adapter
   registry fail-closed checks.
-- Extend the transport-neutral `LogicalRecoveryRequest` /
-  `LogicalRecoveryResponse` baseline path to HTTP and WebSocket. Raw
-  `CompleteUserDatabase` snapshots intentionally continue to reject persistent
-  logical state; the DirectSyncPeer baseline already preserves schema, replay,
-  order-frontier, and source-outbox recovery invariants atomically.
 - Extend `KeyMultiValueTable` logical capture only after every added bulk or
   reconcile operation has explicit multiset replay semantics and round-trip
   coverage. Raw capture remains disabled.
