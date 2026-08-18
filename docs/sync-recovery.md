@@ -37,7 +37,7 @@ repair path for a partially replicated database.
 sequenceDiagram
     participant W as SyncWorker on fresh receiver
     participant S as Source SyncEngine
-    participant Stage as Receiver in-memory staging
+    participant Stage as Receiver staging
     participant DB as Receiver user DBIs
 
     W->>S: incremental pull
@@ -50,9 +50,28 @@ sequenceDiagram
 ```
 
 The receiver validates every page against immutable page-zero metadata. It
-does not mutate user DBIs before the final page. An interruption or validation
-failure discards in-memory staging; persisted importer resume is not currently
-implemented, so a later retry starts a new source session.
+does not mutate user DBIs before the final page.
+
+### Opt-in Persisted Complete-Import Resume
+
+`FullSnapshotImportOptions::persist_complete_staging=true` persists accepted
+non-final `CompleteUserDatabase` pages in one lazy reserved staging DBI. After
+a process restart, configure the same option, obtain
+`SyncEngine::full_snapshot_import_resume()`, and continue with its unchanged
+`snapshot_id` and continuation. `SyncWorker` does this automatically for its
+opt-in full-snapshot fallback.
+
+The source session still owns its retention lifetime. If the source returns
+`SnapshotSessionInvalid`, the worker discards the durable staging session; a
+later fallback starts a new snapshot. Applications can explicitly abandon a
+session through `discard_full_snapshot_import()`.
+
+The final page applies user DBIs, bootstraps `_mdbxc_applied`, and removes the
+staging DBI in one MDBX transaction. Thus an interruption before that commit
+leaves no user-DBI mutation, while an interruption after it leaves no resumable
+staging. The option consumes one named-DBI slot only while an import is
+incomplete. `ManifestOnly` and logical-aware recovery keep their existing
+in-memory staging contract in this v1.
 
 ## Logical-State Boundary
 

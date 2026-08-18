@@ -517,8 +517,9 @@ namespace sync {
 
         class FullSnapshotImportResetGuard {
         public:
-            explicit FullSnapshotImportResetGuard(SyncEngine& engine)
-                : m_engine(engine), m_active(true) {
+            FullSnapshotImportResetGuard(SyncEngine& engine,
+                                         bool discard_on_failure)
+                : m_engine(engine), m_active(discard_on_failure) {
             }
 
             ~FullSnapshotImportResetGuard() {
@@ -857,7 +858,7 @@ namespace sync {
                 const PullRequest& incremental_request,
                 SyncWorkerRoundResult result) {
             m_engine.discard_full_snapshot_import();
-            FullSnapshotImportResetGuard reset_guard(m_engine);
+            FullSnapshotImportResetGuard reset_guard(m_engine, true);
             LogicalRecoveryRequest request;
             request.requester = incremental_request.requester;
             request.db_id = incremental_request.db_id;
@@ -974,13 +975,16 @@ namespace sync {
         SyncWorkerRoundResult run_full_snapshot_fallback(
                 const PullRequest& incremental_request,
                 SyncWorkerRoundResult result) {
-            m_engine.discard_full_snapshot_import();
-            FullSnapshotImportResetGuard reset_guard(m_engine);
+            const FullSnapshotImportResume resume =
+                m_engine.full_snapshot_import_resume();
+            FullSnapshotImportResetGuard reset_guard(
+                m_engine,
+                !m_engine.persists_complete_full_snapshot_staging());
             PullRequest request = incremental_request;
             request.request_full_snapshot = true;
             request.have = SyncCursor();
-            request.full_snapshot_id.clear();
-            request.full_snapshot_continuation.clear();
+            request.full_snapshot_id = resume.snapshot_id;
+            request.full_snapshot_continuation = resume.continuation;
             request.cancel_token = CancellationToken();
 
             for (;;) {
@@ -1013,7 +1017,11 @@ namespace sync {
                     notify_stage_changed(event);
                 }
                 if (!response.ok) {
-                    m_engine.discard_full_snapshot_import();
+                    if (!m_engine.persists_complete_full_snapshot_staging() ||
+                        response.error_code ==
+                            SyncResponseErrorCode::SnapshotSessionInvalid) {
+                        m_engine.discard_full_snapshot_import();
+                    }
                     result.ok = false;
                     result.error = response.error.empty()
                         ? "full snapshot pull failed"
@@ -1045,7 +1053,9 @@ namespace sync {
                 ++result.pages_pulled;
                 if (stop_requested() || !begin_apply_stage() ||
                     !enter_apply_gate()) {
-                    m_engine.discard_full_snapshot_import();
+                    if (!m_engine.persists_complete_full_snapshot_staging()) {
+                        m_engine.discard_full_snapshot_import();
+                    }
                     result.has_more = response.has_more;
                     return result;
                 }

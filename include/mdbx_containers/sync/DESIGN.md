@@ -1105,8 +1105,9 @@ changelog record for a known origin and returns
 `PullResponse{ok=false, error_code=SnapshotRequired}` instead of streaming a
 later non-contiguous batch. The full snapshot protocol provides an explicit
 fresh-replica importer, and `SyncWorker` can use it for
-`CompleteUserDatabase` recovery. Persisted importer resume and selective
-partial-scope continuation remain outside the implemented contract.
+`CompleteUserDatabase` recovery. Its importer can opt into durable resume for
+an unexpired complete-snapshot source session; selective partial-scope
+continuation remains outside the implemented contract.
 
 ### `_mdbxc_origins` (OriginIndexStore)
 
@@ -1746,24 +1747,33 @@ caller cancellation token to their client-side socket/post operation;
 propagation of a remote disconnect into source materialization remains
 concrete-server-backend work and is deferred.
 
-`SyncEngine::apply_full_snapshot_chunk()` stages all pages in bounded process
-memory and validates immutable page-zero metadata on every continuation. Only
-the final page opens a write transaction: it requires zero local changelog
+`SyncEngine::apply_full_snapshot_chunk()` validates immutable page-zero metadata
+on every continuation. Its default staging is bounded process memory. With
+`FullSnapshotImportOptions::persist_complete_staging=true`, non-final
+`CompleteUserDatabase` pages are instead additionally recorded in one lazy
+reserved DBI, so a newly constructed engine can reconstruct the exact validated
+replacement plan and resume with the stored source continuation. This durable
+mode excludes `ManifestOnly` and logical-aware recovery in v1. Only the final
+page opens the replacement write transaction: it requires zero local changelog
 sequence, an empty applied cursor, and empty manifest DBIs, then applies the
-staged `ClearTable` / `Put` plan. Complete replacement additionally requires a
-destination node identity absent from the source tail, so a restored database
-cannot resume local writes with an origin sequence already used by the source.
-Any interruption, malformed continuation, bound failure, or non-fresh target
-fails before a user-DBI commit.
+staged `ClearTable` / `Put` plan. That same transaction removes persisted
+staging and, for a complete replacement, bootstraps `_mdbxc_applied` from the
+immutable source tail. Complete replacement additionally requires a destination
+node identity absent from the source tail, so a restored database cannot resume
+local writes with an origin sequence already used by the source. Any
+interruption, malformed continuation, bound failure, or non-fresh target fails
+before a user-DBI commit.
 
 `SyncWorker` can opt in to `SnapshotRequired` recovery only with a fresh-replica
 `CompleteUserDatabase` session. It starts a new empty-cursor source session and
-drains every page through the final import commit. It never treats
-`ManifestOnly` as a raw-sync fallback, because that scope has no global cursor
-bootstrap. The worker does not repair an existing partial replica; a failed
-fresh-target preflight remains a reported sync error. Persisted importer resume
-is not implemented, so an interrupted worker discards in-memory staging and a
-later retry starts a new source session.
+drains every page through the final import commit. When the engine enables
+`persist_complete_staging`, a later worker instance resumes an unexpired source
+session from the durable continuation after a transport failure or restart. A
+source `SnapshotSessionInvalid` discards that durable staging because the
+continuation can no longer be trusted, and a later fallback starts a new source
+session. It never treats `ManifestOnly` as a raw-sync fallback, because that
+scope has no global cursor bootstrap. The worker does not repair an existing
+partial replica; a failed fresh-target preflight remains a reported sync error.
 If changelog pruning removed entries needed by the requester's cursor,
 `handle_pull()` returns `SnapshotRequired` with no batches. This is also a
 valid sync response, not a transport failure.
@@ -1779,9 +1789,9 @@ changelog replay. The reserved request shape is
 only when the caller requested that mode, never as an implicit fallback from a
 normal incremental pull.
 
-The implemented source session, fresh-replica importer, and worker fallback
-preserve these properties. Persisted resume and any future selective-scope
-extension must preserve them too:
+The implemented source session, fresh-replica importer, worker fallback, and
+complete-scope persisted resume preserve these properties. Any future
+selective-scope extension must preserve them too:
 
 - A full snapshot export is a named snapshot session. The first response must
   return an opaque `snapshot_id` and all later pages must present the same id;
@@ -1829,19 +1839,19 @@ extension must preserve them too:
   expire; expired or foreign tokens are permanent sync-level rejections and do
   not advance receiver state.
 - A failed snapshot apply must not leave the receiver advertising a partially
-  advanced applied cursor. Either each chunk is independently resumable with
-  explicit snapshot state, or the initial implementation must require a fresh
-  replica directory and fail closed on interruption.
+  advanced applied cursor. Persisted complete-import staging contains only
+  validated non-final pages and the next opaque source continuation; final
+  user-DBI replacement, applied-cursor bootstrap, and staging removal commit
+  atomically. The receiver remains a fresh replica until that commit.
 - `SnapshotRequired` remains the incremental-pull recovery signal. It tells the
   caller that retained changelog replay cannot satisfy the request; the caller
   may then make a separate `request_full_snapshot=true` request. The worker
   uses this only for `CompleteUserDatabase` fresh-replica recovery.
 
-Persisted importer resume and scope-aware partial snapshot continuation are
-still deferred. A partial manifest cannot share the global per-origin cursor:
-that architecture requires stable scope identity, per-scope or per-DBI applied
-progress, scope-filtered changelog pull and retention, and explicit DBI
-membership-change handling.
+Scope-aware partial snapshot continuation is still deferred. A partial manifest
+cannot share the global per-origin cursor: that architecture requires stable
+scope identity, per-scope or per-DBI applied progress, scope-filtered changelog
+pull and retention, and explicit DBI membership-change handling.
 
 ## Background worker lifecycle
 
