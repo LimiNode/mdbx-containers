@@ -35,6 +35,11 @@ long-lived WebSocket sessions policy close code-ом (например `1008`). 
 retry с тем же revoked token — permanent failure; credential provider должен
 выбрать новый token до следующего request.
 
+WebSocket client обычно продолжает старую session до конца rotation window,
+предпочитает новый token для новых session, а после revoke получает policy close
+и reconnect-ится с новой credential. Concrete server отклоняет новые handshake
+и закрывает уже существующие session через свой policy close code.
+
 ## Graceful shutdown
 
 1. Прекратите принимать новые transport request-ы.
@@ -49,6 +54,9 @@ finite timeout либо socket-level cancellation. До остановки liste
 HTTP request-ы обычно получают retryable `503`/`Retry-After`; WebSocket
 handshake прекращается, idle session закрываются `1001` или `1012`. Не
 уничтожайте engine/connection, пока transport callback ещё может до них дойти.
+Для active WebSocket exchange завершите текущий message, когда это возможно,
+либо используйте cancellation/close mechanism backend-а, если shutdown должен
+быть ограничен по времени.
 
 ## Retry policy и limits
 
@@ -67,6 +75,26 @@ wait; ноль отключает limit, отрицательное значен
 decode. `PullRequest::max_bytes` — soft page target; большой следующий batch
 может всё же вернуться для progress. `max_single_batch_bytes` — hard limit;
 превышение возвращает `BatchTooLarge` без page data.
+Caller в этом случае увеличивает limit, уменьшает writer-side batch либо
+использует out-of-band snapshot path.
+
+`SyncWorkerPermanentFailurePolicy` относится только к classified transport
+failure из `SyncTransportRetryHint`. Sync-level `SyncResponseErrorCode`
+попадает в worker round result, stage event и status snapshot; retryability на
+этом уровне означает protocol recovery (например, повторный pull от persistent
+cursor после sequence gap), а не blind resend того же request.
+
+`FixedWindowHttpRateLimitPolicy` третьим constructor argument может ограничить
+число tracked client-identity bucket-ов. Нулевой cap сохраняет прежнее
+unbounded поведение. При ненулевом cap сначала evict-ятся expired window-ы; если
+освободить bucket нельзя, request отклоняется с `429` и `Retry-After`.
+
+Concrete ready-made binding-и передают `CodecBounds` и отвергают oversized
+request/response body до передачи байтов в `TransportMessageCodec`. Simple-Web
+HTTP может отвергнуть oversized `Content-Length` ещё до копирования body в DTO;
+при отсутствии пригодного header body всё равно проверяется после buffering.
+Simple-WebSocket и Kurlyk/libcurl также проверяют до sync decode, однако их
+underlying library уже могла полностью буферизовать frame либо response.
 
 `ISyncPeer::last_retry_hint()` выдаёт последний transport advice. Успех очищает
 старый hint; `available=true, retryable=false` означает classified permanent
@@ -74,6 +102,10 @@ transport failure. Hint рекомендателен: приложение мо�
 объединить с circuit breaker. Worker передаёт его в events/status и для
 retryable relative `Retry-After` временно заменяет exponential delay в пределах
 `max_backoff`.
+Default unavailable hint означает, что peer не дал advice и caller использует
+свою fallback retry policy. `KeepRetrying` сохраняет normal worker backoff;
+`StopWorker` при classified permanent transport failure переводит background
+worker в `Failed` вместо следующего backoff.
 
 ## Структурированное логирование
 
@@ -83,6 +115,10 @@ rejected batches, worker stage и observed progress. Не логируйте raw
 bearer token или целое serialized body. Полезные boundaries: transport receive,
 policy decision, response/close, worker round, page received/applied, backoff,
 cancellation и stop. Catch-up progress — estimate, а не ETA contract.
+HTTP middleware сообщает incoming request context observer-ам до policy dispatch,
+поэтому accepted и rejected request-ы могут нести request/trace id. WebSocket
+middleware делает то же через `WebSocketSyncRequestContext`, когда concrete
+binding заполнил adapter-local trace fields.
 
 ## Offline и corporate builds
 
@@ -92,3 +128,8 @@ cancellation и stop. Catch-up progress — estimate, а не ETA contract.
 dependency в parent project либо patch/fork helper. Application code линкует
 только provider target, чтобы feature macro, include path, libraries и C++
 requirements оставались в одном месте.
+
+Provider helper-ы дают cache variables для pinned tag, но не для repository
+URL. Предварительно созданного compatible dependency target недостаточно для
+пропуска `FetchContent`: helper всё равно materializes ожидаемые source tree
+до wiring final usage target.
