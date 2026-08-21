@@ -75,10 +75,9 @@ No active audit PR sequence is queued in this ledger.
   supports it, configure request, response, and frame caps before the complete
   payload is retained in memory. PR #170 added binding-side limits after the
   framework has surfaced the payload.
-- Table-filtered apply observer subscriptions: `ISyncApplyObserver` now reports
-  affected DBI names, but every observer still receives every committed remote
-  apply event. Add registration-side filters only if more cached wrappers need
-  narrower callback delivery.
+- Table-filtered apply observer subscriptions: registration-side DBI filters
+  now limit local callback delivery to relevant committed remote applies. They
+  do not filter capture, transport delivery, or remote apply.
 - Higher-level transport helpers: after the node ergonomics helper, reduce
   repeated setup code around concrete transport peer construction, identity
   policy, retry/backoff settings, and common production policies.

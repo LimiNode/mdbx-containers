@@ -161,6 +161,10 @@ so the observer can be destroyed after removal returns. Apply events also carry
 the unique DBI names touched by applied operations in first-seen order. The
 names are local physical DBI names for invalidation; they are not transport
 identity, auth metadata, or a substitute for table-specific sync semantics.
+`add_sync_apply_observer_for_dbis()` optionally schedules a callback only when
+one of its registered DBI names was affected. It filters local post-commit
+callback delivery only; capture, transport delivery, and remote apply remain
+unchanged.
 
 A connection-level apply/read barrier serializes sync apply commits with
 cache-backed `VectorStore` operations. C++17 builds use `std::shared_mutex` so
