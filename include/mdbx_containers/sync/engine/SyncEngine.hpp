@@ -288,6 +288,7 @@ namespace sync {
 
         /// \brief Replaces bounds and the durability policy for full import staging.
         /// \details Reconfiguration discards an active in-process import.
+        /// Disabling durable staging also abandons any persisted import.
         /// A newly constructed engine keeps a pre-existing durable session so
         /// the caller can enable the same option before asking for its resume.
         void set_full_snapshot_import_options(
@@ -296,9 +297,12 @@ namespace sync {
             std::lock_guard<std::mutex> lock(m_full_snapshot_import_mutex);
             const bool had_active_session =
                 static_cast<bool>(m_full_snapshot_import_session);
+            const bool disabling_persisted_staging =
+                m_full_snapshot_import_options.persist_complete_staging &&
+                !options.persist_complete_staging;
             m_full_snapshot_import_options = options;
             m_full_snapshot_import_session.reset();
-            if (had_active_session) {
+            if (had_active_session || disabling_persisted_staging) {
                 discard_persisted_full_snapshot_import_locked();
             }
         }
@@ -3147,6 +3151,7 @@ namespace sync {
                 bool logical_recovery,
                 Connection::SyncApplyNotification& notification,
                 bool& notification_ready) {
+            bool starting_nonpersistent_complete_import = false;
             if (chunk.replacement_scope != FullSnapshotScope::ManifestOnly &&
                 chunk.replacement_scope !=
                     FullSnapshotScope::CompleteUserDatabase) {
@@ -3162,6 +3167,11 @@ namespace sync {
                     throw std::invalid_argument(
                         "full snapshot import must begin at chunk zero");
                 }
+                starting_nonpersistent_complete_import =
+                    !logical_recovery &&
+                    chunk.replacement_scope ==
+                        FullSnapshotScope::CompleteUserDatabase &&
+                    !m_full_snapshot_import_options.persist_complete_staging;
                 std::unique_ptr<FullSnapshotImportSession> session(
                     new FullSnapshotImportSession());
                 session->source_node_id = chunk.source_node_id;
@@ -3197,6 +3207,9 @@ namespace sync {
             append_full_snapshot_import_chunk(session, chunk);
             ++session.next_chunk_index;
             session.continuation = chunk.continuation;
+            if (starting_nonpersistent_complete_import) {
+                discard_persisted_full_snapshot_import_locked();
+            }
 
             FullSnapshotImportResult result;
             result.next_chunk_index = session.next_chunk_index;
@@ -3250,7 +3263,8 @@ namespace sync {
                                                     *logical_baseline);
                 }
                 if (!logical_recovery &&
-                    m_full_snapshot_import_options.persist_complete_staging) {
+                    session.replacement_scope ==
+                        FullSnapshotScope::CompleteUserDatabase) {
                     FullSnapshotImportStore staged(m_conn->env_handle());
                     staged.discard(txn.handle());
                 }

@@ -1763,6 +1763,8 @@ node identity absent from the source tail, so a restored database cannot resume
 local writes with an origin sequence already used by the source. Any
 interruption, malformed continuation, bound failure, or non-fresh target fails
 before a user-DBI commit.
+Starting a new non-persistent `CompleteUserDatabase` import, or explicitly
+disabling persisted staging, abandons any existing durable session.
 
 `SyncWorker` can opt in to `SnapshotRequired` recovery only with a fresh-replica
 `CompleteUserDatabase` session. It starts a new empty-cursor source session and

@@ -73,6 +73,8 @@ namespace sync {
         /// \details Disabled by default to preserve the original in-memory
         /// importer contract and its named-DBI budget. When enabled, one lazy
         /// reserved staging DBI is held only while an import is incomplete.
+        /// Starting a new non-persistent complete import abandons any previous
+        /// persisted staging session.
         bool persist_complete_staging = false;
     };
 

@@ -65,6 +65,8 @@ The source session still owns its retention lifetime. If the source returns
 `SnapshotSessionInvalid`, the worker discards the durable staging session; a
 later fallback starts a new snapshot. Applications can explicitly abandon a
 session through `discard_full_snapshot_import()`.
+Starting a new non-persistent `CompleteUserDatabase` import, or explicitly
+disabling persisted staging, also abandons any existing durable session.
 
 The final page applies user DBIs, bootstraps `_mdbxc_applied`, and removes the
 staging DBI in one MDBX transaction. Thus an interruption before that commit
