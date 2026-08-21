@@ -228,15 +228,19 @@ Operational rules:
   transaction. The bounded importer treats `ManifestOnly` as a manual physical
   replacement and accepts `CompleteUserDatabase` only for a fresh replica.
   `SyncWorkerOptions::enable_full_snapshot_fallback` can explicitly drive
-  `CompleteUserDatabase` recovery after `SnapshotRequired`; persisted resume
-  remains deferred. Code that needs machine classification should inspect
+  `CompleteUserDatabase` recovery after `SnapshotRequired`.
+  `FullSnapshotImportOptions::persist_complete_staging` opt in to durable
+  restart resume for that scope; it uses one lazy reserved DBI while incomplete.
+  Code that needs machine classification should inspect
   `SyncResponseErrorCode` instead of parsing the human-readable `error` string.
 - Pull from a cursor older than retained changelog history fails as
   `PullResponse{ok=false, error_code=SnapshotRequired}`. The response carries no
   batches because applying a later retained batch would produce a sequence gap
   on the receiver. A caller can explicitly drive the bounded fresh-replica
   snapshot session, and `SyncWorker` can opt into the same recovery for a fresh
-  `CompleteUserDatabase` target. Persisted importer resume remains deferred.
+  `CompleteUserDatabase` target. Its opt-in durable staging can resume an
+  unexpired source session after a receiver restart; `ManifestOnly` remains a
+  manual import without that fallback.
 - Full snapshot implementation notes are in
   `include/mdbx_containers/sync/DESIGN.md`. The manual importer remains separate
   from changelog replay: it accepts user-DBI-only chunks with an immutable

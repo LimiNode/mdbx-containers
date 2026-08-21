@@ -342,6 +342,36 @@ private:
     mdbxc::sync::ISyncPeer& m_recovery_peer;
 };
 
+class FailOnceSnapshotContinuationPeer : public mdbxc::sync::ISyncPeer {
+public:
+    explicit FailOnceSnapshotContinuationPeer(mdbxc::sync::ISyncPeer& remote)
+        : m_remote(remote), m_failed(false) {
+    }
+
+    mdbxc::sync::PullResponse pull(
+            const mdbxc::sync::PullRequest& request) override {
+        if (request.request_full_snapshot && !request.full_snapshot_id.empty() &&
+            !m_failed) {
+            m_failed = true;
+            mdbxc::sync::PullResponse out;
+            out.ok = false;
+            out.error = "temporary snapshot transport failure";
+            out.error_retryable = true;
+            return out;
+        }
+        return m_remote.pull(request);
+    }
+
+    mdbxc::sync::PushResponse push(
+            const mdbxc::sync::PushRequest& request) override {
+        return m_remote.push(request);
+    }
+
+private:
+    mdbxc::sync::ISyncPeer& m_remote;
+    bool                    m_failed;
+};
+
 class BlockingPeer : public mdbxc::sync::ISyncPeer {
 public:
     explicit BlockingPeer(const mdbxc::sync::PullResponse& response)
@@ -2799,6 +2829,89 @@ void test_worker_recovers_fresh_replica_with_full_snapshot() {
     cleanup(replica_path);
 }
 
+void test_worker_resumes_persisted_full_snapshot_after_restart() {
+    using namespace mdbxc;
+    const std::string source_path = "test_worker_resume_snapshot_source.mdbx";
+    const std::string replica_path = "test_worker_resume_snapshot_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xA7);
+    const sync::NodeId replica_node = make_node(0xB7);
+    const sync::DbId db_id = make_node(0xD7);
+    sync::FullSnapshotExportOptions snapshot_options;
+    snapshot_options.replacement_scope =
+        sync::FullSnapshotScope::CompleteUserDatabase;
+    snapshot_options.max_materialized_operations = 16u;
+    snapshot_options.max_materialized_bytes = 4096u;
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source_engine(
+        source_conn, sync::ConflictPolicy::Reject, snapshot_options);
+    source_engine.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> source_documents(
+        source_conn, "documents");
+    source_documents.insert_or_assign("one", "1");
+    source_documents.insert_or_assign("two", "2");
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        sync::ChangeLogStore changelog(source_conn->env_handle());
+        changelog.open(txn.handle());
+        changelog.append(
+            txn.handle(), source_node, 3u,
+            sync::ChangeBatchCodec::encode(
+                make_raw_batch(source_node, 3u, "documents", 0x27u)));
+        txn.commit();
+    }
+
+    sync::DirectSyncPeer direct_peer(&source_engine);
+    FailOnceSnapshotContinuationPeer peer(direct_peer);
+    sync::SyncWorkerOptions worker_options;
+    worker_options.enable_full_snapshot_fallback = true;
+    worker_options.max_bytes = 1u;
+    worker_options.max_single_batch_bytes = 8192u;
+    sync::FullSnapshotImportOptions import_options;
+    import_options.persist_complete_staging = true;
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    {
+        sync::SyncEngine first(replica_conn);
+        first.initialize_local_identity(replica_node, db_id);
+        first.set_full_snapshot_import_options(import_options);
+        sync::SyncWorker worker(first, peer, worker_options);
+        const sync::SyncWorkerRoundResult interrupted = worker.run_once();
+        if (interrupted.ok ||
+            !first.full_snapshot_import_resume().available) {
+            throw std::runtime_error(
+                "worker did not retain persisted snapshot after transport failure");
+        }
+    }
+
+    replica_conn->disconnect();
+    replica_conn = open_env(replica_path);
+    sync::SyncEngine resumed(replica_conn);
+    resumed.set_full_snapshot_import_options(import_options);
+    sync::SyncWorker worker(resumed, peer, worker_options);
+    const sync::SyncWorkerRoundResult result = worker.run_once();
+    if (!result.ok || result.pages_pulled == 0u || result.has_more ||
+        resumed.full_snapshot_import_resume().available) {
+        throw std::runtime_error("worker did not resume persisted full snapshot");
+    }
+    KeyValueTable<std::string, std::string> documents(replica_conn, "documents");
+    if (kv_or_throw(replica_conn, documents, std::string("one"),
+                    "resumed worker snapshot one") != "1" ||
+        kv_or_throw(replica_conn, documents, std::string("two"),
+                    "resumed worker snapshot two") != "2" ||
+        resumed.applied_cursor().last_seq_for(source_node) != 3u) {
+        throw std::runtime_error("resumed worker snapshot content is wrong");
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
 void test_worker_snapshot_recovery_preserves_remote_origin_cursor() {
     using namespace mdbxc;
     const std::string snapshot_source_path =
@@ -3352,6 +3465,8 @@ int main() {
     const Case cases[] = {
         { "test_worker_recovers_fresh_replica_with_full_snapshot",
           &test_worker_recovers_fresh_replica_with_full_snapshot },
+        { "test_worker_resumes_persisted_full_snapshot_after_restart",
+          &test_worker_resumes_persisted_full_snapshot_after_restart },
         { "test_worker_snapshot_recovery_preserves_remote_origin_cursor",
           &test_worker_snapshot_recovery_preserves_remote_origin_cursor },
         { "test_worker_rejects_manifest_only_snapshot_fallback",

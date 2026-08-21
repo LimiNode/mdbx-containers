@@ -2438,6 +2438,17 @@ void test_engine_imports_full_snapshot_and_bootstraps_cursor() {
     }
     {
         auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi staged = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), "_mdbxc_snapshot_import",
+            static_cast<MDBX_db_flags_t>(0), &staged);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "in-memory snapshot import created persisted staging DBI");
+        }
+    }
+    {
+        auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
         MDBX_dbi dbi = 0;
         const int rc = mdbx_dbi_open(
             txn.handle(), "documents", static_cast<MDBX_db_flags_t>(0), &dbi);
@@ -2482,6 +2493,227 @@ void test_engine_imports_full_snapshot_and_bootstraps_cursor() {
     replica_conn->disconnect();
     cleanup(source_path);
     cleanup(replica_path);
+}
+
+void test_engine_resumes_persisted_complete_snapshot_import() {
+    using namespace mdbxc;
+    const std::string source_path = "test_engine_resume_snapshot_source.mdbx";
+    const std::string replica_path = "test_engine_resume_snapshot_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xA8);
+    const sync::NodeId replica_node = make_node(0xB8);
+    const sync::DbId db_id = make_node(0xD8);
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(
+        source_conn, sync::ConflictPolicy::Reject,
+        complete_snapshot_test_options());
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<std::string, std::string> source_documents(
+        source_conn, "documents");
+    source_documents.insert_or_assign("one", "1");
+    source_documents.insert_or_assign("two", "2");
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::FullSnapshotImportOptions import_options;
+    import_options.persist_complete_staging = true;
+    {
+        sync::SyncEngine first(replica_conn);
+        first.initialize_local_identity(replica_node, db_id);
+        first.set_full_snapshot_import_options(import_options);
+
+        sync::PullRequest request;
+        request.requester = replica_node;
+        request.db_id = db_id;
+        request.request_full_snapshot = true;
+        request.max_bytes = 1u;
+        request.max_single_batch_bytes = 8192u;
+        const sync::PullResponse first_page = source.handle_pull(request);
+        if (!first_page.ok || !first_page.has_more ||
+            first_page.snapshot_chunk.chunk_index != 0u ||
+            first.apply_full_snapshot_chunk(first_page.snapshot_chunk).completed) {
+            throw std::runtime_error("persisted snapshot first page was not staged");
+        }
+        const sync::FullSnapshotImportResume resume =
+            first.full_snapshot_import_resume();
+        if (!resume.available ||
+            resume.snapshot_id != first_page.snapshot_chunk.snapshot_id ||
+            resume.continuation != first_page.snapshot_chunk.continuation ||
+            resume.next_chunk_index != 1u) {
+            throw std::runtime_error("persisted snapshot resume state is wrong");
+        }
+    }
+
+    replica_conn->disconnect();
+    replica_conn = open_env(replica_path);
+    sync::SyncEngine resumed(replica_conn);
+    resumed.set_full_snapshot_import_options(import_options);
+    sync::FullSnapshotImportResume resume = resumed.full_snapshot_import_resume();
+    if (!resume.available || resume.next_chunk_index != 1u) {
+        throw std::runtime_error("reopened engine lost persisted snapshot state");
+    }
+
+    sync::PullRequest request;
+    request.requester = replica_node;
+    request.db_id = db_id;
+    request.request_full_snapshot = true;
+    request.max_bytes = 1u;
+    request.max_single_batch_bytes = 8192u;
+    request.full_snapshot_id = resume.snapshot_id;
+    request.full_snapshot_continuation = resume.continuation;
+    sync::FullSnapshotImportResult result;
+    for (;;) {
+        const sync::PullResponse page = source.handle_pull(request);
+        if (!page.ok || !page.is_full_snapshot ||
+            page.snapshot_chunk.chunk_index != resume.next_chunk_index) {
+            throw std::runtime_error("persisted snapshot continuation is wrong");
+        }
+        result = resumed.apply_full_snapshot_chunk(page.snapshot_chunk);
+        if (!page.has_more) break;
+        request.full_snapshot_id = page.snapshot_chunk.snapshot_id;
+        request.full_snapshot_continuation = page.snapshot_chunk.continuation;
+        resume = resumed.full_snapshot_import_resume();
+        if (!resume.available ||
+            resume.next_chunk_index != result.next_chunk_index) {
+            throw std::runtime_error("persisted snapshot did not advance resume state");
+        }
+    }
+    if (!result.completed || resumed.full_snapshot_import_resume().available) {
+        throw std::runtime_error("persisted snapshot did not finish cleanly");
+    }
+    {
+        auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi staged = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), "_mdbxc_snapshot_import",
+            static_cast<MDBX_db_flags_t>(0), &staged);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "completed snapshot retained persisted staging DBI");
+        }
+    }
+
+    KeyValueTable<std::string, std::string> documents(replica_conn, "documents");
+    if (kv_or_throw(replica_conn, documents, std::string("one"),
+                    "resumed snapshot one") != "1" ||
+        kv_or_throw(replica_conn, documents, std::string("two"),
+                    "resumed snapshot two") != "2") {
+        throw std::runtime_error("resumed snapshot content is wrong");
+    }
+
+    source_conn->disconnect();
+    replica_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
+void test_engine_nonpersistent_complete_snapshot_discards_stale_persisted_staging() {
+    using namespace mdbxc;
+    const std::string replica_path =
+        "test_engine_discard_stale_snapshot_replica.mdbx";
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0xA9);
+    const sync::NodeId replica_node = make_node(0xB9);
+    const sync::DbId db_id = make_node(0xD9);
+
+    std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+    sync::FullSnapshotImportOptions persistent_options;
+    persistent_options.persist_complete_staging = true;
+    {
+        sync::SyncEngine initial(replica_conn);
+        initial.initialize_local_identity(replica_node, db_id);
+        initial.set_full_snapshot_import_options(persistent_options);
+
+        sync::FullSnapshotChunk stale = make_import_chunk(
+            source_node, db_id, "stale-persisted", 0u, true,
+            sync::FullSnapshotScope::CompleteUserDatabase);
+        append_import_clear(stale);
+        if (initial.apply_full_snapshot_chunk(stale).completed) {
+            throw std::runtime_error(
+                "persistent snapshot first page was not staged");
+        }
+    }
+
+    replica_conn->disconnect();
+    replica_conn = open_env(replica_path);
+    sync::SyncEngine nonpersistent(replica_conn);
+
+    sync::FullSnapshotChunk replacement = make_import_chunk(
+        source_node, db_id, "nonpersistent-replacement", 0u, false,
+        sync::FullSnapshotScope::CompleteUserDatabase);
+    append_import_clear(replacement);
+    append_import_put(replacement, "replacement", "value");
+    if (!nonpersistent.apply_full_snapshot_chunk(replacement).completed) {
+        throw std::runtime_error(
+            "nonpersistent replacement snapshot did not complete");
+    }
+    {
+        auto txn = replica_conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi staged = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), "_mdbxc_snapshot_import",
+            static_cast<MDBX_db_flags_t>(0), &staged);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "nonpersistent replacement retained stale persisted staging DBI");
+        }
+    }
+
+    nonpersistent.set_full_snapshot_import_options(persistent_options);
+    if (nonpersistent.full_snapshot_import_resume().available) {
+        throw std::runtime_error(
+            "nonpersistent replacement resurrected stale snapshot continuation");
+    }
+
+    replica_conn->disconnect();
+    cleanup(replica_path);
+}
+
+void test_engine_disabling_persisted_complete_snapshot_staging_discards_session() {
+    using namespace mdbxc;
+    const std::string path = "test_engine_disable_persisted_snapshot_staging.mdbx";
+    cleanup(path);
+
+    const sync::NodeId source_node = make_node(0xAA);
+    const sync::NodeId replica_node = make_node(0xBA);
+    const sync::DbId db_id = make_node(0xDA);
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(replica_node, db_id);
+
+    sync::FullSnapshotImportOptions persistent_options;
+    persistent_options.persist_complete_staging = true;
+    engine.set_full_snapshot_import_options(persistent_options);
+    sync::FullSnapshotChunk staged = make_import_chunk(
+        source_node, db_id, "disable-persisted", 0u, true,
+        sync::FullSnapshotScope::CompleteUserDatabase);
+    append_import_clear(staged);
+    (void)engine.apply_full_snapshot_chunk(staged);
+
+    sync::FullSnapshotImportOptions in_memory_options;
+    engine.set_full_snapshot_import_options(in_memory_options);
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi staging_dbi = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), "_mdbxc_snapshot_import",
+            static_cast<MDBX_db_flags_t>(0), &staging_dbi);
+        if (rc != MDBX_NOTFOUND) {
+            throw std::runtime_error(
+                "disabling persisted staging retained its DBI");
+        }
+    }
+
+    engine.set_full_snapshot_import_options(persistent_options);
+    if (engine.full_snapshot_import_resume().available) {
+        throw std::runtime_error(
+            "disabling persisted staging retained its continuation");
+    }
+
+    conn->disconnect();
+    cleanup(path);
 }
 
 void test_engine_manifest_only_snapshot_does_not_bootstrap_cursor() {
@@ -4402,6 +4634,12 @@ int main() {
           &test_engine_rejects_complete_snapshot_with_malformed_outbox_envelope },
         { "test_engine_imports_full_snapshot_and_bootstraps_cursor",
           &test_engine_imports_full_snapshot_and_bootstraps_cursor },
+        { "test_engine_resumes_persisted_complete_snapshot_import",
+          &test_engine_resumes_persisted_complete_snapshot_import },
+        { "test_engine_nonpersistent_complete_snapshot_discards_stale_persisted_staging",
+          &test_engine_nonpersistent_complete_snapshot_discards_stale_persisted_staging },
+        { "test_engine_disabling_persisted_complete_snapshot_staging_discards_session",
+          &test_engine_disabling_persisted_complete_snapshot_staging_discards_session },
         { "test_engine_manifest_only_snapshot_does_not_bootstrap_cursor",
           &test_engine_manifest_only_snapshot_does_not_bootstrap_cursor },
         { "test_engine_complete_snapshot_rejects_destination_identity_in_tail",

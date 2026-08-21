@@ -204,6 +204,7 @@ namespace sync {
             std::uint32_t manifest_version = 0u;
             std::vector<FullSnapshotManifestEntry> manifest;
             std::uint64_t next_chunk_index = 0u;
+            std::string continuation;
             std::uint64_t staged_bytes = 0u;
             std::vector<ChangeOp> operations;
             std::map<std::string, ReplacementState> replacement_state;
@@ -285,24 +286,67 @@ namespace sync {
             m_full_snapshot_sessions.clear();
         }
 
-        /// \brief Replaces the bounds for in-memory full snapshot import staging.
-        /// \details Reconfiguration discards an incomplete import because its
-        /// pending pages were never durable and must not outlive their bounds.
+        /// \brief Replaces bounds and the durability policy for full import staging.
+        /// \details Reconfiguration discards an active in-process import.
+        /// Disabling durable staging also abandons any persisted import.
+        /// A newly constructed engine keeps a pre-existing durable session so
+        /// the caller can enable the same option before asking for its resume.
         void set_full_snapshot_import_options(
                 const FullSnapshotImportOptions& options) {
             validate_full_snapshot_import_options(options);
             std::lock_guard<std::mutex> lock(m_full_snapshot_import_mutex);
+            const bool had_active_session =
+                static_cast<bool>(m_full_snapshot_import_session);
+            const bool disabling_persisted_staging =
+                m_full_snapshot_import_options.persist_complete_staging &&
+                !options.persist_complete_staging;
             m_full_snapshot_import_options = options;
             m_full_snapshot_import_session.reset();
+            if (had_active_session || disabling_persisted_staging) {
+                discard_persisted_full_snapshot_import_locked();
+            }
         }
 
-        /// \brief Discards an incomplete in-memory full snapshot import.
+        /// \brief Discards an incomplete full snapshot import.
         /// \details No user-DBI mutation has occurred before a snapshot final
         /// page, so this is safe after cancellation, transport failure, or a
         /// worker restart. It never alters durable replication metadata.
         void discard_full_snapshot_import() {
             std::lock_guard<std::mutex> lock(m_full_snapshot_import_mutex);
             m_full_snapshot_import_session.reset();
+            discard_persisted_full_snapshot_import_locked();
+        }
+
+        /// \brief Returns the continuation for a durable complete import.
+        /// \details A returned continuation is valid only while the source
+        /// retains its snapshot session. Call \c discard_full_snapshot_import()
+        /// before starting a new session after the source expires it.
+        FullSnapshotImportResume full_snapshot_import_resume() {
+            std::lock_guard<std::mutex> lock(m_full_snapshot_import_mutex);
+            FullSnapshotImportResume out;
+            if (!m_full_snapshot_import_options.persist_complete_staging) {
+                return out;
+            }
+            restore_persisted_full_snapshot_import_locked();
+            if (!m_full_snapshot_import_session) return out;
+            const FullSnapshotImportSession& session =
+                *m_full_snapshot_import_session;
+            if (session.logical_recovery ||
+                session.replacement_scope !=
+                    FullSnapshotScope::CompleteUserDatabase ||
+                session.next_chunk_index == 0u || session.continuation.empty()) {
+                return out;
+            }
+            out.available = true;
+            out.snapshot_id = session.snapshot_id;
+            out.continuation = session.continuation;
+            out.next_chunk_index = session.next_chunk_index;
+            return out;
+        }
+
+        bool persists_complete_full_snapshot_staging() const {
+            std::lock_guard<std::mutex> lock(m_full_snapshot_import_mutex);
+            return m_full_snapshot_import_options.persist_complete_staging;
         }
 
         /// \brief Stages or atomically applies one full snapshot chunk.
@@ -2845,6 +2889,82 @@ namespace sync {
                 full_snapshot_manifest_equal(session.manifest, chunk.manifest);
         }
 
+        std::unique_ptr<FullSnapshotImportSession>
+        make_full_snapshot_import_session(const FullSnapshotChunk& chunk,
+                                          bool logical_recovery) const {
+            std::unique_ptr<FullSnapshotImportSession> session(
+                new FullSnapshotImportSession());
+            session->source_node_id = chunk.source_node_id;
+            session->source_db_uuid = chunk.source_db_uuid;
+            session->snapshot_id = chunk.snapshot_id;
+            session->source_tail = chunk.source_tail;
+            session->replacement_scope = chunk.replacement_scope;
+            session->manifest_version = chunk.manifest_version;
+            session->manifest = chunk.manifest;
+            session->logical_recovery = logical_recovery;
+            for (std::size_t i = 0u; i < session->manifest.size(); ++i) {
+                session->replacement_state[session->manifest[i].dbi_name] =
+                    FullSnapshotImportSession::ReplacementState::NotSeen;
+            }
+            return session;
+        }
+
+        void restore_persisted_full_snapshot_import_locked() {
+            if (m_full_snapshot_import_session ||
+                !m_full_snapshot_import_options.persist_complete_staging) {
+                return;
+            }
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            FullSnapshotImportStore staged(m_conn->env_handle());
+            std::unique_ptr<FullSnapshotImportSession> restored;
+            const bool found = staged.for_each(
+                txn.handle(),
+                [this, &restored](const FullSnapshotChunk& chunk) {
+                    if (!restored) {
+                        if (chunk.replacement_scope !=
+                            FullSnapshotScope::CompleteUserDatabase) {
+                            throw std::runtime_error(
+                                "persisted snapshot import is not CompleteUserDatabase");
+                        }
+                        restored = make_full_snapshot_import_session(chunk, false);
+                    }
+                    FullSnapshotImportSession& session = *restored;
+                    if (!full_snapshot_metadata_matches(session, chunk) ||
+                        chunk.chunk_index != session.next_chunk_index) {
+                        throw std::runtime_error(
+                            "persisted snapshot import metadata does not match");
+                    }
+                    append_full_snapshot_import_chunk(session, chunk);
+                    ++session.next_chunk_index;
+                    session.continuation = chunk.continuation;
+                });
+            if (found) {
+                m_full_snapshot_import_session = std::move(restored);
+            }
+        }
+
+        void persist_full_snapshot_import_chunk_locked(
+                const FullSnapshotImportSession& session,
+                const FullSnapshotChunk& chunk) {
+            if (!m_full_snapshot_import_options.persist_complete_staging ||
+                session.logical_recovery ||
+                session.replacement_scope !=
+                    FullSnapshotScope::CompleteUserDatabase) {
+                return;
+            }
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            FullSnapshotImportStore staged(m_conn->env_handle());
+            staged.append(txn.handle(), chunk);
+            txn.commit();
+        }
+
+        void discard_persisted_full_snapshot_import_locked() {
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            FullSnapshotImportStore staged(m_conn->env_handle());
+            staged.discard(txn.handle());
+            txn.commit();
+        }
+
         void append_full_snapshot_import_chunk(
                 FullSnapshotImportSession& session,
                 const FullSnapshotChunk& chunk) const {
@@ -3031,17 +3151,27 @@ namespace sync {
                 bool logical_recovery,
                 Connection::SyncApplyNotification& notification,
                 bool& notification_ready) {
+            bool starting_nonpersistent_complete_import = false;
             if (chunk.replacement_scope != FullSnapshotScope::ManifestOnly &&
                 chunk.replacement_scope !=
                     FullSnapshotScope::CompleteUserDatabase) {
                 throw std::invalid_argument(
                     "full snapshot importer received an unsupported replacement scope");
             }
+            if (!logical_recovery &&
+                m_full_snapshot_import_options.persist_complete_staging) {
+                restore_persisted_full_snapshot_import_locked();
+            }
             if (!m_full_snapshot_import_session) {
                 if (chunk.chunk_index != 0u) {
                     throw std::invalid_argument(
                         "full snapshot import must begin at chunk zero");
                 }
+                starting_nonpersistent_complete_import =
+                    !logical_recovery &&
+                    chunk.replacement_scope ==
+                        FullSnapshotScope::CompleteUserDatabase &&
+                    !m_full_snapshot_import_options.persist_complete_staging;
                 std::unique_ptr<FullSnapshotImportSession> session(
                     new FullSnapshotImportSession());
                 session->source_node_id = chunk.source_node_id;
@@ -3076,10 +3206,17 @@ namespace sync {
             }
             append_full_snapshot_import_chunk(session, chunk);
             ++session.next_chunk_index;
+            session.continuation = chunk.continuation;
+            if (starting_nonpersistent_complete_import) {
+                discard_persisted_full_snapshot_import_locked();
+            }
 
             FullSnapshotImportResult result;
             result.next_chunk_index = session.next_chunk_index;
-            if (chunk.has_more) return result;
+            if (chunk.has_more) {
+                persist_full_snapshot_import_chunk_locked(session, chunk);
+                return result;
+            }
 
             require_complete_full_snapshot_replacement_plan(session);
 
@@ -3124,6 +3261,12 @@ namespace sync {
                 if (logical_recovery) {
                     apply_logical_recovery_baseline(txn.handle(), session,
                                                     *logical_baseline);
+                }
+                if (!logical_recovery &&
+                    session.replacement_scope ==
+                        FullSnapshotScope::CompleteUserDatabase) {
+                    FullSnapshotImportStore staged(m_conn->env_handle());
+                    staged.discard(txn.handle());
                 }
                 txn.commit();
                 result.completed = true;

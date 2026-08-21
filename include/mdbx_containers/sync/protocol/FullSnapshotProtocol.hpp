@@ -58,16 +58,32 @@ namespace sync {
             std::chrono::seconds(300);
     };
 
-    /// \brief Receiver-side bounds for one staged full snapshot import.
-    /// \details The importer keeps pages only in process memory until the
-    /// final page. These bounds prevent a peer from accumulating an unbounded
-    /// replacement plan before the one atomic destination commit. Logical-aware
-    /// recovery spends the same budget on its final logical baseline, including
-    /// schema, replay, ordering, and pending-delivery records.
+    /// \brief Receiver-side bounds and durability policy for one full import.
+    /// \details The default importer keeps pages only in process memory until
+    /// the final page. These bounds prevent a peer from accumulating an
+    /// unbounded replacement plan before the one atomic destination commit.
+    /// Logical-aware recovery spends the same budget on its final logical
+    /// baseline, including schema, replay, ordering, and pending-delivery
+    /// records.
     struct FullSnapshotImportOptions {
         std::uint64_t max_staged_operations = 1000000u;
         std::uint64_t max_staged_bytes =
             256ULL * 1024ULL * 1024ULL;
+        /// \brief Persists non-final CompleteUserDatabase pages for resume.
+        /// \details Disabled by default to preserve the original in-memory
+        /// importer contract and its named-DBI budget. When enabled, one lazy
+        /// reserved staging DBI is held only while an import is incomplete.
+        /// Starting a new non-persistent complete import abandons any previous
+        /// persisted staging session.
+        bool persist_complete_staging = false;
+    };
+
+    /// \brief Continuation needed to resume one persisted complete import.
+    struct FullSnapshotImportResume {
+        bool available = false;
+        std::string snapshot_id;
+        std::string continuation;
+        std::uint64_t next_chunk_index = 0u;
     };
 
     /// \brief Progress returned after accepting one full snapshot chunk.
