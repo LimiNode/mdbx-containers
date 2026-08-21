@@ -47,17 +47,14 @@ Durable lookup в `Connection` продолжает действовать и б
 
 ## Logical и отложенные правила
 
-`_mdbxc_sync_schema` хранит schema id, kind, version и canonical owned DBI set;
-`LogicalChange` непрозрачен; `LogicalTableRegistry` выполняет two-phase
-preflight/apply. `KeyValueTableLogicalAdapter`, `KeyTableLogicalAdapter` и
-`VectorStoreLogicalAdapter` — opt-in helpers с typed capture; их outbox worker
-доставляет только logical-capable peer-у, не raw pull/push.
-
 `_mdbxc_sync_schema` хранит явные application schema id, logical kind, schema
 version и owned DBI names как canonical sorted unique set. `LogicalChange`
 несёт opaque adapter-owned payload, а `LogicalTableRegistry` до вызова adapter-а
 проверяет полный schema tuple и reserved flags в two-phase preflight/apply.
 Direct logical frames доставляет сам caller: они не попадают в raw pull/push.
+`KeyValueTableLogicalAdapter`, `KeyTableLogicalAdapter` и
+`VectorStoreLogicalAdapter` — opt-in helpers с typed capture; их outbox worker
+доставляет только logical-capable peer-у, не raw pull/push.
 
 Новой deferred таблице нельзя добавлять `record_op()` без persistent schema,
 wire representation, adapter, apply validation/reconstruction, transaction
