@@ -1368,6 +1368,81 @@ void test_sync_apply_observer_reports_unique_dbi_names() {
     cleanup(p);
 }
 
+void test_sync_apply_observer_filters_dbi_names() {
+    using namespace mdbxc;
+    const std::string p = "test_sync_apply_observer_dbi_filter.mdbx";
+    cleanup(p);
+
+    auto conn = open_env(p);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x10), make_node(0xD0));
+
+    CountingApplyObserver all_observer;
+    CountingApplyObserver orders_observer;
+    CountingApplyObserver risk_observer;
+    std::vector<std::string> order_dbi_names(1u, "orders");
+    const std::vector<std::string> risk_dbi_names(1u, "risk");
+    const std::vector<std::string> no_dbi_names;
+    bool rejected_empty_filter = false;
+    try {
+        (void)conn->add_sync_apply_observer_for_dbis(
+            &orders_observer, no_dbi_names);
+    } catch (const std::invalid_argument&) {
+        rejected_empty_filter = true;
+    }
+    if (!rejected_empty_filter) {
+        throw std::runtime_error("empty DBI observer filter was accepted");
+    }
+    const std::uint64_t all_token = conn->add_sync_apply_observer(
+        &all_observer);
+    const std::uint64_t orders_token =
+        conn->add_sync_apply_observer_for_dbis(
+            &orders_observer, order_dbi_names);
+    const std::uint64_t risk_token = conn->add_sync_apply_observer_for_dbis(
+        &risk_observer, risk_dbi_names);
+    order_dbi_names[0] = "changed-after-registration";
+
+    const sync::NodeId origin = make_node(0x20);
+    sync::PushRequest first_request;
+    first_request.sender = origin;
+    first_request.db_id = make_node(0xD0);
+    first_request.batches.push_back(
+        make_raw_batch(origin, 1u, "trades", 0x41u));
+    const sync::PushResponse first_response = engine.handle_push(first_request);
+    if (!first_response.ok || all_observer.calls != 1u ||
+        orders_observer.calls != 0u || risk_observer.calls != 0u) {
+        throw std::runtime_error(
+            "DBI-filtered observers received an unrelated apply event");
+    }
+
+    sync::PushRequest second_request;
+    second_request.sender = origin;
+    second_request.db_id = make_node(0xD0);
+    second_request.batches.push_back(
+        make_raw_batch(origin, 2u, "orders", 0x42u));
+    const sync::PushResponse second_response =
+        engine.handle_push(second_request);
+    if (!second_response.ok || all_observer.calls != 2u ||
+        orders_observer.calls != 1u || risk_observer.calls != 0u) {
+        throw std::runtime_error(
+            "DBI-filtered observer delivery is incorrect");
+    }
+    if (orders_observer.affected_dbi_names.size() != 1u ||
+        orders_observer.affected_dbi_names[0] != "orders") {
+        throw std::runtime_error(
+            "DBI-filtered observer received an incorrect event summary");
+    }
+
+    if (!conn->remove_sync_apply_observer(all_token) ||
+        !conn->remove_sync_apply_observer(orders_token) ||
+        !conn->remove_sync_apply_observer(risk_token)) {
+        throw std::runtime_error("failed to remove DBI-filtered observer");
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 void test_sync_apply_observer_reports_dbi_names_across_batches() {
     using namespace mdbxc;
     const std::string p = "test_sync_apply_observer_dbi_multi_batch.mdbx";
@@ -4594,6 +4669,8 @@ int main() {
           &test_sync_apply_observer_remove_waits_for_in_flight_callback },
         { "test_sync_apply_observer_reports_unique_dbi_names",
           &test_sync_apply_observer_reports_unique_dbi_names },
+        { "test_sync_apply_observer_filters_dbi_names",
+          &test_sync_apply_observer_filters_dbi_names },
         { "test_sync_apply_observer_reports_dbi_names_across_batches",
           &test_sync_apply_observer_reports_dbi_names_across_batches },
         { "test_sync_apply_observer_ignores_skipped_batch_dbi_names",

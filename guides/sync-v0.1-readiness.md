@@ -40,6 +40,8 @@ rules, see [Sync table coverage matrix](sync-table-coverage.md).
 - `Connection::add_sync_apply_observer()` provides a post-commit remote apply
   hook for cache invalidation, metrics, and structured logging. Events include
   the unique affected DBI names in first-seen order.
+  `add_sync_apply_observer_for_dbis()` optionally restricts callback delivery
+  to commits affecting one of the registered local DBI names.
 - HTTP and WebSocket framework-neutral seams use `TransportMessageCodec`; DTOs
   do not carry bearer tokens, cookies, remote addresses, request ids, or trace
   ids.
@@ -170,9 +172,6 @@ tables.
 
 ## Suggested Next PRs
 
-- Add optional table identity filters on top of the affected DBI names already
-  reported by `ISyncApplyObserver`, if more cached wrappers need narrower
-  subscriptions.
 - Extend logical-frame capability negotiation only when a new adapter requires
   a compatibility distinction beyond the existing schema marker and adapter
   registry fail-closed checks.

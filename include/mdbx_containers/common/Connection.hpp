@@ -259,6 +259,19 @@ namespace mdbxc {
         std::uint64_t add_sync_apply_observer(
             sync::ISyncApplyObserver* observer);
 
+        /// \brief Registers a non-owning sync apply observer for named DBIs.
+        /// \details The observer is called only when a committed sync apply
+        /// changed at least one name in \p dbi_names. Names are copied when
+        /// registered. This filters callback delivery only; it does not filter
+        /// capture, delivery, or remote apply.
+        /// \return Token that can be passed to
+        /// \c remove_sync_apply_observer().
+        /// \throws std::invalid_argument if \p observer is null or
+        /// \p dbi_names is empty.
+        std::uint64_t add_sync_apply_observer_for_dbis(
+            sync::ISyncApplyObserver* observer,
+            const std::vector<std::string>& dbi_names);
+
         /// \brief Removes a previously registered sync apply observer.
         /// \details When this returns \c true, no callback for \p token is
         /// still running or will start later. If this is called from that
@@ -425,6 +438,12 @@ namespace mdbxc {
             const std::shared_ptr<SyncApplyObserverState>& state);
         void finish_sync_apply_observer_callback(
             const std::shared_ptr<SyncApplyObserverState>& state);
+        std::uint64_t add_sync_apply_observer_impl(
+            sync::ISyncApplyObserver* observer,
+            const std::vector<std::string>* dbi_names);
+        static bool sync_apply_observer_matches_dbi_names(
+            const SyncApplyObserverState& state,
+            const std::vector<std::string>& affected_dbi_names);
 
         friend class sync::SyncEngine;
         friend class sync::VectorStoreLogicalAdapter;
@@ -446,6 +465,8 @@ namespace mdbxc {
             sync::ISyncApplyObserver* observer;
             std::size_t in_flight;
             bool removed;
+            bool has_dbi_name_filter;
+            std::vector<std::string> dbi_names;
             std::vector<std::thread::id> active_callback_threads;
         };
 

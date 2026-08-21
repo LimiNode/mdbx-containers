@@ -313,6 +313,22 @@ namespace mdbxc {
 
     inline std::uint64_t Connection::add_sync_apply_observer(
         sync::ISyncApplyObserver* observer) {
+        return add_sync_apply_observer_impl(observer, nullptr);
+    }
+
+    inline std::uint64_t Connection::add_sync_apply_observer_for_dbis(
+        sync::ISyncApplyObserver* observer,
+        const std::vector<std::string>& dbi_names) {
+        if (dbi_names.empty()) {
+            throw std::invalid_argument(
+                "Connection::add_sync_apply_observer_for_dbis DBI names cannot be empty");
+        }
+        return add_sync_apply_observer_impl(observer, &dbi_names);
+    }
+
+    inline std::uint64_t Connection::add_sync_apply_observer_impl(
+        sync::ISyncApplyObserver* observer,
+        const std::vector<std::string>* dbi_names) {
         if (observer == nullptr) {
             throw std::invalid_argument(
                 "Connection::add_sync_apply_observer observer cannot be null");
@@ -324,6 +340,10 @@ namespace mdbxc {
         entry->observer = observer;
         entry->in_flight = 0;
         entry->removed = false;
+        entry->has_dbi_name_filter = dbi_names != nullptr;
+        if (dbi_names != nullptr) {
+            entry->dbi_names = *dbi_names;
+        }
         m_sync_apply_observers.push_back(entry);
         return entry->token;
     }
@@ -833,7 +853,9 @@ namespace mdbxc {
         for (std::size_t i = 0; i < m_sync_apply_observers.size(); ++i) {
             const std::shared_ptr<SyncApplyObserverState>& state =
                 m_sync_apply_observers[i];
-            if (!state->removed && state->observer != nullptr) {
+            if (!state->removed && state->observer != nullptr &&
+                sync_apply_observer_matches_dbi_names(
+                    *state, notification.affected_dbi_names)) {
                 SyncApplyObserverCallback callback;
                 callback.state = state;
                 callback.observer = state->observer;
@@ -846,6 +868,22 @@ namespace mdbxc {
             }
         }
         return notification;
+    }
+
+    inline bool Connection::sync_apply_observer_matches_dbi_names(
+        const SyncApplyObserverState& state,
+        const std::vector<std::string>& affected_dbi_names) {
+        if (!state.has_dbi_name_filter) {
+            return true;
+        }
+        for (std::size_t i = 0; i < state.dbi_names.size(); ++i) {
+            for (std::size_t j = 0; j < affected_dbi_names.size(); ++j) {
+                if (state.dbi_names[i] == affected_dbi_names[j]) {
+                    return true;
+                }
+            }
+        }
+        return false;
     }
 
     inline void Connection::notify_sync_apply_observers(
