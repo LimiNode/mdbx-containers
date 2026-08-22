@@ -21,6 +21,25 @@ either wholly inside one raw replication scope or outside selective raw
 replication. Table-level filtering of `ISyncApplyObserver` remains an
 invalidation convenience and does not imply delivery isolation.
 
+A selective scope is an additional projection of the complete raw stream, not
+a replacement replication authority. Every supported raw DBI continues to
+enter the existing global changelog and `CompleteUserDatabase` snapshot exactly
+as it does today. A scope adds its own capture, progress, retention, and
+delivery path for selected DBIs. This preserves existing full-raw receivers and
+their `_mdbxc_applied` cursors while allowing a different receiver to subscribe
+only to one or more scopes. A scoped receiver does not also consume global raw
+pulls for that `DbId`.
+
+```text
+source transaction { orders in Scope X, catalog unscoped }
+                    |                         |
+                    +---- global batch --------+
+                    |     { orders, catalog }  | --> full receiver / global cursor
+                    |
+                    +---- scoped batch --------+ --> Scope X receiver / scoped cursor
+                          { orders }
+```
+
 The first scoped protocol is limited to raw supported table DBIs. It excludes:
 
 - reserved `_mdbxc_` DBIs;
@@ -41,11 +60,10 @@ not be copied as a raw subset.
    one `ScopeId` to a sorted, unique manifest of named DBIs and their required
    DBI flags. The source and receiver compare the complete descriptor before
    any mutation.
-3. **One raw DBI has one replication authority.** During capture and apply, a
-   scoped DBI cannot also enter the existing unscoped raw changelog. A write
-   transaction that changes DBIs from different raw authorities fails closed;
-   the implementation must never split one caller transaction into unrelated
-   replicated commits.
+3. **Global history stays complete; selective membership is exclusive.** A
+   scoped DBI continues to enter the global raw changelog. It can belong to at
+   most one selective scope. The implementation captures the global batch and
+   any scoped projection in the same committing MDBX transaction.
 4. **Progress is per scope and origin.** The existing `_mdbxc_applied` cursor
    remains the progress record for complete raw replication only. Scoped
    progress is keyed by `(ScopeId, origin_node_id)` in a separate durable
@@ -57,9 +75,9 @@ not be copied as a raw subset.
    descriptor manifest and writes its scoped per-origin tail in the same MDBX
    transaction. It neither writes nor validates the global raw cursor.
 7. **Descriptor mismatch fails closed.** Different membership, DBI flags,
-   descriptor revision, source `DbId`, scope identity, or immutable snapshot
-   metadata invalidates the request/session. The receiver does not attempt a
-   best-effort intersection.
+   source `DbId`, scope identity, or immutable snapshot metadata invalidates
+   the request/session. The receiver does not attempt a best-effort
+   intersection.
 
 ## Descriptor And Membership Evolution
 
@@ -67,13 +85,8 @@ The implementation should persist a `ScopedReplicationDescriptor` containing:
 
 ```text
 ScopeId
-descriptor_revision
 sorted unique [(dbi_name, dbi_flags)]
 ```
-
-`descriptor_revision` is a source-issued, monotonically increasing value for
-diagnostics and snapshot-session validation; it is not a substitute for the
-full manifest comparison.
 
 Membership does not change in place. Adding, removing, renaming, or changing
 the flags of a DBI creates a new `ScopeId` and descriptor. The application must
@@ -93,6 +106,23 @@ Scoped replication needs a protocol family separate from existing raw
 those DTOs with an optional DBI filter would make a global cursor appear valid
 after only a subset of its operations was applied.
 
+The existing global raw protocol remains complete and unchanged: global pull
+and push carry every supported raw DBI, and `CompleteUserDatabase` continues to
+export every named non-reserved user DBI. Scoped peers use only the new protocol
+family for their manifests. A receiving environment chooses one durable raw
+delivery mode for a `DbId`:
+
+- **full-global mode** consumes the existing complete raw stream and no scoped
+  streams; or
+- **selective mode** consumes one or more disjoint scopes and no global raw
+  stream for that `DbId`.
+
+The mode is receiver-wide rather than per DBI because one global `ChangeBatch`
+can atomically contain operations for both scoped and unscoped DBIs. Filtering
+those operations at a selective receiver would again make an incomplete global
+cursor appear valid. A full-global receiver and one or more selective receivers
+can coexist for the same source database.
+
 The proposed family has these conceptual records:
 
 ```text
@@ -108,16 +138,19 @@ to the implementation PR. A peer without the scoped capability rejects the
 request; it must not silently fall back to complete raw pull/push.
 
 Every operation in `ScopedChangeBatch` names a DBI in the descriptor manifest.
-The source emits a batch only for a transaction whose captured changes all
-belong to that same scope. The receiver validates the descriptor and every DBI
-before opening its write transaction, then applies the batch and advances the
-matching scoped cursor atomically. Duplicate, gap, foreign-origin, and
-out-of-scope batches fail closed under the same contiguous-delivery principle
-as the existing raw cursor.
+The global batch always contains the complete caller transaction. If that
+transaction changes DBIs from one selective scope, the source atomically adds
+one scoped batch containing that scope's operations; it may also change
+unscoped DBIs. A transaction that changes DBIs from two selective scopes fails
+closed before commit, rather than splitting its scoped effects. The receiver
+validates the descriptor and every DBI before opening its write transaction,
+then applies the batch and advances the matching scoped cursor atomically.
+Duplicate, gap, foreign-origin, and out-of-scope batches fail closed under the
+same contiguous-delivery principle as the existing raw cursor.
 
-Unscoped raw replication continues unchanged for DBIs with no scope owner.
-The first implementation must define a capture-time authority lookup, rather
-than filtering the global changelog after the fact.
+The first implementation must define a capture-time scope-membership lookup and
+write the scoped projection beside, not instead of, the global capture. It must
+not filter the global changelog after the fact.
 
 ## Scoped Baseline And Resume
 
@@ -146,23 +179,29 @@ never resume another scope.
 
 The initial receiver eligibility rule should be conservative: every DBI in the
 descriptor must be absent or explicitly replaceable by the scoped-baseline API,
-and no conflicting unscoped or logical progress may claim it. The detailed
-overwrite policy belongs with the implementation API, but it must be explicit;
-a partial baseline is not an implicit repair of unrelated replica state.
+the receiver must not have an active global raw cursor for that `DbId`, and no
+logical apply state may claim those DBIs. The detailed overwrite policy belongs
+with the implementation API, but it must be explicit; a partial baseline is not
+an implicit repair of unrelated replica state. Moving an existing full-global
+receiver to selective mode requires an explicit fresh-receiver or reset-and-
+bootstrap procedure; it is not an in-place cursor conversion.
 
 ## Retention And Operational Rules
 
-The source needs a scoped changelog and a retention watermark per scope and
-origin. It cannot infer safe pruning from `_mdbxc_applied`, because a receiver
-may subscribe to one scope but not another. Operators retain scoped history
-until every relevant receiver has advanced past it or the declared recovery
-policy permits a scoped baseline.
+The source retains the existing complete global changelog under its current
+contract and additionally needs a scoped changelog and retention watermark per
+scope and origin. It cannot infer safe scoped pruning from `_mdbxc_applied`,
+because a receiver may subscribe to one scope but not another. Operators retain
+scoped history until every relevant receiver has advanced past it or the
+declared recovery policy permits a scoped baseline.
 
 Changing a receiver's scope membership requires an application-coordinated
 cutover: stop the old scoped worker, ensure the old route is drained or its
 recovery horizon is retained, bootstrap the new scope, and start its worker
 from the new scoped cursor. No worker may reinterpret old scoped progress as
-progress for a new descriptor.
+progress for a new descriptor. Switching full-global and selective receiver
+modes is a distinct cutover and uses the fresh-receiver or reset-and-bootstrap
+procedure above.
 
 Authentication and authorization remain transport-local, but a production
 adapter must authorize the requested `ScopeId` in addition to `DbId` and node
@@ -175,6 +214,8 @@ This design deliberately does not provide:
 
 - predicate, row, key-range, or tenant filtering inside a DBI;
 - cross-scope atomic writes or automatic transaction splitting;
+- a hybrid receiver that consumes global raw for some DBIs and scoped delivery
+  for others;
 - automatic scope membership discovery or migration;
 - logical-table selective replication;
 - multi-peer fan-out, conflict resolution, or CRDT semantics; or
@@ -184,10 +225,11 @@ This design deliberately does not provide:
 
 Implementation should be split into reviewable PRs:
 
-1. Persist and validate immutable scope descriptors, including exclusive raw
-   DBI ownership and negative registration tests.
-2. Add scope-local capture/changelog/cursor storage and prove that mixed-scope
-   or scoped-plus-unscoped write transactions reject before commit.
+1. Persist and validate immutable scope descriptors, including exclusive
+   selective membership and negative registration tests.
+2. Add scope-local capture/changelog/cursor storage and prove that a
+   scoped-plus-unscoped transaction publishes an atomic full global batch plus
+   its scoped projection, while mixed-scope transactions reject before commit.
 3. Add capability-gated scoped pull/push and tests for contiguous delivery,
    duplicates, gaps, foreign scope, descriptor mismatch, and restart.
 4. Add scoped snapshot sessions, staging, and optional persisted resume with
@@ -197,4 +239,7 @@ Implementation should be split into reviewable PRs:
 Each phase must run the relevant C++11 and C++17 sync tests. End-to-end tests
 must demonstrate that two receivers can converge different disjoint scopes,
 that an out-of-scope DBI never appears at the receiver, and that a scoped
-baseline cannot modify global raw progress.
+baseline cannot modify global raw progress. They must also prove that adding a
+scope never removes its DBIs from an existing full-raw receiver's changelog or
+complete-database baseline, and that a receiver rejects any attempt to mix a
+global raw stream with scoped delivery for the same `DbId`.
