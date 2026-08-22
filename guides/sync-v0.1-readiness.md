@@ -178,12 +178,11 @@ tables.
 - Extend `KeyMultiValueTable` logical capture only after every added bulk or
   reconcile operation has explicit multiset replay semantics and round-trip
   coverage. Raw capture remains disabled.
-- Design scope-aware partial snapshot continuation separately from complete
-  database recovery. A partial manifest cannot bootstrap the global per-origin
-  applied cursor: this requires a stable scope identity, per-scope or per-DBI
-  applied progress, scope-filtered changelog pull and retention, and explicit
-  handling for DBI membership changes. Do not add these piecemeal to the raw
-  sync path; implement them only when a consumer needs selective replication.
+- Implement scope-aware partial snapshot continuation only under the
+  [selective replication design](sync-selective-replication-design.md). A
+  partial manifest cannot bootstrap the global per-origin applied cursor; the
+  implementation needs separate scope identity, progress, changelog, retention,
+  and membership-cutover semantics.
 - Define explicit conflict/CRDT semantics before claiming general concurrent
   multi-writer convergence for `KeyMultiValueTable`.
 - Design baseline import and multi-origin histories for schema v2 separately;

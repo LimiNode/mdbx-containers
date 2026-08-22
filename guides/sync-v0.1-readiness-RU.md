@@ -67,8 +67,10 @@ frames не входят в raw pull/push. Replay watermark создаётся �
 - Новые logical-frame capability различия — только при реальном adapter-е.
 - Новые `KeyMultiValueTable` операции — только с explicit multiset replay и
   round-trip coverage.
-- Scope-aware partial snapshot требует stable scope identity, отдельного
-  applied progress, filtered changelog/retention и правил изменения DBI set.
+- Scope-aware partial snapshot continuation реализуется только по
+  [проектированию выборочной репликации](sync-selective-replication-design-RU.md):
+  нужны отдельные scope identity, progress, changelog, retention и правила
+  membership cutover.
 - General multi-writer для `KeyMultiValueTable`, baseline/multi-origin schema-v2
   и модели `AnyValueTable`/`HashedKeyValueStore` требуют отдельных дизайнов.
 
