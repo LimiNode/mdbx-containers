@@ -56,28 +56,32 @@ not be copied as a raw subset.
 1. **Scope identity is durable and explicit.** `ScopeId` is an opaque,
    application-assigned, non-empty canonical byte string. It is not derived
    from a DBI list, a process-local DBI handle, or a receiver route.
-2. **Membership is immutable for a scope identity.** A durable descriptor maps
-   one `ScopeId` to a sorted, unique manifest of named DBIs and their required
-   DBI flags. The source and receiver compare the complete descriptor before
-   any mutation.
+2. **Membership and write authority are immutable for a scope identity.** A
+   durable descriptor maps one `ScopeId` to one non-zero designated writer
+   origin and a sorted, unique manifest of named DBIs and their required DBI
+   flags. The source and receiver compare the complete descriptor before any
+   mutation.
 3. **Global history stays complete; selective membership is exclusive.** A
    scoped DBI continues to enter the global raw changelog. It can belong to at
    most one selective scope. The implementation captures the global batch and
    any scoped projection in the same committing MDBX transaction.
-4. **Progress is per scope and origin.** The existing `_mdbxc_applied` cursor
+4. **Progress is one stream per scope.** The existing `_mdbxc_applied` cursor
    remains the progress record for complete raw replication only. Scoped
-   progress is keyed by `(ScopeId, origin_node_id)` in a separate durable
-   store, and advances only after a contiguous scoped batch commits.
-5. **Retention is per scope.** A source retains and prunes scoped history using
-   the scoped cursor contract. A receiver behind that retained history gets a
-   scope-specific `SnapshotRequired`; it must not consume later batches.
+   progress is keyed by `ScopeId` in a separate durable store, represents the
+   designated writer origin's sequence, and advances only after a contiguous
+   scoped batch commits.
+5. **Retention is per scope.** The designated writer retains and prunes scoped
+   history using the scoped cursor contract. A receiver behind that retained
+   history gets a scope-specific `SnapshotRequired`; it must not consume later
+   batches.
 6. **A scoped baseline is atomic.** A completed baseline replaces only the
-   descriptor manifest and writes its scoped per-origin tail in the same MDBX
-   transaction. It neither writes nor validates the global raw cursor.
+   descriptor manifest and writes the designated writer origin's scoped tail in
+   the same MDBX transaction. It neither writes nor validates the global raw
+   cursor.
 7. **Descriptor mismatch fails closed.** Different membership, DBI flags,
-   source `DbId`, scope identity, or immutable snapshot metadata invalidates
-   the request/session. The receiver does not attempt a best-effort
-   intersection.
+   designated writer origin, source `DbId`, scope identity, or immutable
+   snapshot metadata invalidates the request/session. The receiver does not
+   attempt a best-effort intersection.
 
 ## Descriptor And Membership Evolution
 
@@ -85,19 +89,35 @@ The implementation should persist a `ScopedReplicationDescriptor` containing:
 
 ```text
 ScopeId
+designated_writer_origin (non-zero NodeId)
 sorted unique [(dbi_name, dbi_flags)]
 ```
 
-Membership does not change in place. Adding, removing, renaming, or changing
-the flags of a DBI creates a new `ScopeId` and descriptor. The application must
-drain or retire the old scope according to its retention policy, bootstrap the
-new scope, and only then route receivers to it. This prevents a receiver from
+**Global writer invariant.** Selective scope v1 requires one globally enforced
+writer for every DBI in its manifest. Before selective replication activates,
+the application must install and validate this same descriptor on every known
+origin for the `DbId` that can open a manifest DBI for local application
+writes. The designated writer accepts those writes; every other such origin
+must reject them before mutation and global capture. An origin without the
+descriptor must be configured without local write access to scoped DBIs;
+otherwise the topology is invalid and the scope must not activate. The
+application or installed scope guards enforce this rule. Descriptor deployment
+and write-access revocation are application-coordinated; this v1 design
+provides no dynamic writer discovery.
+
+Neither membership nor write authority changes in place. Adding, removing,
+renaming, or changing the flags of a DBI, or changing the designated writer
+origin, creates a new `ScopeId` and descriptor. The application must drain or
+retire the old scope according to its retention policy, bootstrap the new
+scope, and only then route receivers to it. This prevents a receiver from
 silently interpreting a cursor for `{orders}` as a cursor for
-`{orders, invoices}`.
+`{orders, invoices}`, or treating a new writer's sequence as a continuation of
+the old writer's stream.
 
 An application may intentionally configure two immutable scopes with different
 DBI sets. They must remain disjoint. A table move is therefore a controlled
-cutover, not an automatic membership update.
+cutover, not an automatic membership update. A writer-origin move is the same
+kind of controlled cutover, not a failover within an existing scope.
 
 ## Capture, Wire, And Apply
 
@@ -128,29 +148,39 @@ The proposed family has these conceptual records:
 ```text
 ScopedPullRequest     = DbId + requester + ScopeId + scoped cursor
 ScopedPullResponse    = descriptor + contiguous scoped batches or error
-ScopedChangeBatch     = ScopeId + origin + scope-local sequence + operations
+ScopedChangeBatch     = ScopeId + designated writer origin + scope-local sequence + operations
 ScopedSnapshotRequest = ScopeId + empty scoped cursor
 ScopedSnapshotChunk   = immutable descriptor + scoped source tail + page data
 ```
 
 The concrete codec version, capability names, and public C++ types are deferred
 to the implementation PR. A peer without the scoped capability rejects the
-request; it must not silently fall back to complete raw pull/push.
+request; it must not silently fall back to complete raw pull/push. A scoped
+request must target the descriptor's designated writer origin; another peer
+rejects it rather than relaying scoped history.
 
-Every operation in `ScopedChangeBatch` names a DBI in the descriptor manifest.
-The global batch always contains the complete caller transaction. If that
-transaction changes DBIs from one selective scope, the source atomically adds
-one scoped batch containing that scope's operations; it may also change
-unscoped DBIs. A transaction that changes DBIs from two selective scopes fails
-closed before commit, rather than splitting its scoped effects. The receiver
-validates the descriptor and every DBI before opening its write transaction,
-then applies the batch and advances the matching scoped cursor atomically.
-Duplicate, gap, foreign-origin, and out-of-scope batches fail closed under the
-same contiguous-delivery principle as the existing raw cursor.
+Every operation in `ScopedChangeBatch` names a DBI in the descriptor manifest,
+and its origin must equal the descriptor's designated writer origin. Only that
+origin may make local application mutations to a scoped DBI or create its
+scoped projection; a local mutation by another origin fails closed before
+commit. This does not change full-global apply: a node may still apply raw
+history received from another origin, but it must not present that history as a
+scoped relay.
 
-The first implementation must define a capture-time scope-membership lookup and
-write the scoped projection beside, not instead of, the global capture. It must
-not filter the global changelog after the fact.
+The global batch always contains the complete caller transaction. If a
+transaction at the designated writer changes DBIs from one selective scope, the
+source atomically adds one scoped batch containing that scope's operations; it
+may also change unscoped DBIs. A transaction that changes DBIs from two
+selective scopes fails closed before commit, rather than splitting its scoped
+effects. The receiver validates the descriptor, designated writer origin, and
+every DBI before opening its write transaction, then applies the batch and
+advances the matching scoped cursor atomically. Duplicate, gap, wrong-writer,
+and out-of-scope batches fail closed under the same contiguous-delivery
+principle as the existing raw cursor.
+
+The first implementation must define a capture-time scope-membership and
+designated-writer lookup and write the scoped projection beside, not instead
+of, the global capture. It must not filter the global changelog after the fact.
 
 ## Scoped Baseline And Resume
 
@@ -162,9 +192,13 @@ For a scoped `SnapshotRequired` the source captures, in one stable read
 transaction:
 
 - the immutable descriptor and all DBI data in its manifest;
-- the scope-local per-origin source tail; and
+- the designated writer origin's scope-local source tail; and
 - an opaque snapshot session id and immutable page-zero metadata.
 
+The scoped baseline is served directly by the designated writer origin, whose
+DBI state in the captured read transaction is authoritative for that scope. A
+node that merely received its global raw history is not a scoped baseline
+source.
 The receiver validates and stages all pages before mutating live DBIs. On the
 final page it replaces the descriptor manifest, writes scoped progress equal to
 the captured tail, and discards staging in one transaction. DBIs outside the
@@ -188,9 +222,9 @@ bootstrap procedure; it is not an in-place cursor conversion.
 
 ## Retention And Operational Rules
 
-The source retains the existing complete global changelog under its current
-contract and additionally needs a scoped changelog and retention watermark per
-scope and origin. It cannot infer safe scoped pruning from `_mdbxc_applied`,
+The designated writer retains the existing complete global changelog under its
+current contract and additionally needs a scoped changelog and retention
+watermark per scope. It cannot infer safe scoped pruning from `_mdbxc_applied`,
 because a receiver may subscribe to one scope but not another. Operators retain
 scoped history until every relevant receiver has advanced past it or the
 declared recovery policy permits a scoped baseline.
@@ -218,6 +252,9 @@ This design deliberately does not provide:
   for others;
 - automatic scope membership discovery or migration;
 - logical-table selective replication;
+- multi-origin selective replication, designated-writer failover, or relay of
+  scoped history/baselines through a node that only received global raw
+  history;
 - multi-peer fan-out, conflict resolution, or CRDT semantics; or
 - reuse of global complete-database recovery state for a partial scope.
 
@@ -225,13 +262,15 @@ This design deliberately does not provide:
 
 Implementation should be split into reviewable PRs:
 
-1. Persist and validate immutable scope descriptors, including exclusive
-   selective membership and negative registration tests.
+1. Persist and validate immutable scope descriptors, including the non-zero
+   designated writer origin, exclusive selective membership, and negative
+   registration tests.
 2. Add scope-local capture/changelog/cursor storage and prove that a
    scoped-plus-unscoped transaction publishes an atomic full global batch plus
    its scoped projection, while mixed-scope transactions reject before commit.
 3. Add capability-gated scoped pull/push and tests for contiguous delivery,
-   duplicates, gaps, foreign scope, descriptor mismatch, and restart.
+   duplicates, gaps, wrong writer, foreign scope, descriptor mismatch, and
+   restart.
 4. Add scoped snapshot sessions, staging, and optional persisted resume with
    atomic final replacement and scoped cursor bootstrap.
 5. Add retention/pruning and controlled membership-cutover tests.
@@ -241,5 +280,11 @@ must demonstrate that two receivers can converge different disjoint scopes,
 that an out-of-scope DBI never appears at the receiver, and that a scoped
 baseline cannot modify global raw progress. They must also prove that adding a
 scope never removes its DBIs from an existing full-raw receiver's changelog or
-complete-database baseline, and that a receiver rejects any attempt to mix a
-global raw stream with scoped delivery for the same `DbId`.
+complete-database baseline, that an unauthorized local writer is rejected
+before mutation and global capture, that after restart the same non-designated
+origin restores its descriptor and still rejects the write, that a scoped
+baseline is accepted only from the designated writer, that changing the writer
+uses a new `ScopeId`, and that a receiver rejects any attempt to mix a global
+raw stream with scoped delivery for the same `DbId`. In particular, a test with
+designated writer `A` and non-designated writer `B` using the same descriptor
+must prove that `B` cannot write a scoped DBI before or after restart.

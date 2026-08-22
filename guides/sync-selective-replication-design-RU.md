@@ -56,29 +56,31 @@ schema, replay, порядок и delivery конкретному получат
 1. **Идентификатор области постоянный и явный.** `ScopeId` — непрозрачная,
    заданная приложением непустая каноническая строка байтов. Он не выводится из
    списка DBI, локального DBI handle или маршрута получателя.
-2. **Состав неизменен для одного идентификатора области.** Постоянный descriptor
-   сопоставляет одному `ScopeId` отсортированный уникальный manifest именованных
-   DBI и требуемых DBI flags. До любой мутации источник и получатель сравнивают
-   descriptor целиком.
+2. **Состав и право записи неизменны для одного идентификатора области.**
+   Постоянный descriptor сопоставляет одному `ScopeId` один ненулевой
+   назначенный origin с правом записи и отсортированный уникальный manifest
+   именованных DBI и требуемых DBI flags. До любой мутации источник и получатель
+   сравнивают descriptor целиком.
 3. **Global history остаётся полной; selective membership эксклюзивен.** Scoped
    DBI продолжает попадать в global raw changelog, но может принадлежать не
    более чем одной selective области. Реализация захватывает global batch и
    scoped projection в той же фиксируемой MDBX-транзакции.
-4. **Прогресс ведётся по области и origin.** Существующий cursor
-   `_mdbxc_applied` остаётся записью прогресса только для полной raw
-   репликации. Scoped progress хранится в отдельном постоянном store по ключу
-   `(ScopeId, origin_node_id)` и продвигается лишь после commit непрерывного
-   scoped batch.
-5. **История хранится по области.** Источник хранит и чистит scoped history по
-   scoped cursor contract. Получатель, отставший от сохранённой истории,
-   получает `SnapshotRequired` именно для области и не принимает поздние batch.
+4. **Прогресс — один поток на область.** Существующий cursor `_mdbxc_applied`
+   остаётся записью прогресса только для полной raw репликации. Scoped progress
+   хранится в отдельном постоянном store по ключу `ScopeId`, отражает sequence
+   назначенного origin с правом записи и продвигается лишь после commit
+   непрерывного scoped batch.
+5. **История хранится по области.** Назначенный origin с правом записи хранит и
+   чистит scoped history по scoped cursor contract. Получатель, отставший от
+   сохранённой истории, получает `SnapshotRequired` именно для области и не
+   принимает поздние batch.
 6. **Scoped baseline атомарен.** Завершённый baseline заменяет только manifest
-   descriptor-а и в той же MDBX-транзакции записывает scoped tail всех origin.
-   Он не пишет и не проверяет global raw cursor.
-7. **Несовпадение descriptor-а отклоняется.** Разный состав, DBI flags, source
-   `DbId`, scope identity или неизменяемые metadata snapshot session делают
-   request/session недействительным. Получатель не строит best-effort
-   пересечение.
+   descriptor-а и в той же MDBX-транзакции записывает scoped tail назначенного
+   origin с правом записи. Он не пишет и не проверяет global raw cursor.
+7. **Несовпадение descriptor-а отклоняется.** Разный состав, DBI flags,
+   назначенный origin с правом записи, source `DbId`, scope identity или
+   неизменяемые metadata snapshot session делают request/session недействительным.
+   Получатель не строит best-effort пересечение.
 
 ## Descriptor и изменение состава
 
@@ -86,18 +88,36 @@ schema, replay, порядок и delivery конкретному получат
 
 ```text
 ScopeId
+designated_writer_origin (ненулевой NodeId)
 sorted unique [(dbi_name, dbi_flags)]
 ```
 
-Состав не меняется на месте. Добавление, удаление, переименование DBI или смена
-её flags создаёт новый `ScopeId` и descriptor. Приложение должно завершить или
-вывести из эксплуатации старую область по своей retention policy, bootstrap-ить
-новую область и лишь затем направить на неё получателей. Это не даёт получателю
-незаметно принять cursor для `{orders}` за cursor для `{orders, invoices}`.
+**Глобальный инвариант записи.** Selective scope v1 требует одного глобально
+контролируемого origin с правом записи для каждой DBI из manifest-а. До
+активации selective replication приложение обязано установить и проверить тот
+же descriptor на каждом известном origin для `DbId`, способном открыть DBI из
+manifest-а для локальной записи приложения. Назначенный origin с правом записи
+принимает такие записи; каждый другой origin обязан отклонить их до мутации и
+global capture. Origin без descriptor-а должен быть настроен без локального
+доступа на запись в scoped DBI; иначе topology недействительна и область нельзя
+активировать. Это правило обеспечивает приложение либо установленные scope
+guards. Развёртывание descriptor-а и отзыв права записи координирует
+приложение; в этом дизайне v1 нет динамического обнаружения origin с правом
+записи.
+
+Ни состав, ни право записи не меняются на месте. Добавление, удаление,
+переименование DBI, смена её flags или назначенного origin с правом записи
+создают новый `ScopeId` и descriptor. Приложение должно завершить или вывести из
+эксплуатации старую область по своей retention policy, bootstrap-ить новую
+область и лишь затем направить на неё получателей. Это не даёт получателю
+незаметно принять cursor для `{orders}` за cursor для `{orders, invoices}` или
+считать sequence нового origin с правом записи продолжением потока прежнего.
 
 Приложение может намеренно создать две неизменяемые области с разными наборами
 DBI. Их составы должны быть непересекающимися. Поэтому перенос таблицы —
-контролируемый cutover, а не автоматическое изменение состава.
+контролируемый cutover, а не автоматическое изменение состава. Смена origin с
+правом записи — такой же контролируемый cutover, а не failover внутри существующей
+области.
 
 ## Захват, wire и применение
 
@@ -128,29 +148,39 @@ selective receivers могут сосуществовать для одной б
 ```text
 ScopedPullRequest     = DbId + requester + ScopeId + scoped cursor
 ScopedPullResponse    = descriptor + непрерывные scoped batches или error
-ScopedChangeBatch     = ScopeId + origin + sequence области + operations
+ScopedChangeBatch     = ScopeId + назначенный origin с правом записи + sequence области + operations
 ScopedSnapshotRequest = ScopeId + пустой scoped cursor
 ScopedSnapshotChunk   = неизменяемый descriptor + scoped source tail + page data
 ```
 
 Конкретная версия codec, имена capability и публичные C++ types определяются
 только в implementation PR. Peer без scoped capability отклоняет request и не
-переходит молча к полному raw pull/push.
+переходит молча к полному raw pull/push. Scoped request направляется
+назначенному descriptor-ом origin с правом записи; другой peer отклоняет его,
+а не передаёт scoped history дальше.
 
-Каждая операция `ScopedChangeBatch` называет DBI из manifest descriptor-а.
-Global batch всегда содержит полную транзакцию приложения. Если она изменяет
-DBI одной selective области, источник атомарно добавляет scoped batch только с
-операциями этой области; при этом транзакция может изменить и unscoped DBI.
-Транзакция, изменяющая DBI двух selective областей, отклоняется до commit, а не
-разделяет scoped effects. Получатель проверяет descriptor и каждую DBI до
-открытия write transaction, применяет batch и атомарно продвигает
-соответствующий scoped cursor. Duplicate, gap, foreign origin и batch вне
-области отклоняются по тому же принципу непрерывной доставки, что и нынешний
-raw cursor.
+Каждая операция `ScopedChangeBatch` называет DBI из manifest descriptor-а, а
+его origin обязан совпадать с назначенным в descriptor-е origin с правом
+записи. Только этот origin может выполнять локальные мутации приложения в scoped DBI и
+создавать её scoped projection; локальная мутация от другого origin
+отклоняется до commit. Это не меняет full-global apply: узел по-прежнему может
+применить raw history, полученную от другого origin, но не может выдавать её за
+scoped relay.
 
-Первая реализация обязана находить membership области во время capture и писать
-scoped projection рядом с global capture, а не вместо него. Global changelog
-нельзя фильтровать постфактум.
+Global batch всегда содержит полную транзакцию приложения. Если транзакция на
+назначенном origin с правом записи изменяет DBI одной selective области,
+источник атомарно добавляет scoped batch только с операциями этой области; при этом
+транзакция может изменить и unscoped DBI. Транзакция, изменяющая DBI двух
+selective областей, отклоняется до commit, а не разделяет scoped effects.
+Получатель проверяет descriptor, назначенный origin с правом записи и каждую
+DBI до открытия write transaction, применяет batch и атомарно продвигает
+соответствующий scoped cursor. Duplicate, gap, origin, не совпадающий с
+назначенным, и batch вне области отклоняются по тому же принципу непрерывной доставки, что и
+нынешний raw cursor.
+
+Первая реализация обязана находить membership области и назначенный origin с
+правом записи во время capture и писать scoped projection рядом с global
+capture, а не вместо него. Global changelog нельзя фильтровать постфактум.
 
 ## Scoped baseline и resume
 
@@ -162,13 +192,17 @@ Scoped baseline нужен только для восстановления од
 захватывает:
 
 - неизменяемый descriptor и данные всех DBI его manifest-а;
-- scope-local source tail по всем origin; и
+- scope-local source tail назначенного origin с правом записи; и
 - непрозрачный snapshot session id вместе с неизменяемыми metadata page zero.
 
-Получатель проверяет и staging-ит все pages до изменения live DBI. На final page
-он заменяет DBI manifest-а, записывает scoped progress, равный captured tail, и
-удаляет staging одной транзакцией. DBI вне области и `_mdbxc_applied` остаются
-без изменений.
+Scoped baseline выдаёт напрямую назначенный origin с правом записи; состояние
+его DBI в захваченной read transaction считается каноническим для области.
+Узел, который лишь получил его global raw history, не является источником
+scoped baseline.
+Получатель проверяет и staging-ит все pages до изменения live DBI. На final
+page он заменяет DBI manifest-а, записывает scoped progress, равный captured
+tail, и удаляет staging одной транзакцией. DBI вне области и `_mdbxc_applied`
+остаются без изменений.
 
 Persistent resume, когда он появится, обязан ключевать staging как минимум по
 `ScopeId`, source `DbId` и snapshot id. Resume допустим только для session с
@@ -188,13 +222,13 @@ fresh receiver либо reset-and-bootstrap; это не in-place conversion cur
 
 ## Retention и эксплуатационные правила
 
-Источник сохраняет существующий полный global changelog по его нынешнему
-контракту и дополнительно нуждается в scoped changelog и retention watermark
-для каждой области и origin. Без этого нельзя безопасно чистить scoped history,
-ориентируясь на `_mdbxc_applied`: получатель может подписаться на одну область,
-но не на другую. Оператор хранит scoped history, пока каждый относящийся к ней
-получатель не продвинется дальше либо объявленная recovery policy не разрешит
-scoped baseline.
+Назначенный origin с правом записи сохраняет существующий полный global
+changelog по его нынешнему контракту и дополнительно нуждается в scoped changelog и
+retention watermark для каждой области. Без этого нельзя безопасно чистить
+scoped history, ориентируясь на `_mdbxc_applied`: получатель может подписаться
+на одну область, но не на другую. Оператор хранит scoped history, пока каждый
+относящийся к ней получатель не продвинется дальше либо объявленная recovery
+policy не разрешит scoped baseline.
 
 Изменение membership области у получателя требует application-coordinated
 cutover: остановить старый scoped worker, дождаться drain старого маршрута либо
@@ -220,6 +254,8 @@ reset-and-bootstrap.
   для других;
 - автоматическое обнаружение или миграцию состава области;
 - выборочную репликацию logical tables;
+- multi-origin selective replication, failover назначенного origin с правом записи или
+  relay scoped history/baseline через узел, получивший лишь global raw history;
 - fan-out на несколько peer-ов, разрешение конфликтов или CRDT semantics; и
 - переиспользование global complete-database recovery state для partial scope.
 
@@ -227,13 +263,15 @@ reset-and-bootstrap.
 
 Реализацию следует разбить на проверяемые PR:
 
-1. Постоянное хранение и проверка неизменяемых scope descriptor-ов, exclusive
-   selective membership и negative registration tests.
+1. Постоянное хранение и проверка неизменяемых scope descriptor-ов, включая
+   ненулевой назначенный origin с правом записи, exclusive selective membership
+   и negative registration tests.
 2. Scope-local capture/changelog/cursor storage и доказательство, что
    scoped-plus-unscoped transaction публикует атомарный полный global batch и
    его scoped projection, а mixed-scope transaction отклоняется до commit.
 3. Capability-gated scoped pull/push и tests для contiguous delivery,
-   duplicates, gaps, foreign scope, descriptor mismatch и restart.
+   duplicates, gaps, origin, не совпадающего с назначенным, foreign scope,
+   descriptor mismatch и restart.
 4. Scoped snapshot sessions, staging и optional persisted resume с atomic final
    replacement и bootstrap scoped cursor.
 5. Retention/pruning и tests контролируемого membership cutover.
@@ -243,5 +281,13 @@ reset-and-bootstrap.
 что DBI вне области никогда не появляется у получателя и что scoped baseline не
 может изменить global raw progress. Они также должны доказать, что добавление
 области не удаляет её DBI из changelog или complete-database baseline
-существующего full-raw receiver-а и что один получатель не может применить
-global и scoped delivery для одного `DbId`.
+существующего full-raw receiver-а, что локальный origin, не назначенный для
+записи,
+отклоняется до мутации и global capture, что после restart этот origin
+восстанавливает descriptor и всё ещё отклоняет запись, что scoped baseline
+принимается только от назначенного origin с правом записи, что смена origin с
+правом записи использует новый `ScopeId` и что один получатель не может
+применить global и scoped delivery для одного `DbId`. В частности, test с
+назначенным origin `A` и не назначенным origin `B`, использующими один
+descriptor, должен доказать, что `B` не может записать scoped DBI ни до, ни
+после restart.
