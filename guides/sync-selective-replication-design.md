@@ -68,8 +68,8 @@ not be copied as a raw subset.
 4. **Progress is one stream per scope.** The existing `_mdbxc_applied` cursor
    remains the progress record for complete raw replication only. Scoped
    progress is keyed by `ScopeId` in a separate durable store, represents the
-   designated writer origin's sequence, and advances only after a contiguous
-   scoped batch commits.
+   designated writer origin's scope-local sequence, and advances only after a
+   contiguous scoped batch commits.
 5. **Retention is per scope.** The designated writer retains and prunes scoped
    history using the scoped cursor contract. A receiver behind that retained
    history gets a scope-specific `SnapshotRequired`; it must not consume later
