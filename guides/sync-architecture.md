@@ -114,6 +114,7 @@ required only for supported public entry points, not for internal leaves.
 | --- | --- |
 | Which table is supported and under what semantics? | [Sync table coverage matrix](sync-table-coverage.md) |
 | Is a feature ready for v0.1 and what is deferred? | [Sync v0.1 readiness checklist](sync-v0.1-readiness.md) |
+| How will selected raw DBIs replicate independently? | [Selective replication design](sync-selective-replication-design.md) |
 | How should production transport be secured and operated? | [Sync transport production notes](sync-transport-production.md) |
 | What are the complete wire, storage, and recovery invariants? | [`sync/DESIGN.md`](../include/mdbx_containers/sync/DESIGN.md) |
 | Which sync contract fits a dataset and writer model? | [`docs/sync-use-cases.md`](../docs/sync-use-cases.md) |
