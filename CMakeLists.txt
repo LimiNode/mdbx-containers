@@ -453,6 +453,10 @@ endif()
 if(MDBXC_BUILD_TESTS)
     include(CTest)
     enable_testing()
+    add_test(NAME agent_policy_checks
+        COMMAND ${CMAKE_COMMAND}
+            "-DMDBXC_SOURCE_DIR=${CMAKE_CURRENT_SOURCE_DIR}"
+            -P "${CMAKE_CURRENT_SOURCE_DIR}/cmake/AgentPolicyChecks.cmake")
     file(GLOB TESTS CONFIGURE_DEPENDS tests/*.cpp)
     set(MDBXC_STRESS_TESTS
         test_sync_stress

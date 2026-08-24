@@ -1292,29 +1292,29 @@ void test_stores_require_open() {
 
         MetaStore meta(conn->env_handle());
         expect_open_required("MetaStore::get_db_uuid", meta,
-                            [&] { (void)meta.get_db_uuid(txn.handle()); });
+                            [&meta, &txn] { (void)meta.get_db_uuid(txn.handle()); });
         expect_open_required("MetaStore::set_db_uuid", meta,
-                            [&] { meta.set_db_uuid(txn.handle(), make_node(0xA0)); });
+                            [&meta, &txn] { meta.set_db_uuid(txn.handle(), make_node(0xA0)); });
         expect_open_required("MetaStore::get_local_seq", meta,
-                            [&] { (void)meta.get_local_seq(txn.handle()); });
+                            [&meta, &txn] { (void)meta.get_local_seq(txn.handle()); });
         expect_open_required("MetaStore::increment_local_seq", meta,
-                            [&] { (void)meta.increment_local_seq(txn.handle()); });
+                            [&meta, &txn] { (void)meta.increment_local_seq(txn.handle()); });
 
         AppliedStore applied(conn->env_handle());
         expect_open_required("AppliedStore::last_applied_seq", applied,
-                            [&] { (void)applied.last_applied_seq(txn.handle(), make_node(0xB0)); });
+                            [&applied, &txn] { (void)applied.last_applied_seq(txn.handle(), make_node(0xB0)); });
         expect_open_required("AppliedStore::set_last_applied_seq", applied,
-                            [&] { applied.set_last_applied_seq(txn.handle(), make_node(0xB0), 1); });
+                            [&applied, &txn] { applied.set_last_applied_seq(txn.handle(), make_node(0xB0), 1); });
 
         ChangeLogStore change(conn->env_handle());
         expect_open_required("ChangeLogStore::append", change,
-                            [&] { change.append(txn.handle(), make_node(0xC0), 1, { 0x01 }); });
+                            [&change, &txn] { change.append(txn.handle(), make_node(0xC0), 1, { 0x01 }); });
         expect_open_required("ChangeLogStore::contains", change,
-                            [&] { (void)change.contains(txn.handle(), make_node(0xC0), 1); });
+                            [&change, &txn] { (void)change.contains(txn.handle(), make_node(0xC0), 1); });
         expect_open_required("ChangeLogStore::erase", change,
-                            [&] { (void)change.erase(txn.handle(), make_node(0xC0), 1); });
+                            [&change, &txn] { (void)change.erase(txn.handle(), make_node(0xC0), 1); });
         expect_open_required("ChangeLogStore::prune_up_to", change,
-                            [&] { (void)change.prune_up_to(txn.handle(), make_node(0xC0), 1); });
+                            [&change, &txn] { (void)change.prune_up_to(txn.handle(), make_node(0xC0), 1); });
         expect_open_required("ChangeLogStore::origin_index_matches_changelog", change,
                             [&change, &txn] { (void)change.origin_index_matches_changelog(txn.handle()); });
         expect_open_required("ChangeLogStore::rebuild_origin_index", change,
@@ -1336,13 +1336,13 @@ void test_stores_require_open() {
         IdentityIndexStore identity(conn->env_handle());
         IdentityIndexValue iv;
         expect_open_required("IdentityIndexStore::put", identity,
-                            [&] { identity.put(txn.handle(), "t", { 0x01 }, iv); });
+                            [&identity, &iv, &txn] { identity.put(txn.handle(), "t", { 0x01 }, iv); });
         expect_open_required("IdentityIndexStore::get", identity,
-                            [&] { (void)identity.get(txn.handle(), "t", { 0x01 }, iv); });
+                            [&identity, &iv, &txn] { (void)identity.get(txn.handle(), "t", { 0x01 }, iv); });
         expect_open_required("IdentityIndexStore::tombstone", identity,
-                            [&] { identity.tombstone(txn.handle(), "t", { 0x01 }, iv); });
+                            [&identity, &iv, &txn] { identity.tombstone(txn.handle(), "t", { 0x01 }, iv); });
         expect_open_required("IdentityIndexStore::erase", identity,
-                            [&] { (void)identity.erase(txn.handle(), "t", { 0x01 }); });
+                            [&identity, &txn] { (void)identity.erase(txn.handle(), "t", { 0x01 }); });
     }
 
     conn->disconnect();
