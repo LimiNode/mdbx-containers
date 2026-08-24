@@ -284,19 +284,19 @@ namespace sync {
             initialize_system_stores(txn.handle());
             for (std::size_t i = 0; i < descriptor.manifest.size(); ++i) {
                 const SelectiveReplicationDbi& dbi = descriptor.manifest[i];
-                if (dbi.dbi_flags != persistent_dbi_flags(dbi.dbi_flags)) {
+                if (dbi.dbi_flags() != persistent_dbi_flags(dbi.dbi_flags())) {
                     throw std::invalid_argument(
                         "selective replication descriptor has unsupported DBI flags");
                 }
-                if (m_conn->is_sync_versioned_dbi(txn.handle(), dbi.dbi_name) ||
-                    m_conn->is_sync_logical_dbi(txn.handle(), dbi.dbi_name)) {
+                if (m_conn->is_sync_versioned_dbi(txn.handle(), dbi.dbi_name()) ||
+                    m_conn->is_sync_logical_dbi(txn.handle(), dbi.dbi_name())) {
                     throw std::logic_error(
                         "selective replication DBI is already owned by logical sync");
                 }
                 std::uint32_t actual_flags = 0u;
                 if (read_existing_user_dbi_flags(
-                        txn.handle(), dbi.dbi_name, actual_flags) &&
-                    actual_flags != dbi.dbi_flags) {
+                        txn.handle(), dbi.dbi_name(), actual_flags) &&
+                    actual_flags != dbi.dbi_flags()) {
                     throw std::logic_error(
                         "selective replication descriptor DBI flags mismatch");
                 }

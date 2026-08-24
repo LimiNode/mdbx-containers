@@ -11,6 +11,8 @@
 #include <stdexcept>
 #include <string>
 #include <thread>
+#include <type_traits>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -45,6 +47,29 @@ mdbxc::sync::NodeId make_node(std::uint8_t seed) {
     }
     return n;
 }
+
+template<class Table>
+class HasSelectiveReplicationDbiFactory {
+private:
+    template<class Candidate>
+    static auto test(int) -> decltype(
+        mdbxc::sync::SelectiveReplicationDbi::from(
+            std::declval<const Candidate&>()),
+        std::true_type());
+
+    template<class>
+    static std::false_type test(...);
+
+public:
+    static const bool value = decltype(test<Table>(0))::value;
+};
+
+static_assert(
+    HasSelectiveReplicationDbiFactory<mdbxc::KeyValueTable<int, int>>::value,
+    "KeyValueTable must remain selective raw-capture-capable");
+static_assert(
+    !HasSelectiveReplicationDbiFactory<mdbxc::AnyValueTable<int>>::value,
+    "AnyValueTable must not be admitted to a selective raw scope");
 
 std::shared_ptr<mdbxc::Connection> open_env(const std::string& path) {
     using namespace mdbxc;
@@ -388,15 +413,6 @@ void test_selective_scope_rejects_non_designated_local_writer() {
     const sync::NodeId designated_node = make_node(0x81);
     const sync::NodeId foreign_node = make_node(0x91);
     const sync::DbId db_id = make_node(0xD1);
-    sync::SelectiveReplicationDescriptor descriptor;
-    descriptor.scope_id = "orders_scope";
-    descriptor.designated_writer_origin = designated_node;
-    sync::SelectiveReplicationDbi orders_dbi;
-    orders_dbi.dbi_name = "orders";
-    orders_dbi.dbi_flags =
-        static_cast<std::uint32_t>(get_mdbx_flags<int>());
-    descriptor.manifest.push_back(orders_dbi);
-
     {
         std::shared_ptr<Connection> designated_conn = open_env(designated_path);
         std::shared_ptr<Connection> foreign_conn = open_env(foreign_path);
@@ -404,12 +420,18 @@ void test_selective_scope_rejects_non_designated_local_writer() {
         sync::SyncEngine foreign_engine(foreign_conn);
         designated_engine.initialize_local_identity(designated_node, db_id);
         foreign_engine.initialize_local_identity(foreign_node, db_id);
+        KeyValueTable<int, int> designated_orders(designated_conn, "orders");
+        KeyValueTable<int, int> orders(foreign_conn, "orders");
+        sync::SelectiveReplicationDescriptor descriptor;
+        descriptor.scope_id = "orders_scope";
+        descriptor.designated_writer_origin = designated_node;
+        descriptor.manifest.push_back(
+            sync::SelectiveReplicationDbi::from(designated_orders));
         designated_engine.register_selective_replication_scope(descriptor);
         foreign_engine.register_selective_replication_scope(descriptor);
 
         sync::ThreadLocalChangeAccumulator foreign_capture(foreign_conn);
         foreign_conn->attach_sync_capture(&foreign_capture);
-        KeyValueTable<int, int> orders(foreign_conn, "orders");
         bool rejected = false;
         try {
             orders.insert_or_assign(1, 10);
@@ -493,6 +515,76 @@ void test_selective_scope_does_not_create_stores_without_descriptor() {
     cleanup(path);
 }
 
+void test_selective_scope_preserves_raw_capture_at_dbi_handle_limit() {
+    using namespace mdbxc;
+    const std::string path = "test_selective_scope_dbi_handle_limit.mdbx";
+    cleanup(path);
+
+    Config config;
+    config.pathname = path;
+    config.max_dbs = 16;
+    config.no_subdir = true;
+    std::shared_ptr<Connection> conn = Connection::create(config);
+    sync::SyncEngine engine(conn);
+    const sync::NodeId local_node = make_node(0x85);
+    const sync::DbId db_id = make_node(0xD5);
+    engine.initialize_local_identity(local_node, db_id);
+    KeyValueTable<int, int> catalog(conn, "catalog");
+
+    sync::ThreadLocalChangeAccumulator capture(conn);
+    conn->attach_sync_capture(&capture);
+    catalog.insert_or_assign(1, 10);
+    conn->detach_sync_capture();
+
+    bool reached_limit = false;
+    for (std::size_t i = 0; i < 64u; ++i) {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        const std::string name = "filler_" + std::to_string(i);
+        MDBX_dbi filler = 0;
+        const int rc = mdbx_dbi_open(
+            txn.handle(), name.c_str(), MDBX_CREATE, &filler);
+        if (rc == MDBX_DBS_FULL) {
+            txn.rollback();
+            reached_limit = true;
+            break;
+        }
+        check_mdbx(rc, "failed to fill named DBI handle budget");
+        txn.commit();
+    }
+    if (!reached_limit) {
+        throw std::runtime_error("failed to reach named DBI handle limit");
+    }
+
+    conn->attach_sync_capture(&capture);
+    catalog.insert_or_assign(2, 20);
+    conn->detach_sync_capture();
+    if (kv_or_throw(conn, catalog, 2,
+                    "raw capture value at DBI handle limit") != 20) {
+        throw std::runtime_error("ordinary raw capture value is incorrect");
+    }
+
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        MDBX_dbi changelog = 0;
+        check_mdbx(mdbx_dbi_open(
+                       txn.handle(), "_mdbxc_changelog",
+                       static_cast<MDBX_db_flags_t>(0), &changelog),
+                   "failed to reopen existing raw changelog at DBI handle limit");
+        std::vector<std::uint8_t> key(24u);
+        std::memcpy(key.data(), local_node.data(), local_node.size());
+        sync::detail::write_u64_be(2u, key.data() + local_node.size());
+        MDBX_val lookup_key = { key.data(), key.size() };
+        MDBX_val value;
+        if (mdbx_get(txn.handle(), changelog, &lookup_key, &value) != MDBX_SUCCESS) {
+            throw std::runtime_error(
+                "ordinary raw capture did not append at DBI handle limit");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_selective_scope_publishes_global_and_scoped_projection() {
     using namespace mdbxc;
     const std::string path = "test_selective_scope_projection.mdbx";
@@ -503,21 +595,17 @@ void test_selective_scope_publishes_global_and_scoped_projection() {
     std::shared_ptr<Connection> conn = open_env(path);
     sync::SyncEngine engine(conn);
     engine.initialize_local_identity(local_node, db_id);
+    KeyValueTable<int, int> orders(conn, "orders");
+    KeyValueTable<int, int> catalog(conn, "catalog");
 
     sync::SelectiveReplicationDescriptor descriptor;
     descriptor.scope_id = "orders_scope";
     descriptor.designated_writer_origin = local_node;
-    sync::SelectiveReplicationDbi orders_dbi;
-    orders_dbi.dbi_name = "orders";
-    orders_dbi.dbi_flags =
-        static_cast<std::uint32_t>(get_mdbx_flags<int>());
-    descriptor.manifest.push_back(orders_dbi);
+    descriptor.manifest.push_back(sync::SelectiveReplicationDbi::from(orders));
     engine.register_selective_replication_scope(descriptor);
 
     sync::ThreadLocalChangeAccumulator capture(conn);
     conn->attach_sync_capture(&capture);
-    KeyValueTable<int, int> orders(conn, "orders");
-    KeyValueTable<int, int> catalog(conn, "catalog");
     {
         auto txn = conn->transaction(TransactionMode::WRITABLE);
         orders.insert_or_assign(1, 10, txn.handle());
@@ -584,15 +672,12 @@ void test_selective_scope_rejects_immutable_descriptor_changes() {
     std::shared_ptr<Connection> conn = open_env(path);
     sync::SyncEngine engine(conn);
     engine.initialize_local_identity(local_node, make_node(0xD3));
+    KeyValueTable<int, int> orders(conn, "orders");
 
     sync::SelectiveReplicationDescriptor descriptor;
     descriptor.scope_id = "orders_scope";
     descriptor.designated_writer_origin = local_node;
-    sync::SelectiveReplicationDbi orders_dbi;
-    orders_dbi.dbi_name = "orders";
-    orders_dbi.dbi_flags =
-        static_cast<std::uint32_t>(get_mdbx_flags<int>());
-    descriptor.manifest.push_back(orders_dbi);
+    descriptor.manifest.push_back(sync::SelectiveReplicationDbi::from(orders));
     engine.register_selective_replication_scope(descriptor);
 
     sync::SelectiveReplicationDescriptor changed_writer = descriptor;
@@ -634,30 +719,24 @@ void test_selective_scope_rejects_multi_scope_transaction() {
     std::shared_ptr<Connection> conn = open_env(path);
     sync::SyncEngine engine(conn);
     engine.initialize_local_identity(local_node, make_node(0xD4));
+    KeyValueTable<int, int> orders(conn, "orders");
+    KeyValueTable<int, int> risk(conn, "risk");
 
     sync::SelectiveReplicationDescriptor orders_scope;
     orders_scope.scope_id = "orders_scope";
     orders_scope.designated_writer_origin = local_node;
-    sync::SelectiveReplicationDbi orders_dbi;
-    orders_dbi.dbi_name = "orders";
-    orders_dbi.dbi_flags =
-        static_cast<std::uint32_t>(get_mdbx_flags<int>());
-    orders_scope.manifest.push_back(orders_dbi);
+    orders_scope.manifest.push_back(
+        sync::SelectiveReplicationDbi::from(orders));
     engine.register_selective_replication_scope(orders_scope);
 
     sync::SelectiveReplicationDescriptor risk_scope;
     risk_scope.scope_id = "risk_scope";
     risk_scope.designated_writer_origin = local_node;
-    sync::SelectiveReplicationDbi risk_dbi;
-    risk_dbi.dbi_name = "risk";
-    risk_dbi.dbi_flags = static_cast<std::uint32_t>(get_mdbx_flags<int>());
-    risk_scope.manifest.push_back(risk_dbi);
+    risk_scope.manifest.push_back(sync::SelectiveReplicationDbi::from(risk));
     engine.register_selective_replication_scope(risk_scope);
 
     sync::ThreadLocalChangeAccumulator capture(conn);
     conn->attach_sync_capture(&capture);
-    KeyValueTable<int, int> orders(conn, "orders");
-    KeyValueTable<int, int> risk(conn, "risk");
     bool rejected = false;
     try {
         auto txn = conn->transaction(TransactionMode::WRITABLE);
@@ -4963,6 +5042,8 @@ int main() {
           &test_selective_scope_rejects_non_designated_local_writer },
         { "test_selective_scope_does_not_create_stores_without_descriptor",
           &test_selective_scope_does_not_create_stores_without_descriptor },
+        { "test_selective_scope_preserves_raw_capture_at_dbi_handle_limit",
+          &test_selective_scope_preserves_raw_capture_at_dbi_handle_limit },
         { "test_selective_scope_publishes_global_and_scoped_projection",
           &test_selective_scope_publishes_global_and_scoped_projection },
         { "test_selective_scope_rejects_immutable_descriptor_changes",

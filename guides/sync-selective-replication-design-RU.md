@@ -55,6 +55,14 @@ global raw pull для того же `DbId`.
 schema, replay, порядок и delivery конкретному получателю. Их нельзя копировать
 как raw-подмножество.
 
+Публичный descriptor не принимает произвольную пару `(dbi_name, dbi_flags)`;
+каждый member manifest-а — это token `SelectiveReplicationDbi`, полученный
+через `SelectiveReplicationDbi::from()` для `KeyValueTable`, `KeyTable`,
+`ValueTable` или `SequenceTable`. Для deferred wrappers, включая
+`AnyValueTable`, `HashedKeyValueStore` и multi-value tables, factory overload
+нет: они не могут попасть в selective scope v1, пока для них не появится
+контракт capture/apply.
+
 ## Обязательные инварианты
 
 1. **Идентификатор области постоянный и явный.** `ScopeId` — непрозрачная,
@@ -270,8 +278,9 @@ reset-and-bootstrap.
 
 1. **Реализованная базовая часть.** Постоянное хранение и проверка
    неизменяемых scope descriptor-ов включают ненулевой назначенный origin с
-   правом записи и exclusive selective membership. Локальный guard отклоняет
-   не назначенный origin до commit, в том числе после restart.
+   правом записи и exclusive selective membership. Manifest использует tokens
+   table с поддержанным raw capture, а не произвольные имена DBI. Локальный
+   guard отклоняет не назначенный origin до commit, в том числе после restart.
 2. **Реализованная базовая часть.** Scope-local capture/changelog/progress
    атомарно публикуют полный global batch и его единственную scoped projection.
    Транзакция, затрагивающая две области, отклоняется до commit.

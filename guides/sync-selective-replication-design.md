@@ -54,6 +54,13 @@ Logical datasets need their own scope semantics because their state includes
 schema, replay, ordering, and receiver-specific delivery records. They must
 not be copied as a raw subset.
 
+The public descriptor does not accept an arbitrary `(dbi_name, dbi_flags)`
+pair. Each manifest member is a `SelectiveReplicationDbi` token obtained from
+`SelectiveReplicationDbi::from()` for `KeyValueTable`, `KeyTable`,
+`ValueTable`, or `SequenceTable`. Deferred wrappers such as `AnyValueTable`,
+`HashedKeyValueStore`, and multi-value tables have no factory overload, so they
+cannot enter a selective v1 scope before they have a capture/apply contract.
+
 ## Required Invariants
 
 1. **Scope identity is durable and explicit.** `ScopeId` is an opaque,
@@ -268,7 +275,8 @@ Implementation should be split into reviewable PRs:
 
 1. **Implemented foundation.** Persist and validate immutable scope
    descriptors, including the non-zero designated writer origin and exclusive
-   selective membership. The local write guard rejects a non-designated writer
+   selective membership. A manifest uses raw-capture-capable table tokens, not
+   arbitrary DBI names. The local write guard rejects a non-designated writer
    before commit, including after restart.
 2. **Implemented foundation.** Scope-local capture/changelog/progress storage
    publishes an atomic complete global batch plus its single scoped projection.

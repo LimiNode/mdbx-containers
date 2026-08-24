@@ -69,7 +69,8 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   writes into `ThreadLocalChangeAccumulator`, which appends one local
   `ChangeBatch` per committing write transaction.
 - Selective-replication foundation: `SyncEngine::register_selective_replication_scope()`
-  durably registers an immutable raw-DBI manifest and its designated writer.
+  durably registers an immutable raw-capture-capable DBI manifest and its
+  designated writer.
   `ThreadLocalChangeAccumulator` keeps the global `ChangeBatch` complete and,
   for one scoped transaction, atomically writes its scope-local projection and
   sequence. A non-designated local write, raw external writable transaction,
