@@ -376,6 +376,317 @@ void test_engine_round_trip_kv() {
     cleanup(replica_path);
 }
 
+void test_selective_scope_rejects_non_designated_local_writer() {
+    using namespace mdbxc;
+    const std::string designated_path =
+        "test_selective_scope_designated_writer.mdbx";
+    const std::string foreign_path =
+        "test_selective_scope_foreign_writer.mdbx";
+    cleanup(designated_path);
+    cleanup(foreign_path);
+
+    const sync::NodeId designated_node = make_node(0x81);
+    const sync::NodeId foreign_node = make_node(0x91);
+    const sync::DbId db_id = make_node(0xD1);
+    sync::SelectiveReplicationDescriptor descriptor;
+    descriptor.scope_id = "orders_scope";
+    descriptor.designated_writer_origin = designated_node;
+    sync::SelectiveReplicationDbi orders_dbi;
+    orders_dbi.dbi_name = "orders";
+    orders_dbi.dbi_flags =
+        static_cast<std::uint32_t>(get_mdbx_flags<int>());
+    descriptor.manifest.push_back(orders_dbi);
+
+    {
+        std::shared_ptr<Connection> designated_conn = open_env(designated_path);
+        std::shared_ptr<Connection> foreign_conn = open_env(foreign_path);
+        sync::SyncEngine designated_engine(designated_conn);
+        sync::SyncEngine foreign_engine(foreign_conn);
+        designated_engine.initialize_local_identity(designated_node, db_id);
+        foreign_engine.initialize_local_identity(foreign_node, db_id);
+        designated_engine.register_selective_replication_scope(descriptor);
+        foreign_engine.register_selective_replication_scope(descriptor);
+
+        sync::ThreadLocalChangeAccumulator foreign_capture(foreign_conn);
+        foreign_conn->attach_sync_capture(&foreign_capture);
+        KeyValueTable<int, int> orders(foreign_conn, "orders");
+        bool rejected = false;
+        try {
+            orders.insert_or_assign(1, 10);
+        } catch (const std::logic_error&) {
+            rejected = true;
+        }
+        if (!rejected) {
+            throw std::runtime_error(
+                "foreign local writer was accepted for selective scope");
+        }
+        if (kv_has(foreign_conn, orders, 1)) {
+            throw std::runtime_error(
+                "foreign selective writer mutation was committed");
+        }
+        foreign_conn->detach_sync_capture();
+        designated_conn->disconnect();
+        foreign_conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<Connection> foreign_conn = open_env(foreign_path);
+        sync::SyncEngine foreign_engine(foreign_conn);
+        foreign_engine.initialize_local_identity(foreign_node, db_id);
+        sync::ThreadLocalChangeAccumulator foreign_capture(foreign_conn);
+        foreign_conn->attach_sync_capture(&foreign_capture);
+        KeyValueTable<int, int> orders(foreign_conn, "orders");
+        bool rejected = false;
+        try {
+            orders.insert_or_assign(2, 20);
+        } catch (const std::logic_error&) {
+            rejected = true;
+        }
+        if (!rejected || kv_has(foreign_conn, orders, 2)) {
+            throw std::runtime_error(
+                "restarted foreign writer bypassed selective scope guard");
+        }
+        foreign_conn->detach_sync_capture();
+        foreign_conn->disconnect();
+    }
+
+    cleanup(designated_path);
+    cleanup(foreign_path);
+}
+
+void test_selective_scope_does_not_create_stores_without_descriptor() {
+    using namespace mdbxc;
+    const std::string path = "test_selective_scope_no_descriptor.mdbx";
+    cleanup(path);
+
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(make_node(0x80), make_node(0xD0));
+    sync::ThreadLocalChangeAccumulator capture(conn);
+    conn->attach_sync_capture(&capture);
+    KeyValueTable<int, int> catalog(conn, "catalog");
+    catalog.insert_or_assign(1, 10);
+    conn->detach_sync_capture();
+
+    {
+        static const char* const selective_stores[] = {
+            "_mdbxc_selective_scopes",
+            "_mdbxc_selective_scope_dbis",
+            "_mdbxc_selective_changelog",
+            "_mdbxc_selective_progress"
+        };
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        for (std::size_t i = 0;
+             i < sizeof(selective_stores) / sizeof(selective_stores[0]); ++i) {
+            MDBX_dbi dbi = 0;
+            const int rc = mdbx_dbi_open(
+                txn.handle(), selective_stores[i],
+                static_cast<MDBX_db_flags_t>(0), &dbi);
+            if (rc != MDBX_NOTFOUND) {
+                throw std::runtime_error(
+                    "ordinary raw capture created a selective replication DBI");
+            }
+        }
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_selective_scope_publishes_global_and_scoped_projection() {
+    using namespace mdbxc;
+    const std::string path = "test_selective_scope_projection.mdbx";
+    cleanup(path);
+
+    const sync::NodeId local_node = make_node(0x82);
+    const sync::DbId db_id = make_node(0xD2);
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, db_id);
+
+    sync::SelectiveReplicationDescriptor descriptor;
+    descriptor.scope_id = "orders_scope";
+    descriptor.designated_writer_origin = local_node;
+    sync::SelectiveReplicationDbi orders_dbi;
+    orders_dbi.dbi_name = "orders";
+    orders_dbi.dbi_flags =
+        static_cast<std::uint32_t>(get_mdbx_flags<int>());
+    descriptor.manifest.push_back(orders_dbi);
+    engine.register_selective_replication_scope(descriptor);
+
+    sync::ThreadLocalChangeAccumulator capture(conn);
+    conn->attach_sync_capture(&capture);
+    KeyValueTable<int, int> orders(conn, "orders");
+    KeyValueTable<int, int> catalog(conn, "catalog");
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        orders.insert_or_assign(1, 10, txn.handle());
+        catalog.insert_or_assign(2, 20, txn.handle());
+        txn.commit();
+    }
+    conn->detach_sync_capture();
+
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        sync::ChangeLogStore global_log(conn->env_handle());
+        sync::ScopedChangeLogStore scoped_log(conn->env_handle());
+        sync::ScopedProgressStore scoped_progress(conn->env_handle());
+        global_log.open(txn.handle());
+        scoped_log.open(txn.handle());
+        scoped_progress.open(txn.handle());
+        std::vector<std::uint8_t> global_bytes;
+        std::vector<std::uint8_t> scoped_bytes;
+        if (!global_log.get(txn.handle(), local_node, 1u, global_bytes) ||
+            !scoped_log.get(txn.handle(), descriptor.scope_id, 1u, scoped_bytes)) {
+            throw std::runtime_error("selective scope did not persist both logs");
+        }
+        const sync::ChangeBatch global =
+            sync::ChangeBatchCodec::decode_exact(global_bytes);
+        const sync::ChangeBatch scoped =
+            sync::ChangeBatchCodec::decode_exact(scoped_bytes);
+        if (global.ops.size() != 2u || scoped.ops.size() != 1u ||
+            scoped.ops[0].dbi_name != "orders" ||
+            scoped_progress.last_sequence(txn.handle(), descriptor.scope_id) != 1u) {
+            throw std::runtime_error(
+                "selective scope projection does not match committed global batch");
+        }
+        bool has_orders = false;
+        bool has_catalog = false;
+        for (std::size_t i = 0; i < global.ops.size(); ++i) {
+            has_orders = has_orders || global.ops[i].dbi_name == "orders";
+            has_catalog = has_catalog || global.ops[i].dbi_name == "catalog";
+        }
+        if (!has_orders || !has_catalog) {
+            throw std::runtime_error("global changelog lost a selective DBI operation");
+        }
+    }
+
+    sync::PullRequest request;
+    request.requester = make_node(0x92);
+    request.db_id = db_id;
+    const sync::PullResponse response = engine.handle_pull(request);
+    if (!response.ok || response.batches.size() != 1u ||
+        response.batches[0].ops.size() != 2u) {
+        throw std::runtime_error(
+            "full-global pull no longer returns complete raw batch");
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_selective_scope_rejects_immutable_descriptor_changes() {
+    using namespace mdbxc;
+    const std::string path = "test_selective_scope_descriptor_immutability.mdbx";
+    cleanup(path);
+
+    const sync::NodeId local_node = make_node(0x83);
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, make_node(0xD3));
+
+    sync::SelectiveReplicationDescriptor descriptor;
+    descriptor.scope_id = "orders_scope";
+    descriptor.designated_writer_origin = local_node;
+    sync::SelectiveReplicationDbi orders_dbi;
+    orders_dbi.dbi_name = "orders";
+    orders_dbi.dbi_flags =
+        static_cast<std::uint32_t>(get_mdbx_flags<int>());
+    descriptor.manifest.push_back(orders_dbi);
+    engine.register_selective_replication_scope(descriptor);
+
+    sync::SelectiveReplicationDescriptor changed_writer = descriptor;
+    changed_writer.designated_writer_origin = make_node(0x93);
+    bool writer_rejected = false;
+    try {
+        engine.register_selective_replication_scope(changed_writer);
+    } catch (const std::logic_error&) {
+        writer_rejected = true;
+    }
+    if (!writer_rejected) {
+        throw std::runtime_error(
+            "selective descriptor accepted a changed designated writer");
+    }
+
+    sync::SelectiveReplicationDescriptor overlapping_scope = descriptor;
+    overlapping_scope.scope_id = "other_scope";
+    bool overlap_rejected = false;
+    try {
+        engine.register_selective_replication_scope(overlapping_scope);
+    } catch (const std::logic_error&) {
+        overlap_rejected = true;
+    }
+    if (!overlap_rejected) {
+        throw std::runtime_error(
+            "selective descriptor accepted DBI ownership in two scopes");
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
+void test_selective_scope_rejects_multi_scope_transaction() {
+    using namespace mdbxc;
+    const std::string path = "test_selective_scope_multi_scope_txn.mdbx";
+    cleanup(path);
+
+    const sync::NodeId local_node = make_node(0x84);
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine engine(conn);
+    engine.initialize_local_identity(local_node, make_node(0xD4));
+
+    sync::SelectiveReplicationDescriptor orders_scope;
+    orders_scope.scope_id = "orders_scope";
+    orders_scope.designated_writer_origin = local_node;
+    sync::SelectiveReplicationDbi orders_dbi;
+    orders_dbi.dbi_name = "orders";
+    orders_dbi.dbi_flags =
+        static_cast<std::uint32_t>(get_mdbx_flags<int>());
+    orders_scope.manifest.push_back(orders_dbi);
+    engine.register_selective_replication_scope(orders_scope);
+
+    sync::SelectiveReplicationDescriptor risk_scope;
+    risk_scope.scope_id = "risk_scope";
+    risk_scope.designated_writer_origin = local_node;
+    sync::SelectiveReplicationDbi risk_dbi;
+    risk_dbi.dbi_name = "risk";
+    risk_dbi.dbi_flags = static_cast<std::uint32_t>(get_mdbx_flags<int>());
+    risk_scope.manifest.push_back(risk_dbi);
+    engine.register_selective_replication_scope(risk_scope);
+
+    sync::ThreadLocalChangeAccumulator capture(conn);
+    conn->attach_sync_capture(&capture);
+    KeyValueTable<int, int> orders(conn, "orders");
+    KeyValueTable<int, int> risk(conn, "risk");
+    bool rejected = false;
+    try {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        orders.insert_or_assign(1, 10, txn.handle());
+        risk.insert_or_assign(2, 20, txn.handle());
+        txn.commit();
+    } catch (const std::logic_error&) {
+        rejected = true;
+    }
+    if (!rejected || kv_has(conn, orders, 1) || kv_has(conn, risk, 2)) {
+        throw std::runtime_error(
+            "multi-scope transaction did not roll back before commit");
+    }
+    conn->detach_sync_capture();
+
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        sync::MetaStore meta(conn->env_handle());
+        meta.open(txn.handle());
+        if (meta.get_local_seq(txn.handle()) != 0u) {
+            throw std::runtime_error(
+                "multi-scope transaction advanced global sequence");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
+
 void test_public_tables_reject_reserved_dbi_names() {
     using namespace mdbxc;
     const std::string p = "test_public_reserved_dbi_names.mdbx";
@@ -4648,6 +4959,16 @@ int main() {
     struct Case { const char* name; void (*fn)(); };
     const Case cases[] = {
         { "test_engine_round_trip_kv",          &test_engine_round_trip_kv },
+        { "test_selective_scope_rejects_non_designated_writer",
+          &test_selective_scope_rejects_non_designated_local_writer },
+        { "test_selective_scope_does_not_create_stores_without_descriptor",
+          &test_selective_scope_does_not_create_stores_without_descriptor },
+        { "test_selective_scope_publishes_global_and_scoped_projection",
+          &test_selective_scope_publishes_global_and_scoped_projection },
+        { "test_selective_scope_rejects_immutable_descriptor_changes",
+          &test_selective_scope_rejects_immutable_descriptor_changes },
+        { "test_selective_scope_rejects_multi_scope_transaction",
+          &test_selective_scope_rejects_multi_scope_transaction },
         { "test_public_tables_reject_reserved_dbi_names",
           &test_public_tables_reject_reserved_dbi_names },
         { "test_engine_rejects_reserved_dbi_changes",

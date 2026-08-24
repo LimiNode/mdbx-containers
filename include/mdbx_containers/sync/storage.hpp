@@ -14,6 +14,7 @@
 #include "stores/MetaStore.hpp"
 #include "stores/OriginIndexStore.hpp"
 #include "stores/ChangeLogStore.hpp"
+#include "stores/SelectiveReplicationStore.hpp"
 #include "stores/FullSnapshotImportStore.hpp"
 #include "stores/IdentityIndexStore.hpp"
 #include "stores/VersionedDbiStore.hpp"

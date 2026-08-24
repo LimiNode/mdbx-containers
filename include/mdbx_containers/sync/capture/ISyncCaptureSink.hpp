@@ -31,6 +31,17 @@ namespace sync {
     public:
         virtual ~ISyncCaptureSink() = default;
 
+        /// \brief Reports whether this sink publishes durable selective-scope
+        ///        projections beside the global raw changelog.
+        /// \return \c true only when scoped DBI writes can be committed with
+        ///         their required scope-local changelog entry.
+        /// \details Connection-level selective write guards reject local
+        /// writes to a scoped DBI when the attached sink returns \c false.
+        /// The default preserves compatibility for existing custom sinks.
+        virtual bool supports_selective_scope_capture() const {
+            return false;
+        }
+
         /// \brief Called by \c BaseTable after a successful user-table write.
         /// \param txn The active MDBX write transaction that performed the
         ///        change.

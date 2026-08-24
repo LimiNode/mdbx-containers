@@ -46,7 +46,14 @@ namespace sync {
         explicit ThreadLocalChangeAccumulator(std::shared_ptr<Connection> conn)
             : m_env(conn->env_handle()),
               m_meta(m_env),
-              m_change_log(m_env) {}
+              m_change_log(m_env),
+              m_selective_scopes(m_env),
+              m_scoped_change_log(m_env),
+              m_scoped_progress(m_env) {}
+
+        bool supports_selective_scope_capture() const override {
+            return true;
+        }
 
         void record_change_op(MDBX_txn* txn, const ChangeOp& change) override {
             txn = checked_txn_env(txn, m_env, "ThreadLocalChangeAccumulator::record_change");
@@ -106,6 +113,10 @@ namespace sync {
             m_meta.open(txn);
             m_change_log.reset_open();
             m_change_log.open(txn);
+            m_selective_scopes.reset_open();
+            m_scoped_change_log.reset_open();
+            m_scoped_progress.reset_open();
+            m_selective_scopes.open_existing(txn);
             if (m_node_id == make_zero_node()) {
                 NodeId from_meta = m_meta.get_node_id(txn);
                 if (compare_node_id(from_meta, make_zero_node()) == 0) {
@@ -126,12 +137,64 @@ namespace sync {
             batch.ops = ops;
             const std::vector<std::uint8_t> bytes = ChangeBatchCodec::encode(batch);
             m_change_log.append(txn, m_node_id, batch.seq, bytes);
+
+            if (!m_selective_scopes.is_open()) {
+                return;
+            }
+
+            SelectiveReplicationDbiBinding scope_binding;
+            bool has_scope = false;
+            std::vector<ChangeOp> scoped_ops;
+            for (std::size_t i = 0; i < ops.size(); ++i) {
+                SelectiveReplicationDbiBinding binding;
+                if (!m_selective_scopes.find_for_dbi(
+                        txn, ops[i].dbi_name, binding)) {
+                    continue;
+                }
+                if (compare_node_id(binding.designated_writer_origin,
+                                    m_node_id) != 0) {
+                    throw std::logic_error(
+                        "non-designated origin cannot publish a selective scope change");
+                }
+                if (binding.dbi_flags != ops[i].dbi_flags) {
+                    throw std::logic_error(
+                        "selective scope DBI flags do not match the descriptor");
+                }
+                if (has_scope && binding.scope_id != scope_binding.scope_id) {
+                    throw std::logic_error(
+                        "one transaction cannot change DBIs from multiple selective scopes");
+                }
+                if (!has_scope) {
+                    scope_binding = binding;
+                    has_scope = true;
+                }
+                scoped_ops.push_back(ops[i]);
+            }
+            if (!has_scope) {
+                return;
+            }
+
+            m_scoped_change_log.open(txn);
+            m_scoped_progress.open(txn);
+            ChangeBatch scoped_batch;
+            scoped_batch.version = 1;
+            scoped_batch.origin_node_id = m_node_id;
+            scoped_batch.seq = m_scoped_progress.increment_sequence(
+                txn, scope_binding.scope_id);
+            scoped_batch.ops = scoped_ops;
+            const std::vector<std::uint8_t> scoped_bytes =
+                ChangeBatchCodec::encode(scoped_batch);
+            m_scoped_change_log.append(
+                txn, scope_binding.scope_id, scoped_batch.seq, scoped_bytes);
         }
 
         MDBX_env* m_env;
         NodeId m_node_id{};
         MetaStore m_meta;
         ChangeLogStore m_change_log;
+        SelectiveReplicationStore m_selective_scopes;
+        ScopedChangeLogStore m_scoped_change_log;
+        ScopedProgressStore m_scoped_progress;
         std::mutex m_mutex;
         std::unordered_map<MDBX_txn*, std::vector<ChangeOp>> m_pending;
 
