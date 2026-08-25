@@ -49,6 +49,20 @@ namespace sync {
             m_open = true;
         }
 
+        /// \brief Opens existing metadata without creating the DBI.
+        /// \return \c false when the metadata DBI does not exist.
+        bool open_existing(MDBX_txn* txn) {
+            txn = checked_txn(txn, "MetaStore::open_existing");
+            if (m_open) return true;
+            const int rc = mdbx_dbi_open(
+                txn, m_dbi_name.c_str(), static_cast<MDBX_db_flags_t>(0),
+                &m_dbi);
+            if (rc == MDBX_NOTFOUND) return false;
+            check_mdbx(rc, "Failed to open existing MetaStore DBI");
+            m_open = true;
+            return true;
+        }
+
         /// \brief Throws when the DBI has not been opened yet.
         void ensure_open() const {
             if (!m_open) {
@@ -82,8 +96,31 @@ namespace sync {
         /// \brief Reads \c node_id. Empty array when unset.
         NodeId get_node_id(MDBX_txn* txn) const {
             NodeId out{};
-            read_fixed(txn, key_node_id(), reinterpret_cast<std::uint8_t*>(out.data()), 16);
+            try_get_node_id(txn, out);
             return out;
+        }
+
+        /// \brief Reads \c node_id while distinguishing missing and corrupt data.
+        /// \return \c false when the identity is unset.
+        /// \throws std::runtime_error when the stored identity is not 16 bytes.
+        bool try_get_node_id(MDBX_txn* txn, NodeId& out) const {
+            txn = checked_txn(txn, "MetaStore::try_get_node_id");
+            ensure_open();
+            std::uint8_t key_byte = key_node_id();
+            MDBX_val key = { &key_byte, 1u };
+            MDBX_val value;
+            const int rc = mdbx_get(txn, m_dbi, &key, &value);
+            if (rc == MDBX_NOTFOUND) {
+                out = NodeId{};
+                return false;
+            }
+            check_mdbx(rc, "MetaStore node identity read failed");
+            if (value.iov_len != out.size()) {
+                throw std::runtime_error(
+                    "MetaStore node identity has invalid size");
+            }
+            std::memcpy(out.data(), value.iov_base, out.size());
+            return true;
         }
 
         /// \brief Writes \c node_id.

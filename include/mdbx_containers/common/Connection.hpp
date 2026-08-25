@@ -366,6 +366,9 @@ namespace mdbxc {
                                    const std::string& dbi_name) const;
         bool is_sync_logical_dbi(MDBX_txn* txn,
                                  const std::string& dbi_name) const;
+        bool selective_scope_writer_for_dbi(
+            MDBX_txn* txn, const std::string& dbi_name,
+            sync::NodeId& designated_writer_origin) const;
         void validate_sync_dbi_write(MDBX_txn* txn,
                                      const std::string& dbi_name,
                                      sync::ChangeOpType op_type);

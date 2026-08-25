@@ -271,6 +271,42 @@ namespace sync {
             return meta.get_db_uuid(txn.handle());
         }
 
+        /// \brief Registers or verifies one immutable selective replication scope.
+        /// \param descriptor Scope identity, designated writer, and canonical DBI manifest.
+        /// \details Registration persists the descriptor and the DBI ownership
+        /// index atomically. A scoped DBI can have only one descriptor. Local
+        /// table writes require a \c ThreadLocalChangeAccumulator (or another
+        /// sink that explicitly supports selective scope capture); a
+        /// non-designated origin fails closed before commit.
+        void register_selective_replication_scope(
+                const SelectiveReplicationDescriptor& descriptor) {
+            auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+            initialize_system_stores(txn.handle());
+            for (std::size_t i = 0; i < descriptor.manifest.size(); ++i) {
+                const SelectiveReplicationDbi& dbi = descriptor.manifest[i];
+                if (dbi.dbi_flags() != persistent_dbi_flags(dbi.dbi_flags())) {
+                    throw std::invalid_argument(
+                        "selective replication descriptor has unsupported DBI flags");
+                }
+                if (m_conn->is_sync_versioned_dbi(txn.handle(), dbi.dbi_name()) ||
+                    m_conn->is_sync_logical_dbi(txn.handle(), dbi.dbi_name())) {
+                    throw std::logic_error(
+                        "selective replication DBI is already owned by logical sync");
+                }
+                std::uint32_t actual_flags = 0u;
+                if (read_existing_user_dbi_flags(
+                        txn.handle(), dbi.dbi_name(), actual_flags) &&
+                    actual_flags != dbi.dbi_flags()) {
+                    throw std::logic_error(
+                        "selective replication descriptor DBI flags mismatch");
+                }
+            }
+            SelectiveReplicationStore scopes(m_conn->env_handle());
+            scopes.open(txn.handle());
+            scopes.register_or_verify(txn.handle(), descriptor);
+            txn.commit();
+        }
+
         /// \brief Returns the conflict resolution policy.
         ConflictPolicy policy() const noexcept { return m_policy; }
 

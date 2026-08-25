@@ -68,6 +68,14 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   `BaseTable::record_op()`, and the transaction pre-commit hook route table
   writes into `ThreadLocalChangeAccumulator`, which appends one local
   `ChangeBatch` per committing write transaction.
+- Selective-replication foundation: `SyncEngine::register_selective_replication_scope()`
+  durably registers an immutable raw-capture-capable DBI manifest and its
+  designated writer.
+  `ThreadLocalChangeAccumulator` keeps the global `ChangeBatch` complete and,
+  for one scoped transaction, atomically writes its scope-local projection and
+  sequence. A non-designated local write, raw external writable transaction,
+  or public capture suppression fails closed before commit. Scoped wire
+  delivery, snapshots/resume, and retention are not implemented yet.
 - `SyncEngine` pull / push / apply protocol logic, `DirectSyncPeer`
   in-process transport, detailed apply conflict diagnostics, multi-origin
   pagination, origin-index fallback for legacy changelogs, and

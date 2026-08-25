@@ -135,6 +135,11 @@ namespace mdbxc {
             return m_name;
         }
 
+        /// \brief Returns the persistent MDBX flags of this table DBI.
+        std::uint32_t dbi_flags() const noexcept {
+            return m_dbi_flags;
+        }
+
         /// \brief Returns the shared MDBX connection used by this table wrapper.
         std::shared_ptr<Connection> connection() const {
             return m_connection;

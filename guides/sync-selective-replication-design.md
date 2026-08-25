@@ -1,9 +1,12 @@
 # Selective Replication Design
 
-This document specifies the proposed contract for replicating a selected set
-of raw user DBIs. It is a design for a later implementation, not a v0.1 API.
-Current table-filtered apply observers filter local callback delivery only;
-they do not filter capture, transport, apply, snapshots, or retention.
+This document specifies the contract for replicating a selected set of raw
+user DBIs. The capture foundation is implemented: immutable descriptors,
+designated-writer local-write guards, scope-local changelog/progress storage,
+and atomic global-plus-scoped publication. It does not yet provide a scoped
+wire protocol, receiver apply, snapshots/resume, or retention. Current
+table-filtered apply observers filter local callback delivery only; they do
+not filter capture, transport, apply, snapshots, or retention.
 
 Read [Sync recovery and full snapshots](../docs/sync-recovery.md) and the
 [sync table coverage matrix](sync-table-coverage.md) first. Russian version:
@@ -50,6 +53,13 @@ The first scoped protocol is limited to raw supported table DBIs. It excludes:
 Logical datasets need their own scope semantics because their state includes
 schema, replay, ordering, and receiver-specific delivery records. They must
 not be copied as a raw subset.
+
+The public descriptor does not accept an arbitrary `(dbi_name, dbi_flags)`
+pair. Each manifest member is a `SelectiveReplicationDbi` token obtained from
+`SelectiveReplicationDbi::from()` for `KeyValueTable`, `KeyTable`,
+`ValueTable`, or `SequenceTable`. Deferred wrappers such as `AnyValueTable`,
+`HashedKeyValueStore`, and multi-value tables have no factory overload, so they
+cannot enter a selective v1 scope before they have a capture/apply contract.
 
 ## Required Invariants
 
@@ -163,7 +173,8 @@ Every operation in `ScopedChangeBatch` names a DBI in the descriptor manifest,
 and its origin must equal the descriptor's designated writer origin. Only that
 origin may make local application mutations to a scoped DBI or create its
 scoped projection; a local mutation by another origin fails closed before
-commit. This does not change full-global apply: a node may still apply raw
+commit, so neither the mutation nor global capture becomes durable. This does
+not change full-global apply: a node may still apply raw
 history received from another origin, but it must not present that history as a
 scoped relay.
 
@@ -262,12 +273,14 @@ This design deliberately does not provide:
 
 Implementation should be split into reviewable PRs:
 
-1. Persist and validate immutable scope descriptors, including the non-zero
-   designated writer origin, exclusive selective membership, and negative
-   registration tests.
-2. Add scope-local capture/changelog/cursor storage and prove that a
-   scoped-plus-unscoped transaction publishes an atomic full global batch plus
-   its scoped projection, while mixed-scope transactions reject before commit.
+1. **Implemented foundation.** Persist and validate immutable scope
+   descriptors, including the non-zero designated writer origin and exclusive
+   selective membership. A manifest uses raw-capture-capable table tokens, not
+   arbitrary DBI names. The local write guard rejects a non-designated writer
+   before commit, including after restart.
+2. **Implemented foundation.** Scope-local capture/changelog/progress storage
+   publishes an atomic complete global batch plus its single scoped projection.
+   A transaction that touches two scopes rejects before commit.
 3. Add capability-gated scoped pull/push and tests for contiguous delivery,
    duplicates, gaps, wrong writer, foreign scope, descriptor mismatch, and
    restart.

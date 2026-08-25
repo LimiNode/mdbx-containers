@@ -260,6 +260,34 @@ namespace mdbxc {
             sync::ChangeOpType op_type) {
         try {
             (void)op_type;
+            sync::NodeId designated_writer_origin{};
+            if (selective_scope_writer_for_dbi(
+                    txn, dbi_name, designated_writer_origin)) {
+                sync::ISyncCaptureSink* sink = sync_capture();
+                if (sink == nullptr ||
+                    !sink->supports_selective_scope_capture()) {
+                    throw std::logic_error(
+                        "selective replication DBI requires an attached scope-aware sync capture sink");
+                }
+                if (sync_capture_suppressed(txn)) {
+                    throw std::logic_error(
+                        "public raw sync capture suppression cannot bypass a "
+                        "selective replication DBI");
+                }
+
+                sync::MetaStore meta(m_env);
+                sync::NodeId local_node_id{};
+                if (!meta.open_existing(txn) ||
+                    !meta.try_get_node_id(txn, local_node_id)) {
+                    throw std::logic_error(
+                        "selective replication DBI requires an initialized local node identity");
+                }
+                if (sync::compare_node_id(local_node_id,
+                                          designated_writer_origin) != 0) {
+                    throw std::logic_error(
+                        "non-designated origin cannot locally mutate a selective replication DBI");
+                }
+            }
             if (!is_sync_versioned_dbi(txn, dbi_name) &&
                 !is_sync_logical_dbi(txn, dbi_name)) {
                 return;
@@ -561,6 +589,13 @@ namespace mdbxc {
              static_cast<int>(MDBX_TXN_RDONLY)) != 0) {
             return;
         }
+        sync::NodeId selective_writer{};
+        if (selective_scope_writer_for_dbi(txn, dbi_name, selective_writer)) {
+            throw std::logic_error(
+                std::string(context) +
+                " cannot use caller-created raw writable MDBX_txn* with a "
+                "selective replication DBI; use Connection::transaction()");
+        }
         if (!is_sync_versioned_dbi(txn, dbi_name) &&
             !is_sync_logical_dbi(txn, dbi_name)) {
             return;
@@ -676,6 +711,21 @@ namespace mdbxc {
             throw std::runtime_error(
                 "Connection found invalid logical DBI binding");
         }
+        return true;
+    }
+
+    inline bool Connection::selective_scope_writer_for_dbi(
+            MDBX_txn* txn,
+            const std::string& dbi_name,
+            sync::NodeId& designated_writer_origin) const {
+        checked_txn_env(txn, m_env,
+                        "Connection::selective_scope_writer_for_dbi");
+        sync::SelectiveReplicationDbiBinding binding;
+        if (!sync::SelectiveReplicationStore::find_existing_for_dbi(
+                m_env, txn, dbi_name, binding)) {
+            return false;
+        }
+        designated_writer_origin = binding.designated_writer_origin;
         return true;
     }
 

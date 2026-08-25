@@ -1,9 +1,13 @@
 # Проектирование выборочной репликации
 
-Этот документ задаёт предлагаемый контракт для репликации выбранного набора raw
-user DBI. Это проект будущей реализации, а не API v0.1. Нынешние observers с
-фильтром по таблицам ограничивают только локальную доставку callback; они не
-фильтруют захват, транспорт, применение, снимки или хранение истории.
+Этот документ задаёт контракт для репликации выбранного набора raw user DBI.
+Базовая часть capture уже реализована: неизменяемые descriptor-ы, локальные
+ограничения для назначенного origin с правом записи, scope-local
+changelog/progress и атомарная публикация global и scoped batch. Scoped wire
+protocol, применение у получателя, snapshot/resume и retention ещё не
+реализованы. Нынешние observers с фильтрами по таблицам ограничивают только
+локальную доставку callback; они не фильтруют capture, transport, apply,
+snapshots или retention.
 
 Сначала прочитайте [восстановление и полные снимки sync](../docs/sync-recovery-RU.md)
 и [матрицу покрытия таблиц sync](sync-table-coverage-RU.md). Английская версия:
@@ -50,6 +54,14 @@ global raw pull для того же `DbId`.
 Для logical datasets нужна собственная семантика областей: их состояние включает
 schema, replay, порядок и delivery конкретному получателю. Их нельзя копировать
 как raw-подмножество.
+
+Публичный descriptor не принимает произвольную пару `(dbi_name, dbi_flags)`;
+каждый member manifest-а — это token `SelectiveReplicationDbi`, полученный
+через `SelectiveReplicationDbi::from()` для `KeyValueTable`, `KeyTable`,
+`ValueTable` или `SequenceTable`. Для deferred wrappers, включая
+`AnyValueTable`, `HashedKeyValueStore` и multi-value tables, factory overload
+нет: они не могут попасть в selective scope v1, пока для них не появится
+контракт capture/apply.
 
 ## Обязательные инварианты
 
@@ -163,7 +175,8 @@ ScopedSnapshotChunk   = неизменяемый descriptor + scoped source tail
 его origin обязан совпадать с назначенным в descriptor-е origin с правом
 записи. Только этот origin может выполнять локальные мутации приложения в scoped DBI и
 создавать её scoped projection; локальная мутация от другого origin
-отклоняется до commit. Это не меняет full-global apply: узел по-прежнему может
+отклоняется до commit, поэтому ни мутация, ни global capture не становятся
+постоянными. Это не меняет full-global apply: узел по-прежнему может
 применить raw history, полученную от другого origin, но не может выдавать её за
 scoped relay.
 
@@ -263,12 +276,14 @@ reset-and-bootstrap.
 
 Реализацию следует разбить на проверяемые PR:
 
-1. Постоянное хранение и проверка неизменяемых scope descriptor-ов, включая
-   ненулевой назначенный origin с правом записи, exclusive selective membership
-   и negative registration tests.
-2. Scope-local capture/changelog/cursor storage и доказательство, что
-   scoped-plus-unscoped transaction публикует атомарный полный global batch и
-   его scoped projection, а mixed-scope transaction отклоняется до commit.
+1. **Реализованная базовая часть.** Постоянное хранение и проверка
+   неизменяемых scope descriptor-ов включают ненулевой назначенный origin с
+   правом записи и exclusive selective membership. Manifest использует tokens
+   table с поддержанным raw capture, а не произвольные имена DBI. Локальный
+   guard отклоняет не назначенный origin до commit, в том числе после restart.
+2. **Реализованная базовая часть.** Scope-local capture/changelog/progress
+   атомарно публикуют полный global batch и его единственную scoped projection.
+   Транзакция, затрагивающая две области, отклоняется до commit.
 3. Capability-gated scoped pull/push и tests для contiguous delivery,
    duplicates, gaps, origin, не совпадающего с назначенным, foreign scope,
    descriptor mismatch и restart.
