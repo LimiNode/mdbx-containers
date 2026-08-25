@@ -1,3 +1,7 @@
+# Keep these checks intentionally lexical and repository-specific. Do not grow
+# this script into a C++ or Markdown parser; semantic checks belong in dedicated
+# tooling or tests.
+
 if(NOT DEFINED MDBXC_SOURCE_DIR)
     message(FATAL_ERROR "MDBXC_SOURCE_DIR is required")
 endif()
