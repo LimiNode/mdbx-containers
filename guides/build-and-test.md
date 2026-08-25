@@ -105,6 +105,16 @@ fixture after the run. Several tests intentionally use relative MDBX paths;
 launching their executable directly from the root bypasses that isolation and
 leaves `test_*.mdbx` and lock files there.
 
+Repository instruction and mechanical source-policy changes should include:
+
+```bash
+ctest --test-dir tmp/build-cpp17 -R '^agent_policy_checks$' --output-on-failure
+```
+
+The check validates project header-guard structure, forbids lambda default
+captures, verifies expected EN/RU document pairs, and resolves local Markdown
+document links in maintained agent and guide files.
+
 For direct debugging, change first to a disposable directory under the build
 tree, for example `tmp/build-cpp17/test-data/manual-debug`, before launching
 the executable.
@@ -195,6 +205,8 @@ sync_tick_hub_benchmark \
 - GitHub Actions builds on Windows with MSYS2/MinGW.
 - The matrix covers C++11 and C++17.
 - CI uses CMake with Ninja and runs `ctest --output-on-failure`.
+- The `agent_policy_checks` CTest gate enforces mechanical repository rules for
+  headers, lambda captures, normative documentation pairs, and local guide links.
 - A separate Linux C++17 smoke job builds and runs `sync_tick_hub_benchmark`
   with `MDBXC_BUILD_BENCHMARKS=ON`.
 - The separate `Archcheck` workflow runs `archcheck --diff` as an advisory

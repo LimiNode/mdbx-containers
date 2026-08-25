@@ -1,45 +1,49 @@
-# Critical Defaults
+# Critical Runtime Defaults
 
-Mandatory rules for AI coding agents working in `mdbx-containers`.
+Load this file when changing transactions, connection lifecycle, table opening,
+read-only behavior, or serialization. Repository workflow and scope rules live
+in the root `AGENTS.md` and `guides/coding-agent-workflow.md`.
 
-- Check `git status --short` before editing and do not overwrite user changes.
-- Prefer `rg` / `rg --files` for repository search.
-- Define a verifiable success criterion for every non-trivial task. Replace
-  imperative instructions with declarative goals. Example: instead of
-  "improve handler", use "reduce handler latency by 20% on the benchmark in
-  tests/bench.cpp".
-- State assumptions and show interpretation variants for ambiguous requests.
-  Do not make silent choices. If the request is unclear, ask for clarification
-  before writing code.
-- Prefer the minimal code that solves the task. No speculative features,
-  single-use abstractions, or handling of impossible scenarios. If the code can
-  be noticeably shortened, rewrite it. Test: would a senior call this
-  over-engineered? Then simplify.
-- When an agent goes off track, rewind to the point before the error and
-  reformulate — do not continue correcting in the same session. Context rot
-  accumulates and degrades output quality. Use focused `/compact <hint>` instead
-  of auto-compact when possible.
-- Keep edits scoped to the requested task and the relevant local style.
-- Keep `README.md` and `README-RU.md` synchronized; when one changes, update
-  the other in the same change unless the user explicitly narrows the scope.
-- Preserve C++11 compatibility unless the change is explicitly C++17-only and
-  properly guarded.
-- Do not use lambda default captures (`[&]` or `[=]`) in C++ code. List every
-  captured variable explicitly, and capture `this` explicitly when member access
-  is needed.
-- Do not introduce `thread_local` STL scratch buffers in serialization paths.
-- Follow MDBX transaction ownership: share one `Connection` per MDBX
-  environment, keep at most one active transaction per thread, and never pass
-  `Transaction`, raw `MDBX_txn*`, or MDBX cursors across threads.
-- Treat `configure()`, `connect()`, `disconnect()`, and `Connection`
-  destruction as lifecycle-only operations outside concurrent table activity.
-- Use `shutdown()`/`shutdown_for()` for coordinated close paths. `disconnect()`
-  is a strict lifecycle close and must fail with `MDBX_BUSY` while transaction
-  handles are open; do not abort transactions owned by another thread.
-- Preserve read-only table semantics: `BaseTable` strips `MDBX_CREATE` and opens
-  existing DBIs with `TransactionMode::READ_ONLY` when `Config::read_only` is
-  true; wrappers that open additional DBIs outside `BaseTable` must apply the
-  same rule, do not create missing directories, and writes should still fail
-  through MDBX.
-- For code changes, verify with the narrowest relevant tests, and use both C++11
-  and C++17 when the change touches shared headers or template behavior.
+## Transaction Ownership
+
+- Share one `Connection` per MDBX environment.
+- Keep at most one active transaction per thread.
+- Never pass `Transaction`, raw `MDBX_txn*`, or MDBX cursors across threads.
+- Caller-supplied transaction handles must belong to the same MDBX environment
+  as the receiving table, store, or sync engine.
+
+These rules follow MDBX transaction ownership. A wrapper mutex does not transfer
+transaction ownership and is not a substitute for the invariant. Verify changes
+with the manual and automatic transaction tests relevant to the edited path.
+
+## Connection Lifecycle
+
+- Treat `configure()`, `connect()`, `disconnect()`, and `Connection` destruction
+  as lifecycle-only operations outside concurrent table activity.
+- Use `shutdown()` or `shutdown_for()` for coordinated close paths.
+- Keep `disconnect()` strict: it must fail with `MDBX_BUSY` while transaction
+  handles are open and must not abort a transaction owned by another thread.
+
+## Read-Only Environments
+
+`BaseTable` strips `MDBX_CREATE` and opens existing DBIs with a read-only
+transaction when `Config::read_only` is true. Wrappers and sync stores that open
+additional DBIs outside `BaseTable` must preserve the same behavior:
+
+- do not create missing directories or named DBIs;
+- do not silently upgrade a read transaction;
+- let writes fail through MDBX rather than emulating success.
+
+## Serialization
+
+Use the existing `SerializeScratch` pattern. Do not add `thread_local` STL
+containers as serialization scratch; that pattern caused MinGW thread-local
+destructor failures. Run `kv_container_all_types_test` plus the affected table
+tests when serialization changes.
+
+## Compatibility
+
+Public headers and templates remain C++11-compatible unless newer APIs are
+properly guarded and have a C++11 fallback. Check both language modes for shared
+header changes. Preserve the repository include-guard convention and standalone
+entry-point compilation coverage.
