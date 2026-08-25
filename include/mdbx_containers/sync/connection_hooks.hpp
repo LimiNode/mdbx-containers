@@ -16,6 +16,8 @@
 #include "logical/LogicalChange.hpp"
 #include "capture/ILogicalDbiCapture.hpp"
 #include "logical/stores/LogicalDbiBindingStore.hpp"
+#include "stores/MetaStore.hpp"
+#include "stores/SelectiveReplicationStore.hpp"
 #endif
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_CONNECTION_HOOKS_HPP_INCLUDED

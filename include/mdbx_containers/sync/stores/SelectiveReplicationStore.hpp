@@ -13,6 +13,7 @@
 #include <vector>
 
 #include <mdbx.h>
+#include <mdbx_containers/detail/utils.hpp>
 
 namespace mdbxc {
 template<class KeyT, class ValueT, class Options> class KeyValueTable;
@@ -211,6 +212,73 @@ namespace sync {
             return true;
         }
 
+        /// \brief Looks up a DBI in the default durable scope index without
+        /// creating or opening unrelated selective stores.
+        /// \details This is the connection write-guard path. Binding bytes are
+        /// decoded by the same canonical decoder as instance lookups.
+        static bool find_existing_for_dbi(
+                MDBX_env* env, MDBX_txn* txn, const std::string& dbi_name,
+                SelectiveReplicationDbiBinding& out) {
+            txn = checked_txn_env(
+                txn, env,
+                "SelectiveReplicationStore::find_existing_for_dbi");
+            static const char scopes_dbi_name[] =
+                "_mdbxc_selective_scopes";
+            static const char dbis_dbi_name[] =
+                "_mdbxc_selective_scope_dbis";
+
+            MDBX_dbi main_dbi = 0;
+            check_mdbx(mdbx_dbi_open(
+                           txn, nullptr, static_cast<MDBX_db_flags_t>(0),
+                           &main_dbi),
+                       "Failed to open main DBI for selective scope lookup");
+            MDBX_val registry_name = {
+                const_cast<char*>(dbis_dbi_name),
+                sizeof(dbis_dbi_name) - 1u
+            };
+            MDBX_val registry_value;
+            const int registry_rc = mdbx_get(
+                txn, main_dbi, &registry_name, &registry_value);
+            if (registry_rc == MDBX_NOTFOUND) {
+                MDBX_val descriptor_name = {
+                    const_cast<char*>(scopes_dbi_name),
+                    sizeof(scopes_dbi_name) - 1u
+                };
+                const int descriptor_rc = mdbx_get(
+                    txn, main_dbi, &descriptor_name, &registry_value);
+                if (descriptor_rc != MDBX_NOTFOUND) {
+                    check_mdbx(
+                        descriptor_rc,
+                        "Failed to find selective scope descriptor store");
+                    throw std::runtime_error(
+                        "selective scope descriptors exist without DBI index");
+                }
+                return false;
+            }
+            check_mdbx(registry_rc,
+                       "Failed to find selective scope DBI index");
+
+            MDBX_dbi bindings_dbi = 0;
+            const int open_rc = mdbx_dbi_open(
+                txn, dbis_dbi_name, static_cast<MDBX_db_flags_t>(0),
+                &bindings_dbi);
+            if (open_rc == MDBX_NOTFOUND) {
+                throw std::runtime_error(
+                    "selective scope DBI index is missing after registry lookup");
+            }
+            check_mdbx(open_rc, "Failed to open selective scope DBI index");
+
+            MDBX_val key = string_value(dbi_name);
+            MDBX_val value;
+            const int get_rc = mdbx_get(
+                txn, bindings_dbi, &key, &value);
+            if (get_rc == MDBX_NOTFOUND) return false;
+            check_mdbx(get_rc,
+                       "Selective replication DBI binding read failed");
+            decode_binding(value, out);
+            return true;
+        }
+
     private:
         static const std::uint32_t format_version = 1u;
 
@@ -222,12 +290,6 @@ namespace sync {
             if (!m_open) {
                 throw std::logic_error("SelectiveReplicationStore is not open");
             }
-        }
-
-        static bool is_reserved_name(const std::string& name) {
-            static const char reserved_prefix[] = "_mdbxc_";
-            return name.compare(0u, sizeof(reserved_prefix) - 1u,
-                                reserved_prefix) == 0;
         }
 
         static bool named_dbi_exists(MDBX_txn* txn, MDBX_dbi main_dbi,
@@ -256,7 +318,8 @@ namespace sync {
             }
             for (std::size_t i = 0; i < descriptor.manifest.size(); ++i) {
                 const std::string& dbi_name = descriptor.manifest[i].dbi_name();
-                if (dbi_name.empty() || is_reserved_name(dbi_name)) {
+                if (dbi_name.empty() ||
+                    ::mdbxc::is_reserved_dbi_name(dbi_name)) {
                     throw std::invalid_argument(
                         "selective replication manifest contains invalid DBI name");
                 }

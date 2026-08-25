@@ -275,31 +275,13 @@ namespace mdbxc {
                         "selective replication DBI");
                 }
 
-                static const char meta_dbi_name[] = "_mdbxc_meta";
-                std::uint8_t node_id_key = 0x02u;
-                MDBX_dbi meta_dbi = 0;
-                check_mdbx(
-                    mdbx_dbi_open(txn, meta_dbi_name,
-                                  static_cast<MDBX_db_flags_t>(0), &meta_dbi),
-                    "Connection failed to open sync metadata for selective writer validation");
-                MDBX_val key = {
-                    const_cast<std::uint8_t*>(&node_id_key), 1u
-                };
-                MDBX_val value;
-                const int get_rc = mdbx_get(txn, meta_dbi, &key, &value);
-                if (get_rc == MDBX_NOTFOUND) {
-                    throw std::logic_error(
-                        "selective replication DBI requires an initialized local node identity");
-                }
-                check_mdbx(get_rc,
-                           "Connection failed to read local node identity for selective writer validation");
-                if (value.iov_len != 16u) {
-                    throw std::logic_error(
-                        "selective replication DBI requires an initialized local node identity");
-                }
+                sync::MetaStore meta(m_env);
                 sync::NodeId local_node_id{};
-                std::memcpy(local_node_id.data(), value.iov_base,
-                            local_node_id.size());
+                if (!meta.open_existing(txn) ||
+                    !meta.try_get_node_id(txn, local_node_id)) {
+                    throw std::logic_error(
+                        "selective replication DBI requires an initialized local node identity");
+                }
                 if (sync::compare_node_id(local_node_id,
                                           designated_writer_origin) != 0) {
                     throw std::logic_error(
@@ -738,79 +720,12 @@ namespace mdbxc {
             sync::NodeId& designated_writer_origin) const {
         checked_txn_env(txn, m_env,
                         "Connection::selective_scope_writer_for_dbi");
-        static const char descriptor_registry_name[] =
-            "_mdbxc_selective_scopes";
-        static const char binding_registry_name[] =
-            "_mdbxc_selective_scope_dbis";
-        static const std::uint32_t binding_format_version = 1u;
-
-        MDBX_dbi main_dbi = 0;
-        check_mdbx(mdbx_dbi_open(txn, nullptr,
-                                 static_cast<MDBX_db_flags_t>(0), &main_dbi),
-                   "Connection failed to open main DBI for selective writer validation");
-        MDBX_val registry_name = {
-            const_cast<char*>(binding_registry_name),
-            sizeof(binding_registry_name) - 1u
-        };
-        MDBX_val registry_value;
-        const int registry_lookup_rc = mdbx_get(
-            txn, main_dbi, &registry_name, &registry_value);
-        if (registry_lookup_rc == MDBX_NOTFOUND) {
-            MDBX_val descriptor_name = {
-                const_cast<char*>(descriptor_registry_name),
-                sizeof(descriptor_registry_name) - 1u
-            };
-            const int descriptor_lookup_rc = mdbx_get(
-                txn, main_dbi, &descriptor_name, &registry_value);
-            if (descriptor_lookup_rc != MDBX_NOTFOUND) {
-                check_mdbx(descriptor_lookup_rc,
-                           "Connection failed to find selective scope descriptors");
-                throw std::runtime_error(
-                    "selective scope descriptors exist without DBI index");
-            }
+        sync::SelectiveReplicationDbiBinding binding;
+        if (!sync::SelectiveReplicationStore::find_existing_for_dbi(
+                m_env, txn, dbi_name, binding)) {
             return false;
         }
-        check_mdbx(registry_lookup_rc,
-                   "Connection failed to find selective scope DBI index");
-
-        MDBX_dbi bindings_dbi = 0;
-        const int open_rc = mdbx_dbi_open(
-            txn, binding_registry_name, static_cast<MDBX_db_flags_t>(0),
-            &bindings_dbi);
-        if (open_rc == MDBX_NOTFOUND) {
-            throw std::runtime_error(
-                "selective scope DBI index is missing after registry lookup");
-        }
-        check_mdbx(open_rc,
-                   "Connection failed to open selective scope DBI index");
-
-        MDBX_val key = {
-            dbi_name.empty() ? nullptr : const_cast<char*>(dbi_name.data()),
-            dbi_name.size()
-        };
-        MDBX_val value;
-        const int get_rc = mdbx_get(txn, bindings_dbi, &key, &value);
-        if (get_rc == MDBX_NOTFOUND) return false;
-        check_mdbx(get_rc,
-                   "Connection failed to read selective scope DBI binding");
-
-        const std::uint8_t* const bytes =
-            static_cast<const std::uint8_t*>(value.iov_base);
-        if (value.iov_len < 4u + 4u + 16u + 4u ||
-            sync::detail::read_u32_le(bytes) != binding_format_version) {
-            throw std::runtime_error(
-                "selective scope DBI binding has invalid format");
-        }
-        const std::uint32_t scope_id_size =
-            sync::detail::read_u32_le(bytes + 4u);
-        if (scope_id_size > value.iov_len - 8u ||
-            value.iov_len - 8u - scope_id_size != 16u + 4u) {
-            throw std::runtime_error(
-                "selective scope DBI binding has invalid size");
-        }
-        const std::size_t writer_offset = 8u + scope_id_size;
-        std::memcpy(designated_writer_origin.data(), bytes + writer_offset,
-                    designated_writer_origin.size());
+        designated_writer_origin = binding.designated_writer_origin;
         return true;
     }
 

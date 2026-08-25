@@ -476,6 +476,115 @@ void test_selective_scope_rejects_non_designated_local_writer() {
     cleanup(foreign_path);
 }
 
+void test_selective_scope_rejects_corrupt_durable_guard_state() {
+    using namespace mdbxc;
+    const std::string binding_path =
+        "test_selective_scope_corrupt_binding.mdbx";
+    const std::string identity_path =
+        "test_selective_scope_corrupt_identity.mdbx";
+    cleanup(binding_path);
+    cleanup(identity_path);
+
+    {
+        std::shared_ptr<Connection> conn = open_env(binding_path);
+        sync::SyncEngine engine(conn);
+        const sync::NodeId local_node = make_node(0x86);
+        engine.initialize_local_identity(local_node, make_node(0xD6));
+        KeyValueTable<int, int> orders(conn, "orders");
+        sync::SelectiveReplicationDescriptor descriptor;
+        descriptor.scope_id = "orders_scope";
+        descriptor.designated_writer_origin = local_node;
+        descriptor.manifest.push_back(
+            sync::SelectiveReplicationDbi::from(orders));
+        engine.register_selective_replication_scope(descriptor);
+
+        {
+            auto txn = conn->transaction(TransactionMode::WRITABLE);
+            MDBX_dbi bindings = 0;
+            check_mdbx(mdbx_dbi_open(
+                           txn.handle(), "_mdbxc_selective_scope_dbis",
+                           static_cast<MDBX_db_flags_t>(0), &bindings),
+                       "failed to open selective binding index for corruption test");
+            std::uint8_t truncated_binding[4];
+            sync::detail::write_u32_le(1u, truncated_binding);
+            const std::string dbi_name = "orders";
+            MDBX_val key = {
+                const_cast<char*>(dbi_name.data()), dbi_name.size()
+            };
+            MDBX_val value = {
+                truncated_binding, sizeof(truncated_binding)
+            };
+            check_mdbx(mdbx_put(txn.handle(), bindings, &key, &value,
+                                MDBX_UPSERT),
+                       "failed to corrupt selective binding index");
+            txn.commit();
+        }
+
+        sync::ThreadLocalChangeAccumulator capture(conn);
+        conn->attach_sync_capture(&capture);
+        bool rejected = false;
+        try {
+            orders.insert_or_assign(1, 10);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected || kv_has(conn, orders, 1)) {
+            throw std::runtime_error(
+                "corrupt selective binding did not fail closed before mutation");
+        }
+        conn->detach_sync_capture();
+        conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<Connection> conn = open_env(identity_path);
+        sync::SyncEngine engine(conn);
+        const sync::NodeId local_node = make_node(0x87);
+        engine.initialize_local_identity(local_node, make_node(0xD7));
+        KeyValueTable<int, int> orders(conn, "orders");
+        sync::SelectiveReplicationDescriptor descriptor;
+        descriptor.scope_id = "orders_scope";
+        descriptor.designated_writer_origin = local_node;
+        descriptor.manifest.push_back(
+            sync::SelectiveReplicationDbi::from(orders));
+        engine.register_selective_replication_scope(descriptor);
+
+        {
+            auto txn = conn->transaction(TransactionMode::WRITABLE);
+            sync::MetaStore meta(conn->env_handle());
+            meta.open(txn.handle());
+            std::uint8_t node_id_key = 0x02u;
+            std::uint8_t truncated_node_id[15] = {};
+            MDBX_val key = { &node_id_key, 1u };
+            MDBX_val value = {
+                truncated_node_id, sizeof(truncated_node_id)
+            };
+            check_mdbx(mdbx_put(txn.handle(), meta.handle(), &key, &value,
+                                MDBX_UPSERT),
+                       "failed to corrupt local node identity");
+            txn.commit();
+        }
+
+        sync::ThreadLocalChangeAccumulator capture(conn);
+        conn->attach_sync_capture(&capture);
+        bool rejected = false;
+        try {
+            orders.insert_or_assign(1, 10);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected || kv_has(conn, orders, 1)) {
+            throw std::runtime_error(
+                "corrupt local node identity did not fail closed before mutation");
+        }
+        conn->detach_sync_capture();
+        conn->disconnect();
+    }
+
+    cleanup(binding_path);
+    cleanup(identity_path);
+}
+
 void test_selective_scope_does_not_create_stores_without_descriptor() {
     using namespace mdbxc;
     const std::string path = "test_selective_scope_no_descriptor.mdbx";
@@ -5040,6 +5149,8 @@ int main() {
         { "test_engine_round_trip_kv",          &test_engine_round_trip_kv },
         { "test_selective_scope_rejects_non_designated_writer",
           &test_selective_scope_rejects_non_designated_local_writer },
+        { "test_selective_scope_rejects_corrupt_durable_guard_state",
+          &test_selective_scope_rejects_corrupt_durable_guard_state },
         { "test_selective_scope_does_not_create_stores_without_descriptor",
           &test_selective_scope_does_not_create_stores_without_descriptor },
         { "test_selective_scope_preserves_raw_capture_at_dbi_handle_limit",
