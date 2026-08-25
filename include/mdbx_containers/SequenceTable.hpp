@@ -487,28 +487,6 @@ namespace mdbxc {
         }
 
     private:
-        template<typename F>
-        void with_transaction(F&& action, TransactionMode mode, MDBX_txn* txn = nullptr) const {
-            if (txn) {
-                action(checked_external_txn(txn));
-                return;
-            }
-            txn = thread_txn();
-            if (txn) {
-                action(txn);
-                return;
-            }
-
-            auto txn_guard = m_connection->transaction(mode);
-            try {
-                action(txn_guard.handle());
-                txn_guard.commit();
-            } catch (...) {
-                try { txn_guard.rollback(); } catch (...) {}
-                throw;
-            }
-        }
-
         static uint64_t read_index_key(const MDBX_val& db_key) {
             if (!db_key.iov_base || db_key.iov_len != sizeof(uint64_t)) {
                 throw std::runtime_error("SequenceTable: invalid index key");

@@ -1387,38 +1387,6 @@ namespace mdbxc {
 
     private:
     
-        /// \brief Executes a functor within a transaction context.
-        /// \tparam F Callable type accepting `MDBX_txn*`.
-        /// \param action Functor to execute.
-        /// \param mode Transaction mode used when a new transaction is created.
-        /// \param txn Optional existing transaction handle.
-        template<typename F>
-        void with_transaction(F&& action, TransactionMode mode = TransactionMode::WRITABLE, MDBX_txn* txn = nullptr) const {
-            if (txn) {
-                action(checked_external_txn(txn));
-                return;
-            }
-            txn = thread_txn(); // reuse transaction bound to this thread if any
-            if (txn) {
-                action(txn);
-                return;
-            }
-            
-            auto txn_guard = m_connection->transaction(mode);
-            try {
-                action(txn_guard.handle());
-                txn_guard.commit();
-            } catch(...) {
-                // Ensure rollback on any exception and rethrow to the caller
-                try {
-                    txn_guard.rollback();
-                } catch(...) {
-                    // Ignore rollback errors here
-                }
-                throw;
-            }
-        }
-    
         /// \brief Loads data from the database into the container.
         /// \tparam ContainerT Template for the container type.
         /// \param container Container to be synchronized with database content.

@@ -518,28 +518,6 @@ namespace mdbxc {
             }
         }
 
-        template<typename F>
-        void with_transaction(F&& action, TransactionMode mode, MDBX_txn* txn = nullptr) const {
-            if (txn) {
-                action(checked_external_txn(txn));
-                return;
-            }
-            txn = thread_txn();
-            if (txn) {
-                action(txn);
-                return;
-            }
-
-            auto txn_guard = m_connection->transaction(mode);
-            try {
-                action(txn_guard.handle());
-                txn_guard.commit();
-            } catch (...) {
-                try { txn_guard.rollback(); } catch (...) {}
-                throw;
-            }
-        }
-
         static void encode_order(std::uint64_t order, std::uint8_t* out) {
             for (std::size_t i = 0; i < order_size; ++i) {
                 out[i] = static_cast<std::uint8_t>((order >> ((order_size - 1 - i) * 8)) & 0xffu);
