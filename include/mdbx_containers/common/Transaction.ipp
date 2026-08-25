@@ -247,9 +247,6 @@ namespace mdbxc {
             MDBX_txn* txn = m_txn;
             const int rc = mdbx_txn_reset(txn);
 
-            if (rc == MDBX_THREAD_MISMATCH) {
-                check_mdbx(rc, "Failed to reset read-only transaction");
-            }
             check_mdbx(rc, "Failed to reset read-only transaction");
 
             m_started = false;
@@ -265,9 +262,6 @@ namespace mdbxc {
 #           endif
             const int rc = mdbx_txn_abort(txn);
 
-            if (rc == MDBX_THREAD_MISMATCH) {
-                check_mdbx(rc, "Failed to abort writable transaction");
-            }
             check_mdbx(rc, "Failed to abort writable transaction");
 
             // Only MDBX_SUCCESS reaches this point; the native handle is terminated.

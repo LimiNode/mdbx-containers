@@ -109,7 +109,7 @@ namespace sync {
                     ++removed;
                     rc = mdbx_cursor_get(raw, &k, &v, MDBX_NEXT);
                 }
-                if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                if (rc != MDBX_NOTFOUND) {
                     check_mdbx(rc, "OriginIndexStore clear cursor walk failed");
                 }
             } catch (...) {
@@ -180,7 +180,7 @@ namespace sync {
                     out.push_back(tail);
                     rc = mdbx_cursor_get(raw, &k, &v, MDBX_NEXT);
                 }
-                if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                if (rc != MDBX_NOTFOUND) {
                     check_mdbx(rc, "OriginIndexStore origin_tails cursor walk failed");
                 }
             } catch (...) {

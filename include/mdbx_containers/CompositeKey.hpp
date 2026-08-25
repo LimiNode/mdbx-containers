@@ -226,11 +226,11 @@ namespace detail {
             const std::uint32_t raw =
                 composite_key_read_big_endian<std::uint32_t>(current, end);
             const float value = float_from_sortable_key(raw);
+            bool is_canonical = false;
             try {
-                if (sortable_key_from_float(value) != raw) {
-                    throw std::invalid_argument("non-canonical float");
-                }
-            } catch (const std::invalid_argument&) {
+                is_canonical = sortable_key_from_float(value) == raw;
+            } catch (const std::invalid_argument&) {}
+            if (!is_canonical) {
                 throw std::runtime_error(
                     "CompositeKey::from_bytes: invalid or non-canonical float component");
             }
@@ -248,11 +248,11 @@ namespace detail {
             const std::uint64_t raw =
                 composite_key_read_big_endian<std::uint64_t>(current, end);
             const double value = double_from_sortable_key(raw);
+            bool is_canonical = false;
             try {
-                if (sortable_key_from_double(value) != raw) {
-                    throw std::invalid_argument("non-canonical double");
-                }
-            } catch (const std::invalid_argument&) {
+                is_canonical = sortable_key_from_double(value) == raw;
+            } catch (const std::invalid_argument&) {}
+            if (!is_canonical) {
                 throw std::runtime_error(
                     "CompositeKey::from_bytes: invalid or non-canonical double component");
             }

@@ -521,8 +521,8 @@ namespace mdbxc {
             if (n) std::memcpy(bytes.data(), p, n);
         }
 
-        /// \brief Optionally clear and release capacity.
-        inline void clear() noexcept { bytes.clear(); bytes.shrink_to_fit(); }
+        /// \brief Clear the current contents while retaining allocated capacity.
+        inline void clear() noexcept { bytes.clear(); }
     };
 
     template<typename T>

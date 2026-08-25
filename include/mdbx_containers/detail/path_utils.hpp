@@ -340,32 +340,6 @@ namespace mdbxc {
         // ----- tokenize and fold . / .. -----
         std::vector<std::string> comps;
 
-        auto push_component = [&comps](const std::string& token) {
-            if (token.empty() || token == ".") return;
-            if (token == "..") {
-#           ifdef _WIN32
-            // Для UNC «корень» — server/share: их нельзя выталкивать назад.
-            size_t protected_root = 0;
-            if (
-                    // UNC и есть server/share
-                    true
-#               ifdef _WIN32
-                    && false
-#               endif
-                ) { /* защищённая зона настроена ниже */ }
-#           endif
-                if (!comps.empty() && comps.back() != "..") {
-                    // нельзя уходить выше корня абсолютного пути
-                    comps.pop_back();
-                } else {
-                    // относительный путь или уже нет куда сворачивать
-                    comps.push_back("..");
-                }
-            } else {
-                comps.push_back(token);
-            }
-        };
-
 #       ifdef _WIN32
         // Для UNC защищаем первые два компонента (server/share) от свёртки ".."
         size_t protected_count = 0;
