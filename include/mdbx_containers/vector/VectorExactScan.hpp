@@ -70,7 +70,6 @@ namespace mdbxc {
         std::vector<std::string> m_record_ids;
         std::vector<float> m_values;
 
-        static void normalize(float* values, std::size_t dimension);
         float compute_score(const float* query, const float* candidate) const;
     };
 

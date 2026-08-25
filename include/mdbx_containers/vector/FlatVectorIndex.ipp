@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <stdexcept>
 
+#include "detail/vector_math.hpp"
+
 namespace mdbxc {
 
     inline FlatVectorIndex::FlatVectorIndex(VectorMetric metric)
@@ -23,27 +25,56 @@ namespace mdbxc {
         }
     }
 
+    inline std::size_t FlatVectorIndex::geometric_capacity(
+            std::size_t current,
+            std::size_t required,
+            std::size_t maximum) {
+        if (required > maximum) {
+            throw std::length_error("FlatVectorIndex capacity exceeded");
+        }
+        std::size_t capacity = current == 0u ? 1u : current;
+        while (capacity < required) {
+            if (capacity > maximum - capacity) {
+                capacity = maximum;
+                break;
+            }
+            capacity += capacity;
+        }
+        return capacity;
+    }
+
+    inline void FlatVectorIndex::reserve_for_add() {
+        const std::size_t dimension = static_cast<std::size_t>(m_dim);
+        const std::size_t max_records = (std::min)(
+            m_ids.max_size(), m_vectors.max_size() / dimension);
+        if (m_ids.size() == max_records) {
+            throw std::length_error("FlatVectorIndex capacity exceeded");
+        }
+        const std::size_t required_records = m_ids.size() + 1u;
+        const std::size_t current_records = (std::min)(
+            m_ids.capacity(), m_vectors.capacity() / dimension);
+        const std::size_t target_records = geometric_capacity(
+            current_records, required_records, max_records);
+
+        if (m_ids.capacity() < target_records) {
+            m_ids.reserve(target_records);
+        }
+        const std::size_t target_values = target_records * dimension;
+        if (m_vectors.capacity() < target_values) {
+            m_vectors.reserve(target_values);
+        }
+    }
+
     inline void FlatVectorIndex::add(uint64_t id, const Embedding& embedding) {
         check_dim(embedding);
-        std::vector<float> stored(m_dim);
+        std::vector<float> stored(embedding.values);
         if (m_metric == VectorMetric::COSINE) {
-            float norm = 0.0f;
-            for (std::size_t i = 0; i < embedding.values.size(); ++i) {
-                norm += embedding.values[i] * embedding.values[i];
-            }
-            norm = std::sqrt(norm);
-            if (norm > 0.0f) {
-                for (std::size_t i = 0; i < m_dim; ++i) {
-                    stored[i] = embedding.values[i] / norm;
-                }
-            } else {
-                std::fill(stored.begin(), stored.end(), 0.0f);
-            }
-        } else {
-            std::memcpy(stored.data(), embedding.values.data(), m_dim * sizeof(float));
+            detail::normalize_vector_for_cosine(stored.data(), stored.size());
         }
-        m_ids.reserve(m_ids.size() + 1);
-        m_vectors.reserve(m_vectors.size() + m_dim);
+
+        // Reserve both arrays before mutating either one. Once capacity is
+        // available, uint64_t/float insertion cannot allocate or throw.
+        reserve_for_add();
         m_ids.push_back(id);
         m_vectors.insert(m_vectors.end(), stored.begin(), stored.end());
     }
@@ -99,22 +130,10 @@ namespace mdbxc {
         }
 
         // Prepare query vector (normalize for COSINE)
-        std::vector<float> query_vec(m_dim);
+        std::vector<float> query_vec(query.values);
         if (m_metric == VectorMetric::COSINE) {
-            float norm = 0.0f;
-            for (std::size_t i = 0; i < query.values.size(); ++i) {
-                norm += query.values[i] * query.values[i];
-            }
-            norm = std::sqrt(norm);
-            if (norm > 0.0f) {
-                for (std::size_t i = 0; i < m_dim; ++i) {
-                    query_vec[i] = query.values[i] / norm;
-                }
-            } else {
-                std::fill(query_vec.begin(), query_vec.end(), 0.0f);
-            }
-        } else {
-            std::memcpy(query_vec.data(), query.values.data(), m_dim * sizeof(float));
+            detail::normalize_vector_for_cosine(
+                query_vec.data(), query_vec.size());
         }
 
         std::size_t n = m_ids.size();

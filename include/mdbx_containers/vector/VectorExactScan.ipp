@@ -5,27 +5,12 @@
 #include <stdexcept>
 #include <utility>
 
+#include "detail/vector_math.hpp"
+
 namespace mdbxc {
 
     inline VectorExactScan::VectorExactScan(const VectorCollection& collection) {
         rebuild(collection);
-    }
-
-    inline void VectorExactScan::normalize(float* values, std::size_t dimension) {
-        double squared_norm = 0.0;
-        for (std::size_t index = 0u; index < dimension; ++index) {
-            const double component = static_cast<double>(values[index]);
-            squared_norm += component * component;
-        }
-        const double norm = std::sqrt(squared_norm);
-        if (norm == 0.0) {
-            std::fill(values, values + dimension, 0.0f);
-            return;
-        }
-        for (std::size_t index = 0u; index < dimension; ++index) {
-            values[index] = static_cast<float>(
-                static_cast<double>(values[index]) / norm);
-        }
     }
 
     inline void VectorExactScan::rebuild(const VectorCollection& collection) {
@@ -57,7 +42,8 @@ namespace mdbxc {
             const std::size_t value_offset = values.size();
             values.insert(values.end(), embedding.values.begin(), embedding.values.end());
             if (descriptor.metric == VectorMetric::COSINE) {
-                normalize(values.data() + value_offset, descriptor.dimension);
+                detail::normalize_vector_for_cosine(
+                    values.data() + value_offset, descriptor.dimension);
             }
         }
 
@@ -99,7 +85,8 @@ namespace mdbxc {
 
         std::vector<float> prepared_query(query.values);
         if (m_metric == VectorMetric::COSINE) {
-            normalize(prepared_query.data(), prepared_query.size());
+            detail::normalize_vector_for_cosine(
+                prepared_query.data(), prepared_query.size());
         }
 
         std::vector<VectorExactMatch> matches;
