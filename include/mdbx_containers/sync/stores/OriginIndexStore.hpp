@@ -78,12 +78,11 @@ namespace sync {
         bool empty(MDBX_txn* txn) const {
             txn = checked_txn(txn, "OriginIndexStore::empty");
             ensure_open();
-            MDBX_cursor* raw = nullptr;
-            check_mdbx(mdbx_cursor_open(txn, m_dbi, &raw),
+            mdbxc::detail::MdbxCursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
                        "OriginIndexStore empty cursor open failed");
             MDBX_val k, v;
-            const int rc = mdbx_cursor_get(raw, &k, &v, MDBX_FIRST);
-            mdbx_cursor_close(raw);
+            const int rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_FIRST);
             if (rc == MDBX_NOTFOUND) return true;
             check_mdbx(rc, "OriginIndexStore empty cursor get failed");
             return false;
@@ -96,27 +95,21 @@ namespace sync {
         std::size_t clear(MDBX_txn* txn) {
             txn = checked_txn(txn, "OriginIndexStore::clear");
             ensure_open();
-            MDBX_cursor* raw = nullptr;
-            check_mdbx(mdbx_cursor_open(txn, m_dbi, &raw),
+            mdbxc::detail::MdbxCursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
                        "OriginIndexStore clear cursor open failed");
             std::size_t removed = 0;
-            try {
-                MDBX_val k, v;
-                int rc = mdbx_cursor_get(raw, &k, &v, MDBX_FIRST);
-                while (rc == MDBX_SUCCESS) {
-                    check_mdbx(mdbx_cursor_del(raw, MDBX_CURRENT),
-                               "OriginIndexStore clear cursor_del failed");
-                    ++removed;
-                    rc = mdbx_cursor_get(raw, &k, &v, MDBX_NEXT);
-                }
-                if (rc != MDBX_NOTFOUND) {
-                    check_mdbx(rc, "OriginIndexStore clear cursor walk failed");
-                }
-            } catch (...) {
-                mdbx_cursor_close(raw);
-                throw;
+            MDBX_val k, v;
+            int rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_FIRST);
+            while (rc == MDBX_SUCCESS) {
+                check_mdbx(mdbx_cursor_del(cursor.get(), MDBX_CURRENT),
+                           "OriginIndexStore clear cursor_del failed");
+                ++removed;
+                rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_NEXT);
             }
-            mdbx_cursor_close(raw);
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "OriginIndexStore clear cursor walk failed");
+            }
             return removed;
         }
 
@@ -159,35 +152,29 @@ namespace sync {
             txn = checked_txn(txn, "OriginIndexStore::origin_tails");
             ensure_open();
             std::vector<OriginTail> out;
-            MDBX_cursor* raw = nullptr;
-            check_mdbx(mdbx_cursor_open(txn, m_dbi, &raw),
+            mdbxc::detail::MdbxCursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
                        "OriginIndexStore origin_tails cursor open failed");
-            try {
-                MDBX_val k, v;
-                int rc = mdbx_cursor_get(raw, &k, &v, MDBX_FIRST);
-                while (rc == MDBX_SUCCESS) {
-                    if (k.iov_len != 16) {
-                        throw std::runtime_error("OriginIndexStore key has invalid size");
-                    }
-                    if (v.iov_len != 8) {
-                        throw std::runtime_error("OriginIndexStore value has invalid size");
-                    }
-                    OriginTail tail;
-                    tail.origin = NodeId();
-                    std::memcpy(tail.origin.data(), k.iov_base, 16);
-                    tail.last_seq =
-                        detail::read_u64_le(static_cast<const std::uint8_t*>(v.iov_base));
-                    out.push_back(tail);
-                    rc = mdbx_cursor_get(raw, &k, &v, MDBX_NEXT);
+            MDBX_val k, v;
+            int rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_FIRST);
+            while (rc == MDBX_SUCCESS) {
+                if (k.iov_len != 16) {
+                    throw std::runtime_error("OriginIndexStore key has invalid size");
                 }
-                if (rc != MDBX_NOTFOUND) {
-                    check_mdbx(rc, "OriginIndexStore origin_tails cursor walk failed");
+                if (v.iov_len != 8) {
+                    throw std::runtime_error("OriginIndexStore value has invalid size");
                 }
-            } catch (...) {
-                mdbx_cursor_close(raw);
-                throw;
+                OriginTail tail;
+                tail.origin = NodeId();
+                std::memcpy(tail.origin.data(), k.iov_base, 16);
+                tail.last_seq =
+                    detail::read_u64_le(static_cast<const std::uint8_t*>(v.iov_base));
+                out.push_back(tail);
+                rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_NEXT);
             }
-            mdbx_cursor_close(raw);
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "OriginIndexStore origin_tails cursor walk failed");
+            }
             return out;
         }
 
