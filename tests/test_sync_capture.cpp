@@ -1602,6 +1602,15 @@ void test_changelog_capture_auto_transaction_loop() {
                     "auto-transaction loop changelog value mismatch at seq " +
                     std::to_string(seq));
             }
+
+            const MDBX_val captured_key = SerializeScratch::view(
+                batch.ops[0].storage_key.data(),
+                batch.ops[0].storage_key.size());
+            if (deserialize_key<int>(captured_key) != key) {
+                throw std::runtime_error(
+                    "auto-transaction loop changelog key mismatch at seq " +
+                    std::to_string(seq));
+            }
         }
 
         if (changelog.contains(txn.handle(), node_id,
