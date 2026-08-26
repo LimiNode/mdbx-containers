@@ -11,10 +11,30 @@ These instructions apply to public library headers under
 - Preserve source compatibility unless the task explicitly approves a breaking
   change. Prefer extending an existing overload or options type over adding a
   parallel abstraction.
-- Keep project headers standalone where they are public entry points. Internal
-  implementation leaves may rely on prerequisites supplied by their owning
-  aggregate when a direct include would create an upward dependency or back
-  edge.
+- Do not use include-what-you-use as the default project-header policy. An
+  owning public or domain entry point includes shared prerequisites before its
+  internal implementation leaves; those leaves may rely on that include
+  context instead of creating upward dependencies or back edges.
+
+## Include Ownership
+
+- Standalone compilation is an explicit contract, not an assumption for every
+  `.hpp`. The current standalone public set is
+  `MDBXC_STANDALONE_PUBLIC_HEADERS` in the root `CMakeLists.txt`: `common.hpp`,
+  `common/backup.hpp`, `CompositeKey.hpp`, and the public table entry points.
+- Aggregate and domain entry points are covered separately by the explicit
+  umbrella tests and `MDBXC_SYNC_DOMAIN_UMBRELLAS`. This includes
+  `mdbx_containers.hpp`, `tables.hpp`, `vector.hpp`, `sync.hpp`, and the listed
+  sync domain umbrellas.
+- Do not make another internal header standalone merely by adding direct
+  project includes. Promote it deliberately by documenting the new entry-point
+  contract and adding it to the appropriate standalone or umbrella coverage.
+- Component-local implementation leaves under `detail/` receive shared project
+  prerequisites from their owner. They must not include parent, peer, public,
+  or domain project headers through `../` traversal or a
+  `mdbx_containers/...` root include. Downward includes within their own
+  implementation component remain allowed. See
+  [detail instructions](detail/AGENTS.md).
 
 ## Header Structure
 

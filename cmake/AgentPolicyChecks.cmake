@@ -61,6 +61,47 @@ foreach(_mdbxc_ipp IN LISTS _mdbxc_ipp_files)
     endif()
 endforeach()
 
+# Detail headers are implementation leaves, not standalone project entry
+# points. Their owning aggregate supplies shared project prerequisites. Keep
+# this check lexical: reject only upward or project-root includes that reverse
+# the ownership direction; local/downward, standard, and external includes are
+# outside this gate.
+foreach(_mdbxc_internal_leaf IN LISTS _mdbxc_guarded_headers _mdbxc_ipp_files)
+    file(RELATIVE_PATH _mdbxc_leaf_relative
+        "${MDBXC_SOURCE_DIR}/include/mdbx_containers"
+        "${_mdbxc_internal_leaf}")
+    string(REPLACE "\\" "/" _mdbxc_leaf_relative
+        "${_mdbxc_leaf_relative}")
+    if(NOT _mdbxc_leaf_relative MATCHES "(^|/)detail/")
+        continue()
+    endif()
+
+    file(STRINGS "${_mdbxc_internal_leaf}" _mdbxc_leaf_lines)
+    set(_mdbxc_line_number 0)
+    foreach(_mdbxc_line IN LISTS _mdbxc_leaf_lines)
+        math(EXPR _mdbxc_line_number "${_mdbxc_line_number} + 1")
+        string(REGEX REPLACE "[ \t]" "" _mdbxc_compact_line
+            "${_mdbxc_line}")
+        string(FIND "${_mdbxc_compact_line}"
+            "#include\"../" _mdbxc_quote_upward)
+        string(FIND "${_mdbxc_compact_line}"
+            "#include<../" _mdbxc_angle_upward)
+        string(FIND "${_mdbxc_compact_line}"
+            "#include\"mdbx_containers/" _mdbxc_quote_root)
+        string(FIND "${_mdbxc_compact_line}"
+            "#include<mdbx_containers/" _mdbxc_angle_root)
+        if(NOT _mdbxc_quote_upward EQUAL -1 OR
+                NOT _mdbxc_angle_upward EQUAL -1 OR
+                NOT _mdbxc_quote_root EQUAL -1 OR
+                NOT _mdbxc_angle_root EQUAL -1)
+            file(RELATIVE_PATH _mdbxc_relative
+                "${MDBXC_SOURCE_DIR}" "${_mdbxc_internal_leaf}")
+            mdbxc_policy_error(
+                "${_mdbxc_relative}:${_mdbxc_line_number}: detail leaf must not include upward or project-root headers")
+        endif()
+    endforeach()
+endforeach()
+
 # Remove horizontal whitespace before looking for all default-capture forms:
 # [&], [=], [&, name], and [=, &name]. Explicit captures remain allowed.
 file(GLOB_RECURSE _mdbxc_cpp_sources
@@ -153,6 +194,7 @@ list(REMOVE_DUPLICATES _mdbxc_guide_docs)
 set(_mdbxc_policy_docs
     "${MDBXC_SOURCE_DIR}/AGENTS.md"
     "${MDBXC_SOURCE_DIR}/include/mdbx_containers/AGENTS.md"
+    "${MDBXC_SOURCE_DIR}/include/mdbx_containers/detail/AGENTS.md"
     "${MDBXC_SOURCE_DIR}/include/mdbx_containers/sync/AGENTS.md"
     "${MDBXC_SOURCE_DIR}/tests/AGENTS.md"
     "${MDBXC_SOURCE_DIR}/.github/AGENTS.md"

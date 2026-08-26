@@ -18,6 +18,10 @@ are the main compatibility boundaries.
   that is outside the requested scope.
 - Treat `include/` as source of truth. Do not edit generated copies under build
   directories, `docs/html/`, or `docs/latex/`.
+- Do not apply include-what-you-use mechanically to project headers. Public and
+  domain entry points own their prerequisites; internal implementation leaves
+  follow the include direction defined in
+  [public header instructions](include/mdbx_containers/AGENTS.md).
 - Put disposable builds, installs, consumers, and scratch output under `tmp/`.
 - Preserve C++11 compatibility unless a C++17-only API is explicitly guarded.
 - Do not use lambda default captures (`[&]` or `[=]`) in project C++ code.
