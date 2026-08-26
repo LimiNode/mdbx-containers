@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <thread>
@@ -15,6 +16,15 @@ static mdbxc::Embedding make_embedding(const std::vector<float>& vals) {
     e.dim = static_cast<uint32_t>(vals.size());
     e.values = vals;
     return e;
+}
+
+static void assert_flat_cosine_self_similarity(float magnitude) {
+    mdbxc::FlatVectorIndex index(mdbxc::VectorMetric::COSINE);
+    const mdbxc::Embedding embedding = make_embedding({magnitude, 0.0f});
+    index.add(1u, embedding);
+    const std::vector<mdbxc::VectorMatch> matches = index.search(embedding, 1u);
+    MDBXC_TEST_ASSERT(matches.size() == 1u);
+    MDBXC_TEST_ASSERT(std::fabs(matches[0].score - 1.0f) < 0.0001f);
 }
 
 int main() {
@@ -223,6 +233,11 @@ int main() {
         MDBXC_TEST_ASSERT(l2_index.erase(20));
         MDBXC_TEST_ASSERT(l2_index.erase(21));
         MDBXC_TEST_ASSERT(l2_index.dim() == 0);
+
+        assert_flat_cosine_self_similarity(
+            (std::numeric_limits<float>::max)());
+        assert_flat_cosine_self_similarity(
+            (std::numeric_limits<float>::min)());
     }
 
     // --- 9. Failed add does not persist ---

@@ -62,6 +62,10 @@ namespace mdbxc {
         std::vector<float> m_vectors;
 
         void check_dim(const Embedding& embedding);
+        void reserve_for_add();
+        static std::size_t geometric_capacity(std::size_t current,
+                                              std::size_t required,
+                                              std::size_t maximum);
         float compute_score(const float* query_vec, const float* candidate_vec) const;
     };
 
