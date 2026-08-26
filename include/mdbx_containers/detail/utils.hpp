@@ -47,6 +47,37 @@ namespace mdbxc {
         }
     }
 
+    namespace detail {
+
+        /// \brief Owns an MDBX cursor and closes it when the guard leaves scope.
+        class MdbxCursorGuard {
+        public:
+            MdbxCursorGuard() noexcept : m_cursor(nullptr) {}
+            explicit MdbxCursorGuard(MDBX_cursor* cursor) noexcept
+                : m_cursor(cursor) {}
+            ~MdbxCursorGuard() noexcept { close(); }
+
+            MDBX_cursor** out() noexcept { return &m_cursor; }
+            MDBX_cursor* get() const noexcept { return m_cursor; }
+
+            void close() noexcept {
+                if (m_cursor) {
+                    mdbx_cursor_close(m_cursor);
+                    m_cursor = nullptr;
+                }
+            }
+
+        private:
+            MdbxCursorGuard(const MdbxCursorGuard&) = delete;
+            MdbxCursorGuard& operator=(const MdbxCursorGuard&) = delete;
+            MdbxCursorGuard(MdbxCursorGuard&&) = delete;
+            MdbxCursorGuard& operator=(MdbxCursorGuard&&) = delete;
+
+            MDBX_cursor* m_cursor;
+        };
+
+    } // namespace detail
+
     /// \brief Returns true when \p name belongs to the internal DBI namespace.
     /// \details The `_mdbxc_` prefix is reserved for library metadata and
     /// sync system stores. Public table wrappers and incoming replication

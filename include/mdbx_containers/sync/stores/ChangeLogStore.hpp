@@ -147,39 +147,34 @@ namespace sync {
             if (!m_open) {
                 throw std::logic_error("ChangeLogStore is not open");
             }
-            MDBX_cursor* raw = nullptr;
-            check_mdbx(mdbx_cursor_open(txn, m_dbi, &raw), "cursor open failed");
+            mdbxc::detail::MdbxCursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
+                       "cursor open failed");
             std::size_t removed = 0;
-            try {
-                std::vector<std::uint8_t> lo_key, hi_key;
-                encode_key(origin, 0, lo_key);
-                encode_key(origin, up_to, hi_key);
-                MDBX_val lo = { lo_key.empty() ? nullptr : &lo_key[0], lo_key.size() };
-                MDBX_val hi = { hi_key.empty() ? nullptr : &hi_key[0], hi_key.size() };
-                MDBX_val k = lo;
-                MDBX_val v;
-                int rc = mdbx_cursor_get(raw, &k, &v, MDBX_SET_RANGE);
-                while (rc == MDBX_SUCCESS) {
-                    if (k.iov_len < 24) break;
-                    if (mdbx_cmp(txn, m_dbi, &k, &hi) > 0) break;
-                    rc = mdbx_cursor_del(raw, MDBX_CURRENT);
-                    if (rc == MDBX_SUCCESS) {
-                        ++removed;
-                        rc = mdbx_cursor_get(raw, &k, &v, MDBX_NEXT);
-                    } else if (rc == MDBX_NOTFOUND) {
-                        break;
-                    } else {
-                        check_mdbx(rc, "ChangeLogStore prune cursor_del failed");
-                    }
+            std::vector<std::uint8_t> lo_key, hi_key;
+            encode_key(origin, 0, lo_key);
+            encode_key(origin, up_to, hi_key);
+            MDBX_val lo = { lo_key.empty() ? nullptr : &lo_key[0], lo_key.size() };
+            MDBX_val hi = { hi_key.empty() ? nullptr : &hi_key[0], hi_key.size() };
+            MDBX_val k = lo;
+            MDBX_val v;
+            int rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_SET_RANGE);
+            while (rc == MDBX_SUCCESS) {
+                if (k.iov_len < 24) break;
+                if (mdbx_cmp(txn, m_dbi, &k, &hi) > 0) break;
+                rc = mdbx_cursor_del(cursor.get(), MDBX_CURRENT);
+                if (rc == MDBX_SUCCESS) {
+                    ++removed;
+                    rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_NEXT);
+                } else if (rc == MDBX_NOTFOUND) {
+                    break;
+                } else {
+                    check_mdbx(rc, "ChangeLogStore prune cursor_del failed");
                 }
-                if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
-                    check_mdbx(rc, "ChangeLogStore prune cursor_get failed");
-                }
-            } catch (...) {
-                mdbx_cursor_close(raw);
-                throw;
             }
-            mdbx_cursor_close(raw);
+            if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "ChangeLogStore prune cursor_get failed");
+            }
             return removed;
         }
 
@@ -273,34 +268,28 @@ namespace sync {
 
         std::vector<OriginTail> collect_changelog_origin_tails(MDBX_txn* txn) const {
             std::vector<OriginTail> out;
-            MDBX_cursor* raw = nullptr;
-            check_mdbx(mdbx_cursor_open(txn, m_dbi, &raw),
+            mdbxc::detail::MdbxCursorGuard cursor;
+            check_mdbx(mdbx_cursor_open(txn, m_dbi, cursor.out()),
                        "ChangeLogStore origin scan cursor open failed");
-            try {
-                MDBX_val k, v;
-                int rc = mdbx_cursor_get(raw, &k, &v, MDBX_FIRST);
-                while (rc == MDBX_SUCCESS) {
-                    const NodeId origin = decode_key_origin(k);
-                    const std::uint64_t seq = decode_key_seq(k);
-                    if (out.empty() ||
-                        compare_node_id(out.back().origin, origin) != 0) {
-                        OriginTail tail;
-                        tail.origin = origin;
-                        tail.seq = seq;
-                        out.push_back(tail);
-                    } else {
-                        out.back().seq = seq;
-                    }
-                    rc = mdbx_cursor_get(raw, &k, &v, MDBX_NEXT);
+            MDBX_val k, v;
+            int rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_FIRST);
+            while (rc == MDBX_SUCCESS) {
+                const NodeId origin = decode_key_origin(k);
+                const std::uint64_t seq = decode_key_seq(k);
+                if (out.empty() ||
+                    compare_node_id(out.back().origin, origin) != 0) {
+                    OriginTail tail;
+                    tail.origin = origin;
+                    tail.seq = seq;
+                    out.push_back(tail);
+                } else {
+                    out.back().seq = seq;
                 }
-                if (rc != MDBX_NOTFOUND) {
-                    check_mdbx(rc, "ChangeLogStore origin scan cursor walk failed");
-                }
-            } catch (...) {
-                mdbx_cursor_close(raw);
-                throw;
+                rc = mdbx_cursor_get(cursor.get(), &k, &v, MDBX_NEXT);
             }
-            mdbx_cursor_close(raw);
+            if (rc != MDBX_NOTFOUND) {
+                check_mdbx(rc, "ChangeLogStore origin scan cursor walk failed");
+            }
             return out;
         }
 
