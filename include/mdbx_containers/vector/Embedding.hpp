@@ -38,15 +38,14 @@ namespace mdbxc {
         /// \throws std::invalid_argument if the embedding invariants are invalid.
         std::vector<uint8_t> to_bytes() const {
             validate();
-            std::vector<uint8_t> result;
-            result.reserve(8 + dim * sizeof(float));
-            result.resize(8 + dim * sizeof(float));
+            const std::size_t value_bytes = values.size() * sizeof(float);
+            std::vector<uint8_t> result(8u + value_bytes);
             result[0] = static_cast<uint8_t>(dim & 0xFF);
             result[1] = static_cast<uint8_t>((dim >> 8) & 0xFF);
             result[2] = static_cast<uint8_t>((dim >> 16) & 0xFF);
             result[3] = static_cast<uint8_t>((dim >> 24) & 0xFF);
             result[4] = result[5] = result[6] = result[7] = 0;
-            std::memcpy(result.data() + 8, values.data(), dim * sizeof(float));
+            std::memcpy(result.data() + 8, values.data(), value_bytes);
             return result;
         }
 

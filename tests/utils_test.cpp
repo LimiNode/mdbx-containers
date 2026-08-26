@@ -70,6 +70,18 @@ void assert_unordered_uint32_values(const std::unordered_set<std::uint32_t>& out
     MDBXC_TEST_ASSERT(out.find(3u) != out.end());
 }
 
+void assert_serialize_scratch_clear_retains_capacity() {
+    mdbxc::SerializeScratch scratch;
+    scratch.bytes.reserve(64u);
+    scratch.bytes.push_back(1u);
+    const std::size_t capacity = scratch.bytes.capacity();
+
+    scratch.clear();
+
+    MDBXC_TEST_ASSERT(scratch.bytes.empty());
+    MDBXC_TEST_ASSERT(scratch.bytes.capacity() == capacity);
+}
+
 template<typename T>
 void assert_integer_key_flag() {
     MDBXC_TEST_ASSERT(
@@ -185,6 +197,7 @@ void assert_serialized_key_less(T lhs, T rhs) {
 } // namespace
 
 int main() {
+    assert_serialize_scratch_clear_retains_capacity();
     assert_deserializes_empty<std::string>();
     assert_deserializes_empty<std::vector<std::uint8_t>>();
     assert_deserializes_empty<std::deque<std::uint8_t>>();

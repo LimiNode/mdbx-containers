@@ -293,7 +293,7 @@ namespace sync {
                     }
                     rc = mdbx_cursor_get(raw, &k, &v, MDBX_NEXT);
                 }
-                if (rc != MDBX_SUCCESS && rc != MDBX_NOTFOUND) {
+                if (rc != MDBX_NOTFOUND) {
                     check_mdbx(rc, "ChangeLogStore origin scan cursor walk failed");
                 }
             } catch (...) {
