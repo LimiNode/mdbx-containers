@@ -1528,6 +1528,102 @@ void test_changelog_capture_roundtrip() {
     cleanup(p);
 }
 
+void test_changelog_capture_auto_transaction_loop() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_auto_transaction_loop.mdbx";
+    const std::size_t write_count = 64u;
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+
+    sync::NodeId node_id{};
+    for (int i = 0; i < 16; ++i) {
+        node_id[i] = static_cast<std::uint8_t>(0xD0 + i);
+    }
+
+    {
+        sync::MetaStore meta(conn->env_handle());
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        meta.open(txn.handle());
+        meta.set_node_id(txn.handle(), node_id);
+        txn.commit();
+    }
+
+    sync::ThreadLocalChangeAccumulator sink(conn);
+    conn->attach_sync_capture(&sink);
+
+    KeyValueTable<int, int> kv(conn, "data");
+    for (std::size_t i = 0; i < write_count; ++i) {
+        const int key = static_cast<int>(i + 1u);
+        kv.insert_or_assign(key, key * 10);
+    }
+
+    conn->detach_sync_capture();
+
+    sync::ChangeLogStore changelog(conn->env_handle());
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        changelog.open(txn.handle());
+        txn.commit();
+    }
+
+    {
+        auto txn = conn->transaction(TransactionMode::READ_ONLY);
+        for (std::size_t i = 0; i < write_count; ++i) {
+            const std::uint64_t seq = static_cast<std::uint64_t>(i + 1u);
+            std::vector<std::uint8_t> bytes;
+            if (!changelog.get(txn.handle(), node_id, seq, bytes)) {
+                throw std::runtime_error(
+                    "auto-transaction loop changelog is missing seq " +
+                    std::to_string(seq));
+            }
+
+            const sync::ChangeBatch batch =
+                sync::ChangeBatchCodec::decode_exact(bytes);
+            const int key = static_cast<int>(i + 1u);
+            if (batch.origin_node_id != node_id || batch.seq != seq ||
+                batch.ops.size() != 1u ||
+                batch.ops[0].dbi_name != "data" ||
+                batch.ops[0].op_type != sync::ChangeOpType::Put ||
+                batch.ops[0].storage_key.empty() || batch.ops[0].value.empty()) {
+                throw std::runtime_error(
+                    "auto-transaction loop changelog batch is malformed at seq " +
+                    std::to_string(seq));
+            }
+
+            const MDBX_val captured_value = SerializeScratch::view(
+                batch.ops[0].value.data(), batch.ops[0].value.size());
+            if (deserialize_value<int>(captured_value) != key * 10) {
+                throw std::runtime_error(
+                    "auto-transaction loop changelog value mismatch at seq " +
+                    std::to_string(seq));
+            }
+
+            const MDBX_val captured_key = SerializeScratch::view(
+                batch.ops[0].storage_key.data(),
+                batch.ops[0].storage_key.size());
+            if (deserialize_key<int>(captured_key) != key) {
+                throw std::runtime_error(
+                    "auto-transaction loop changelog key mismatch at seq " +
+                    std::to_string(seq));
+            }
+        }
+
+        if (changelog.contains(txn.handle(), node_id,
+                               static_cast<std::uint64_t>(write_count + 1u))) {
+            throw std::runtime_error(
+                "auto-transaction loop changelog unexpectedly has an extra batch");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 void test_changelog_capture_preserves_enriched_change_op() {
     using namespace mdbxc;
     const std::string p = "test_capture_enriched_changelog.mdbx";
@@ -1876,6 +1972,8 @@ int main(int argc, char** argv) {
         { "test_hashed_key_value_store_does_not_capture_in_v01",
           &test_hashed_key_value_store_does_not_capture_in_v01 },
         { "test_changelog_capture_roundtrip", &test_changelog_capture_roundtrip },
+        { "test_changelog_capture_auto_transaction_loop",
+          &test_changelog_capture_auto_transaction_loop },
         { "test_changelog_capture_preserves_enriched_change_op",
           &test_changelog_capture_preserves_enriched_change_op },
         { "test_zero_node_id_rejected", &test_zero_node_id_rejected },

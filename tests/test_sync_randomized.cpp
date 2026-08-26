@@ -5,9 +5,8 @@
 /// Note: a deterministic randomized state-model test (fixed-seed mix of
 /// put/delete that builds an in-memory std::map reference and asserts
 /// primary == replica == reference on every sync step) is planned as a
-/// follow-up. The current PR establishes the gap + replay contract; the
-/// randomized model test needs a separate investigation of the
-/// Windows-MDBX BUSY path under repeated table writes.
+/// follow-up. The current PR establishes the gap + replay contract; repeated
+/// automatic transaction capture is covered separately by test_sync_capture.
 
 #include <mdbx_containers.hpp>
 #include <mdbx_containers/sync.hpp>
