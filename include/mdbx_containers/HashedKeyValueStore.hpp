@@ -899,28 +899,6 @@ namespace mdbxc {
             std::vector<uint8_t> record_key;
         };
 
-        template<typename F>
-        void with_transaction(F&& action, TransactionMode mode, MDBX_txn* txn = nullptr) const {
-            if (txn) {
-                action(checked_external_txn(txn));
-                return;
-            }
-            txn = thread_txn();
-            if (txn) {
-                action(txn);
-                return;
-            }
-
-            auto txn_guard = m_connection->transaction(mode);
-            try {
-                action(txn_guard.handle());
-                txn_guard.commit();
-            } catch (...) {
-                try { txn_guard.rollback(); } catch (...) {}
-                throw;
-            }
-        }
-
         static std::string index_name_for(const std::string& name) {
             return name + "__hash_index";
         }
@@ -1488,6 +1466,8 @@ namespace mdbxc {
         ~HashedKeyValueStore() override = default;
 
     private:
+        using BaseTable::with_transaction;
+
         Hasher m_hasher;
 
         struct PackedRecordView {
@@ -1496,28 +1476,6 @@ namespace mdbxc {
             const uint8_t* value_data;
             std::size_t value_size;
         };
-
-        template<typename F>
-        void with_transaction(F&& action, TransactionMode mode, MDBX_txn* txn = nullptr) const {
-            if (txn) {
-                action(checked_external_txn(txn));
-                return;
-            }
-            txn = thread_txn();
-            if (txn) {
-                action(txn);
-                return;
-            }
-
-            auto txn_guard = m_connection->transaction(mode);
-            try {
-                action(txn_guard.handle());
-                txn_guard.commit();
-            } catch (...) {
-                try { txn_guard.rollback(); } catch (...) {}
-                throw;
-            }
-        }
 
         static void write_u64_le(std::uint64_t value, uint8_t* out) noexcept {
             for (int i = 0; i < 8; ++i) {

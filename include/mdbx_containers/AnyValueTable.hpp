@@ -363,27 +363,6 @@ namespace mdbxc {
     private:
         bool m_check_type_tag = false; ///< Flag enabling type-tag verification.
 
-        template<typename F>
-        void with_transaction(F&& action, TransactionMode mode, MDBX_txn* txn) const {
-            if (txn) {
-                action(checked_external_txn(txn));
-                return;
-            }
-            txn = thread_txn();
-            if (txn) {
-                action(txn);
-                return;
-            }
-            auto txn_guard = m_connection->transaction(mode);
-            try {
-                action(txn_guard.handle());
-                txn_guard.commit();
-            } catch (...) {
-                try { txn_guard.rollback(); } catch (...) {}
-                throw;
-            }
-        }
-
         template <class T>
         bool put_typed(const KeyT& key, const T& value, bool upsert, MDBX_txn* txn) {
             SerializeScratch sc_key;

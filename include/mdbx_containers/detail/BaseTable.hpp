@@ -194,6 +194,35 @@ namespace mdbxc {
 #       endif
             return checked;
         }
+
+        /// \brief Runs an action in an external, thread-bound, or automatic transaction.
+        /// \tparam F Callable type accepting `MDBX_txn*`.
+        /// \param action Action to execute.
+        /// \param mode Transaction mode used when an automatic transaction is required.
+        /// \param txn Optional caller-supplied transaction.
+        template<typename F>
+        void with_transaction(F&& action,
+                              TransactionMode mode = TransactionMode::WRITABLE,
+                              MDBX_txn* txn = nullptr) const {
+            if (txn) {
+                action(checked_external_txn(txn));
+                return;
+            }
+            txn = thread_txn();
+            if (txn) {
+                action(txn);
+                return;
+            }
+
+            auto txn_guard = m_connection->transaction(mode);
+            try {
+                action(txn_guard.handle());
+                txn_guard.commit();
+            } catch (...) {
+                try { txn_guard.rollback(); } catch (...) {}
+                throw;
+            }
+        }
         
         /// \brief Gets the raw DBI handle.
         /// \return DBI handle for the opened table.
