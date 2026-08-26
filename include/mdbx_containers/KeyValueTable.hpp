@@ -9,22 +9,11 @@
 /// overloads and bulk synchronization helpers.
 
 #include "common.hpp"
+#include "detail/result_containers.hpp"
 #include <map>
 #include <unordered_set>
 
 namespace mdbxc {
-
-    namespace detail {
-        template<template<class...> class ContainerT, class KeyT, class ValueT>
-        struct KeyValuePairRangeContainer {
-            typedef ContainerT<KeyT, ValueT> type;
-        };
-
-        template<class KeyT, class ValueT>
-        struct KeyValuePairRangeContainer<std::vector, KeyT, ValueT> {
-            typedef std::vector<std::pair<KeyT, ValueT> > type;
-        };
-    }
 
     /// \class KeyValueTable
     /// \ingroup mdbxc_tables
@@ -319,10 +308,10 @@ namespace mdbxc {
         ///       Use \c range<std::vector>() to preserve MDBX iteration order.
         /// \complexity O(log n + m), where m is the number of returned pairs.
         template<template<class...> class ContainerT = std::map>
-        typename detail::KeyValuePairRangeContainer<ContainerT, KeyT, ValueT>::type
+        typename detail::key_value_result_container<ContainerT, KeyT, ValueT>::type
         range(const KeyT& from_key, const KeyT& to_key,
               MDBX_txn* txn = nullptr) const {
-            typedef typename detail::KeyValuePairRangeContainer<ContainerT, KeyT, ValueT>::type ReturnT;
+            typedef typename detail::key_value_result_container<ContainerT, KeyT, ValueT>::type ReturnT;
             ReturnT pairs;
             with_transaction([this, &from_key, &to_key, &pairs](MDBX_txn* txn) {
                 db_range(from_key, to_key, pairs, txn);
@@ -339,7 +328,7 @@ namespace mdbxc {
         /// \throws MdbxException if a database error occurs.
         /// \complexity O(log n + m), where m is the number of returned pairs.
         template<template<class...> class ContainerT = std::map>
-        typename detail::KeyValuePairRangeContainer<ContainerT, KeyT, ValueT>::type
+        typename detail::key_value_result_container<ContainerT, KeyT, ValueT>::type
         range(const KeyT& from_key, const KeyT& to_key,
               const Transaction& txn) const {
             return range<ContainerT>(from_key, to_key, txn.handle());
@@ -421,10 +410,10 @@ namespace mdbxc {
         /// \return Container with matching pairs in MDBX order.
         /// \throws MdbxException if a database error occurs.
         template<template<class...> class ContainerT = std::vector, typename PredicateT>
-        typename detail::KeyValuePairRangeContainer<ContainerT, KeyT, ValueT>::type
+        typename detail::key_value_result_container<ContainerT, KeyT, ValueT>::type
         filter_range(const KeyT& from_key, const KeyT& to_key,
                      PredicateT pred, MDBX_txn* txn = nullptr) const {
-            typedef typename detail::KeyValuePairRangeContainer<ContainerT, KeyT, ValueT>::type ReturnT;
+            typedef typename detail::key_value_result_container<ContainerT, KeyT, ValueT>::type ReturnT;
             ReturnT out;
             for_each_range(from_key, to_key, [&out, &pred](const KeyT& key, const ValueT& value) -> bool {
                 if (pred(key, value)) {
@@ -445,7 +434,7 @@ namespace mdbxc {
         /// \return Container with matching pairs in MDBX order.
         /// \throws MdbxException if a database error occurs.
         template<template<class...> class ContainerT = std::vector, typename PredicateT>
-        typename detail::KeyValuePairRangeContainer<ContainerT, KeyT, ValueT>::type
+        typename detail::key_value_result_container<ContainerT, KeyT, ValueT>::type
         filter_range(const KeyT& from_key, const KeyT& to_key,
                      PredicateT pred, const Transaction& txn) const {
             return filter_range<ContainerT>(from_key, to_key, pred, txn.handle());
