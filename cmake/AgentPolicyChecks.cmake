@@ -82,18 +82,13 @@ foreach(_mdbxc_internal_leaf IN LISTS _mdbxc_guarded_headers _mdbxc_ipp_files)
         math(EXPR _mdbxc_line_number "${_mdbxc_line_number} + 1")
         string(REGEX REPLACE "[ \t]" "" _mdbxc_compact_line
             "${_mdbxc_line}")
-        string(FIND "${_mdbxc_compact_line}"
-            "#include\"../" _mdbxc_quote_upward)
-        string(FIND "${_mdbxc_compact_line}"
-            "#include<../" _mdbxc_angle_upward)
-        string(FIND "${_mdbxc_compact_line}"
-            "#include\"mdbx_containers/" _mdbxc_quote_root)
-        string(FIND "${_mdbxc_compact_line}"
-            "#include<mdbx_containers/" _mdbxc_angle_root)
-        if(NOT _mdbxc_quote_upward EQUAL -1 OR
-                NOT _mdbxc_angle_upward EQUAL -1 OR
-                NOT _mdbxc_quote_root EQUAL -1 OR
-                NOT _mdbxc_angle_root EQUAL -1)
+        set(_mdbxc_include_target "")
+        if(_mdbxc_compact_line MATCHES
+                "^#include[<\"]([^>\"]+)[>\"]")
+            set(_mdbxc_include_target "${CMAKE_MATCH_1}")
+        endif()
+        if(_mdbxc_include_target MATCHES "(^|/)\\.\\./" OR
+                _mdbxc_include_target MATCHES "^mdbx_containers/")
             file(RELATIVE_PATH _mdbxc_relative
                 "${MDBXC_SOURCE_DIR}" "${_mdbxc_internal_leaf}")
             mdbxc_policy_error(
