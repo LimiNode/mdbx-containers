@@ -5,7 +5,7 @@
 /// \file tables.hpp
 /// \brief Includes the table wrappers only.
 /// \details
-/// Pulls in every table wrapper (KeyValue, Key, Value, Sequence,
+/// Pulls in every table wrapper (KeyValue, Key, Value, Sequence, IdAllocator,
 /// TableSequence, HashedKeyValue, KeyMultiValue, KeyOrderedMultiValue, AnyValue, and
 /// hashing utilities) but
 /// NOT the sync or vector subsystems. Use when the project only needs the
@@ -15,6 +15,7 @@
 #include "mdbx_containers/CompositeKey.hpp"
 #include "mdbx_containers/AnyValueTable.hpp"
 #include "mdbx_containers/HashedKeyValueStore.hpp"
+#include "mdbx_containers/IdAllocatorTable.hpp"
 #include "mdbx_containers/KeyMultiValueTable.hpp"
 #include "mdbx_containers/KeyOrderedMultiValueTable.hpp"
 #include "mdbx_containers/KeyTable.hpp"

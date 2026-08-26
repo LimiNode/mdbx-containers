@@ -428,6 +428,33 @@ txn.commit();
   operation. Replicas must not rely on independently allocated sequence values
   being equal.
 
+## IdAllocatorTable
+
+`IdAllocatorTable` is a dedicated local allocator for components that need
+positive uint64_t identifiers without treating a stored dummy value as a real
+record. It owns one DBI with one internal counter row; it starts at zero and
+the first successful `next()` returns one.
+
+```cpp
+mdbxc::IdAllocatorTable chunk_ids(conn, "chunk_ids");
+const uint64_t id = chunk_ids.next();
+```
+
+- `current()` reports the last allocated value, or zero before allocation.
+- `next()` increments the counter and returns the new value.
+- `reset(value)` explicitly sets the current value; `reset()` is equivalent to
+  `reset(0)`, so the following `next()` returns one.
+- All operations accept an optional `MDBX_txn*` and a `Transaction` overload.
+  An allocation or reset becomes durable only if that writable transaction
+  commits, and a rollback restores the prior counter value.
+- Values are local to this DBI. This is not a distributed or multi-writer ID
+  scheme; applications must provide separate identity and conflict rules for
+  independent writers or replicas.
+
+Use `IdAllocatorTable` for generated local record IDs. Use `TableSequence`
+when the sequence must be metadata attached to an existing table DBI, and use
+`SequenceTable<ValueT>` when the values themselves are the appendable records.
+
 `KeyMultiValueTable<K, V>` is the multimap-like table. It stores multiple values
 for the same key and preserves exact repeated `(key, value)` pairs.
 

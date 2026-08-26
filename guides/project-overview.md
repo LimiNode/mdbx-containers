@@ -29,6 +29,7 @@ and compiles in the consumer's translation units.
 | `KeyTable<K>` | Active | Key-only table with `std::set`-like membership semantics. |
 | `KeyMultiValueTable<K, V>` | Active | Multimap-like table with multiple values per key, including repeated identical pairs. |
 | `KeyOrderedMultiValueTable<K, V>` | Active | Multi-value table where repeated values and current append order within one key are part of the API. |
+| `IdAllocatorTable` | Active | Dedicated transaction-aware local uint64_t ID allocator. |
 | `TableSequence` | Active | Transactional positive uint64_t sequence allocator bound to an existing table DBI. |
 
 For method selection, bulk operation semantics, and table-specific constraints,

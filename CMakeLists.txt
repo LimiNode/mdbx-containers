@@ -470,6 +470,7 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/CompositeKey.hpp
         mdbx_containers/AnyValueTable.hpp
         mdbx_containers/HashedKeyValueStore.hpp
+        mdbx_containers/IdAllocatorTable.hpp
         mdbx_containers/KeyMultiValueTable.hpp
         mdbx_containers/KeyOrderedMultiValueTable.hpp
         mdbx_containers/KeyTable.hpp
