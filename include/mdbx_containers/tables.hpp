@@ -5,8 +5,8 @@
 /// \file tables.hpp
 /// \brief Includes the table wrappers only.
 /// \details
-/// Pulls in every table wrapper (KeyValue, Key, Value, Sequence,
-/// TableSequence, HashedKeyValue, KeyMultiValue, KeyOrderedMultiValue, AnyValue, and
+/// Pulls in every table wrapper (KeyValue, Key, Value, Sequence, TableSequence,
+/// Metadata, HashedKeyValue, KeyMultiValue, KeyOrderedMultiValue, AnyValue, and
 /// hashing utilities) but
 /// NOT the sync or vector subsystems. Use when the project only needs the
 /// table API.
@@ -19,6 +19,7 @@
 #include "mdbx_containers/KeyOrderedMultiValueTable.hpp"
 #include "mdbx_containers/KeyTable.hpp"
 #include "mdbx_containers/KeyValueTable.hpp"
+#include "mdbx_containers/MetadataTable.hpp"
 #include "mdbx_containers/SequenceTable.hpp"
 #include "mdbx_containers/TableSequence.hpp"
 #include "mdbx_containers/ValueTable.hpp"
