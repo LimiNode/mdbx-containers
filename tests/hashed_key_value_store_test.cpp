@@ -66,7 +66,10 @@ int main() {
     auto conn = mdbxc::Connection::create(cfg);
 
     {
-        mdbxc::HashedKeyValueStore<std::string, int> store(conn, "hashed_strings");
+        typedef mdbxc::HashedKeyValueStore<std::string, int> LargeStore;
+        typedef LargeStore::AssignmentProxy LargeAssignmentProxy;
+
+        LargeStore store(conn, "hashed_strings");
         store.clear();
 
         MDBXC_TEST_ASSERT(store.empty());
@@ -83,7 +86,8 @@ int main() {
         MDBXC_TEST_ASSERT(store.contains("alpha"));
         MDBXC_TEST_ASSERT(!store.contains("missing"));
 
-        store["gamma"] = 3;
+        LargeAssignmentProxy gamma = store["gamma"];
+        gamma = 3;
         MDBXC_TEST_ASSERT(static_cast<int>(store["gamma"]) == 3);
         MDBXC_TEST_ASSERT(static_cast<int>(store["defaulted"]) == 0);
         MDBXC_TEST_ASSERT(store.count() == 4);
