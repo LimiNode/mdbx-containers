@@ -30,6 +30,7 @@ and compiles in the consumer's translation units.
 | `KeyMultiValueTable<K, V>` | Active | Multimap-like table with multiple values per key, including repeated identical pairs. |
 | `KeyOrderedMultiValueTable<K, V>` | Active | Multi-value table where repeated values and current append order within one key are part of the API. |
 | `IdAllocatorTable` | Active | Dedicated transaction-aware local uint64_t ID allocator. |
+| `MetadataTable` | Active | Typed string-keyed metadata with fail-closed type tags. |
 | `TableSequence` | Active | Transactional positive uint64_t sequence allocator bound to an existing table DBI. |
 
 For method selection, bulk operation semantics, and table-specific constraints,

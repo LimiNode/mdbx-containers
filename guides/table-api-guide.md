@@ -455,6 +455,32 @@ Use `IdAllocatorTable` for generated local record IDs. Use `TableSequence`
 when the sequence must be metadata attached to an existing table DBI, and use
 `SequenceTable<ValueT>` when the values themselves are the appendable records.
 
+## MetadataTable
+
+`MetadataTable` stores collection or component metadata under string keys. It
+supports `std::string`, `uint32_t`, `uint64_t`, `int64_t`, `double`, and `bool`.
+Each stored value carries a type tag, so reading a present key through the wrong
+getter throws `std::invalid_argument` instead of applying an implicit conversion.
+
+```cpp
+mdbxc::MetadataTable metadata(conn, "articles_metadata");
+metadata.set_string("embedding_model", "text-embedding-3-small");
+metadata.set_uint32("dim", 1536);
+metadata.set_schema_version(1);
+```
+
+- Type-specific `set_*` and `get_*` methods accept an optional `MDBX_txn*` and
+  a `Transaction` overload.
+- `get_*_or(key, fallback)` returns its fallback only when the key is absent;
+  a stored type mismatch still fails closed.
+- `set_schema_version`, `schema_version`, and `schema_version_or` use the
+  fixed `schema_version` metadata key for a small collection-schema contract.
+- `erase(key)` removes one metadata value and reports whether it existed.
+
+Use it for schema versions, model names, dimensions, migration state, and small
+typed collection settings. Keep rich application documents or arbitrary JSON
+payloads in a caller-owned record type or a dedicated higher-level store.
+
 `KeyMultiValueTable<K, V>` is the multimap-like table. It stores multiple values
 for the same key and preserves exact repeated `(key, value)` pairs.
 

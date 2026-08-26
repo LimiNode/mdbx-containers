@@ -475,6 +475,7 @@ if(MDBXC_BUILD_TESTS)
         mdbx_containers/KeyOrderedMultiValueTable.hpp
         mdbx_containers/KeyTable.hpp
         mdbx_containers/KeyValueTable.hpp
+        mdbx_containers/MetadataTable.hpp
         mdbx_containers/SequenceTable.hpp
         mdbx_containers/TableSequence.hpp
         mdbx_containers/ValueTable.hpp
