@@ -31,6 +31,8 @@ and compiles in the consumer's translation units.
 | `KeyOrderedMultiValueTable<K, V>` | Active | Multi-value table where repeated values and current append order within one key are part of the API. |
 | `IdAllocatorTable` | Active | Dedicated transaction-aware local uint64_t ID allocator. |
 | `MetadataTable` | Active | Typed string-keyed metadata with fail-closed type tags. |
+| `DocumentStore` | Active | Source documents with generated IDs and unique source URIs. |
+| `ChunkStore` | Active | Provenance chunks indexed by document and returned in chunk order. |
 | `TableSequence` | Active | Transactional positive uint64_t sequence allocator bound to an existing table DBI. |
 
 For method selection, bulk operation semantics, and table-specific constraints,

@@ -38,6 +38,8 @@ of truth.
 Primary entry points:
 
 - User API: `include/mdbx_containers.hpp`,
+  `include/mdbx_containers/DocumentStore.hpp`,
+  `include/mdbx_containers/ChunkStore.hpp`,
   `include/mdbx_containers/KeyValueTable.hpp`,
   `include/mdbx_containers/HashedKeyValueStore.hpp`,
   `include/mdbx_containers/ValueTable.hpp`,
@@ -67,7 +69,8 @@ Real subdomains:
   `HashedKeyValueStore`, active `ValueTable`, active `AnyValueTable`, active
   `KeyTable`, active `KeyMultiValueTable`, active
   `KeyOrderedMultiValueTable`, active `IdAllocatorTable`, active
-  `MetadataTable`, active `SequenceTable`.
+  `MetadataTable`, active `DocumentStore`, active `ChunkStore`, active
+  `SequenceTable`.
 - **MDBX environment and transactions**: `Connection`, `Transaction`,
   `TransactionTracker`, `BaseTable`.
 - **Serialization**: `serialize_key`, `serialize_value`,

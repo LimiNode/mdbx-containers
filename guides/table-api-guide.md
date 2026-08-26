@@ -481,6 +481,39 @@ Use it for schema versions, model names, dimensions, migration state, and small
 typed collection settings. Keep rich application documents or arbitrary JSON
 payloads in a caller-owned record type or a dedicated higher-level store.
 
+## DocumentStore and ChunkStore
+
+`DocumentStore` and `ChunkStore` provide a small source/provenance foundation
+for retrieval systems. `DocumentStore::add(Document)` assigns a positive ID and
+enforces a unique non-empty `source_uri`. `ChunkStore::add(Chunk)` assigns a
+positive chunk ID and indexes it under `document_id`; `by_document()` returns
+the persisted chunks sorted by `chunk_index`.
+
+Each store owns three named DBIs: its records, its allocator, and one secondary
+index. Plan `Config::max_dbs` for six DBIs when opening both stores in one
+environment, in addition to other application tables.
+
+```cpp
+const uint64_t document_id = documents.add(document);
+const uint64_t chunk_id = chunks.add(chunk);
+std::vector<mdbxc::Chunk> document_chunks = chunks.by_document(document_id);
+```
+
+- `Document` preserves source URI, title, source type, creation/index timestamps,
+  and metadata text. `Chunk` preserves document ID, chunk index, character
+  offsets, text, and metadata text.
+- Duplicate `chunk_index` values for one document are rejected. Character offsets
+  must satisfy `char_start <= char_end`; their interpretation (bytes, Unicode
+  code points, and so on) remains the application's contract.
+- `erase_document(document_id)` deletes its chunks. To delete a document with
+  chunks atomically, call `chunks.erase_document(document_id, txn)` and
+  `documents.erase(document_id, txn)` in one writable `Transaction`.
+- The stores provide raw transaction and `Transaction` overloads. Their records
+  use a versioned binary format and reject malformed/trailing data on read.
+- The secondary `KeyMultiValueTable` index has no sync-v0.1 capture contract;
+  these stores are local persistence primitives until a matching logical sync
+  adapter is designed.
+
 `KeyMultiValueTable<K, V>` is the multimap-like table. It stores multiple values
 for the same key and preserves exact repeated `(key, value)` pairs.
 
