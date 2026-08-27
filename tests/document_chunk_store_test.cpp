@@ -8,6 +8,8 @@
 
 #include <mdbx_containers/ChunkStore.hpp>
 #include <mdbx_containers/DocumentStore.hpp>
+#include <mdbx_containers/KeyValueTable.hpp>
+#include <mdbx_containers/sync.hpp>
 
 namespace {
     mdbxc::Config make_config(const std::string& pathname) {
@@ -42,6 +44,25 @@ namespace {
         value.metadata_json = "{}";
         return value;
     }
+
+    class CountingCapture final : public mdbxc::sync::ISyncCaptureSink {
+    public:
+        void record_change(MDBX_txn*,
+                           const std::string&,
+                           mdbxc::sync::ChangeOpType,
+                           std::uint32_t,
+                           const std::vector<std::uint8_t>&,
+                           const std::vector<std::uint8_t>&) override {
+            ++record_count;
+        }
+
+        void flush_in_txn(MDBX_txn*) override {
+            ++flush_count;
+        }
+
+        std::size_t record_count = 0u;
+        std::size_t flush_count = 0u;
+    };
 }
 
 int main() {
@@ -107,7 +128,96 @@ int main() {
     MDBXC_TEST_ASSERT(chunks.by_document(first_id).empty());
     MDBXC_TEST_ASSERT(documents.count() == 1u);
 
-    // --- 5. restart_persistence ---
+    // --- 5. shared_prefix_uses_independent_dbi_names ---
+    {
+        mdbxc::DocumentStore shared_documents(conn, "rag");
+        mdbxc::ChunkStore shared_chunks(conn, "rag");
+        const std::uint64_t document_id =
+            shared_documents.add(make_document("file:///rag.md", "RAG"));
+        const std::uint64_t chunk_id =
+            shared_chunks.add(make_chunk(document_id, 0u, 0u, 3u, "rag"));
+        MDBXC_TEST_ASSERT(document_id == 1u);
+        MDBXC_TEST_ASSERT(chunk_id == 1u);
+        MDBXC_TEST_ASSERT(shared_documents.count() == 1u);
+        MDBXC_TEST_ASSERT(shared_chunks.count() == 1u);
+    }
+
+    // --- 6. manual_connection_transaction_is_shared_by_both_stores ---
+    std::uint64_t manual_document_id = 0u;
+    std::uint64_t manual_chunk_id = 0u;
+    conn->begin(mdbxc::TransactionMode::WRITABLE);
+    manual_document_id =
+        documents.add(make_document("file:///manual.md", "Manual"));
+    manual_chunk_id =
+        chunks.add(make_chunk(manual_document_id, 0u, 0u, 6u, "manual"));
+    conn->commit();
+    MDBXC_TEST_ASSERT(documents.get(manual_document_id).title == "Manual");
+    MDBXC_TEST_ASSERT(chunks.get(manual_chunk_id).document_id == manual_document_id);
+
+    conn->begin(mdbxc::TransactionMode::WRITABLE);
+    const std::uint64_t rolled_back_document_id =
+        documents.add(make_document("file:///manual-rollback.md", "Rollback"));
+    const std::uint64_t rolled_back_chunk_id =
+        chunks.add(make_chunk(rolled_back_document_id, 0u, 0u, 8u, "rollback"));
+    conn->rollback();
+    MDBXC_TEST_ASSERT(!documents.find_compat(rolled_back_document_id).first);
+    MDBXC_TEST_ASSERT(!chunks.find_compat(rolled_back_chunk_id).first);
+
+    // --- 7. source_uri_index_mismatch_fails_closed_before_erase ---
+    {
+        mdbxc::KeyValueTable<std::string, std::uint64_t> source_index(
+            conn, "documents_document_source_uris");
+        source_index.insert_or_assign("file:///faq.md", manual_document_id);
+
+        bool lookup_threw = false;
+        try {
+            (void)documents.find_by_source_uri_compat("file:///faq.md");
+        } catch (const std::runtime_error&) {
+            lookup_threw = true;
+        }
+        MDBXC_TEST_ASSERT(lookup_threw);
+
+        bool erase_threw = false;
+        try {
+            (void)documents.erase(second_id);
+        } catch (const std::runtime_error&) {
+            erase_threw = true;
+        }
+        MDBXC_TEST_ASSERT(erase_threw);
+        MDBXC_TEST_ASSERT(documents.get(second_id).title == "FAQ");
+        source_index.insert_or_assign("file:///faq.md", second_id);
+    }
+
+    // --- 8. sync_capture_rejects_mutations_before_any_capture_or_write ---
+    {
+        const std::size_t documents_before = documents.count();
+        const std::size_t chunks_before = chunks.count();
+        CountingCapture capture;
+        conn->attach_sync_capture(&capture);
+
+        bool document_threw = false;
+        try {
+            (void)documents.add(make_document("file:///captured.md", "Captured"));
+        } catch (const std::logic_error&) {
+            document_threw = true;
+        }
+        bool chunk_threw = false;
+        try {
+            (void)chunks.add(make_chunk(second_id, 3u, 0u, 8u, "captured"));
+        } catch (const std::logic_error&) {
+            chunk_threw = true;
+        }
+        conn->detach_sync_capture();
+
+        MDBXC_TEST_ASSERT(document_threw);
+        MDBXC_TEST_ASSERT(chunk_threw);
+        MDBXC_TEST_ASSERT(documents.count() == documents_before);
+        MDBXC_TEST_ASSERT(chunks.count() == chunks_before);
+        MDBXC_TEST_ASSERT(capture.record_count == 0u);
+        MDBXC_TEST_ASSERT(capture.flush_count == 0u);
+    }
+
+    // --- 9. restart_persistence ---
     conn->disconnect();
     conn->connect();
     {
@@ -116,7 +226,9 @@ int main() {
         const mdbxc::Document reopened = reopened_documents.get(second_id);
         MDBXC_TEST_ASSERT(reopened.source_type == "markdown");
         MDBXC_TEST_ASSERT(reopened.metadata_json == "{\"lang\":\"en\"}");
-        MDBXC_TEST_ASSERT(reopened_chunks.count() == 0u);
+        MDBXC_TEST_ASSERT(reopened_chunks.count() == 1u);
+        MDBXC_TEST_ASSERT(reopened_chunks.get(manual_chunk_id).document_id ==
+                          manual_document_id);
     }
 
     std::cout << "Document and Chunk store test passed.\n";

@@ -8,6 +8,7 @@
 #include "common.hpp"
 #include "IdAllocatorTable.hpp"
 #include "KeyValueTable.hpp"
+#include "detail/CompositeStoreTransaction.hpp"
 #include "rag/Records.hpp"
 
 #include <cstdint>
@@ -25,9 +26,9 @@ namespace mdbxc {
         explicit DocumentStore(std::shared_ptr<Connection> connection,
                                std::string name = "documents")
             : m_connection(require_connection(std::move(connection)))
-            , m_ids(m_connection, make_name(name, "ids"))
-            , m_records(m_connection, make_name(name, "records"))
-            , m_source_ids(m_connection, make_name(name, "source_uris")) {}
+            , m_ids(m_connection, make_name(name, "document_ids"))
+            , m_records(m_connection, make_name(name, "document_records"))
+            , m_source_ids(m_connection, make_name(name, "document_source_uris")) {}
 
         explicit DocumentStore(const Config& config, std::string name = "documents")
             : DocumentStore(Connection::create(config), std::move(name)) {}
@@ -37,6 +38,7 @@ namespace mdbxc {
         /// \throws std::invalid_argument if source_uri already belongs to another document.
         std::uint64_t add(Document document, MDBX_txn* txn = nullptr) {
             validate_new_document(document);
+            ensure_local_only();
             std::uint64_t result = 0u;
             with_write_transaction([this, &document, &result](MDBX_txn* t) {
                 result = m_ids.next(t);
@@ -113,6 +115,9 @@ namespace mdbxc {
                 if (!document.first) {
                     throw std::runtime_error("DocumentStore source URI index is stale");
                 }
+                if (document.second.source_uri != source_uri) {
+                    throw std::runtime_error("DocumentStore source URI index is inconsistent");
+                }
                 result = std::move(document);
             }, txn);
             return result;
@@ -124,15 +129,20 @@ namespace mdbxc {
         }
 
         bool erase(std::uint64_t id, MDBX_txn* txn = nullptr) {
+            ensure_local_only();
             bool removed = false;
             with_write_transaction([this, id, &removed](MDBX_txn* t) {
                 std::pair<bool, Document> existing = find_compat(id, t);
                 if (!existing.first) {
                     return;
                 }
-                const bool index_removed = m_source_ids.erase(existing.second.source_uri, t);
-                if (!index_removed) {
-                    throw std::runtime_error("DocumentStore source URI index is missing");
+                const std::pair<bool, std::uint64_t> indexed_id =
+                    m_source_ids.find_compat(existing.second.source_uri, t);
+                if (!indexed_id.first || indexed_id.second != id) {
+                    throw std::runtime_error("DocumentStore source URI index is inconsistent");
+                }
+                if (!m_source_ids.erase(existing.second.source_uri, t)) {
+                    throw std::runtime_error("DocumentStore source URI index disappeared");
                 }
                 removed = m_records.erase(id, t);
             }, txn);
@@ -144,6 +154,7 @@ namespace mdbxc {
         }
 
         void clear(MDBX_txn* txn = nullptr) {
+            ensure_local_only();
             with_write_transaction([this](MDBX_txn* t) {
                 m_ids.reset(t);
                 m_records.clear(t);
@@ -192,36 +203,25 @@ namespace mdbxc {
             }
         }
 
+        void ensure_local_only() const {
+#       if MDBXC_SYNC_ENABLED
+            if (m_connection->sync_capture() != nullptr) {
+                throw std::logic_error(
+                    "DocumentStore mutations are unsupported while sync capture is attached");
+            }
+#       endif
+        }
+
         template<class Fn>
         void with_write_transaction(Fn fn, MDBX_txn* txn) {
-            if (txn != nullptr) {
-                fn(txn);
-                return;
-            }
-            Transaction managed = m_connection->transaction(TransactionMode::WRITABLE);
-            try {
-                fn(managed.handle());
-                managed.commit();
-            } catch (...) {
-                try { managed.rollback(); } catch (...) {}
-                throw;
-            }
+            detail::CompositeStoreTransaction::run(
+                *m_connection, fn, TransactionMode::WRITABLE, txn);
         }
 
         template<class Fn>
         void with_read_transaction(Fn fn, MDBX_txn* txn) const {
-            if (txn != nullptr) {
-                fn(txn);
-                return;
-            }
-            Transaction managed = m_connection->transaction(TransactionMode::READ_ONLY);
-            try {
-                fn(managed.handle());
-                managed.commit();
-            } catch (...) {
-                try { managed.rollback(); } catch (...) {}
-                throw;
-            }
+            detail::CompositeStoreTransaction::run(
+                *m_connection, fn, TransactionMode::READ_ONLY, txn);
         }
 
         std::shared_ptr<Connection> m_connection;

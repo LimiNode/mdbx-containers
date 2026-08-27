@@ -9,6 +9,7 @@
 #include "IdAllocatorTable.hpp"
 #include "KeyMultiValueTable.hpp"
 #include "KeyValueTable.hpp"
+#include "detail/CompositeStoreTransaction.hpp"
 #include "rag/Records.hpp"
 
 #include <algorithm>
@@ -27,9 +28,9 @@ namespace mdbxc {
         explicit ChunkStore(std::shared_ptr<Connection> connection,
                             std::string name = "chunks")
             : m_connection(require_connection(std::move(connection)))
-            , m_ids(m_connection, make_name(name, "ids"))
-            , m_records(m_connection, make_name(name, "records"))
-            , m_document_chunks(m_connection, make_name(name, "document_ids")) {}
+            , m_ids(m_connection, make_name(name, "chunk_ids"))
+            , m_records(m_connection, make_name(name, "chunk_records"))
+            , m_document_chunks(m_connection, make_name(name, "chunk_document_index")) {}
 
         explicit ChunkStore(const Config& config, std::string name = "chunks")
             : ChunkStore(Connection::create(config), std::move(name)) {}
@@ -37,6 +38,7 @@ namespace mdbxc {
         /// \brief Adds a chunk and returns its generated positive ID.
         std::uint64_t add(Chunk chunk, MDBX_txn* txn = nullptr) {
             validate_new_chunk(chunk);
+            ensure_local_only();
             std::uint64_t result = 0u;
             with_write_transaction([this, &chunk, &result](MDBX_txn* t) {
                 ensure_chunk_index_available(chunk.document_id, chunk.chunk_index, t);
@@ -118,6 +120,7 @@ namespace mdbxc {
         }
 
         bool erase(std::uint64_t id, MDBX_txn* txn = nullptr) {
+            ensure_local_only();
             bool removed = false;
             with_write_transaction([this, id, &removed](MDBX_txn* t) {
                 std::pair<bool, Chunk> existing = find_compat(id, t);
@@ -142,6 +145,7 @@ namespace mdbxc {
         /// \return Number of chunk records removed.
         std::size_t erase_document(std::uint64_t document_id,
                                    MDBX_txn* txn = nullptr) {
+            ensure_local_only();
             std::size_t removed = 0u;
             with_write_transaction([this, document_id, &removed](MDBX_txn* t) {
                 const std::vector<std::uint64_t> ids =
@@ -165,6 +169,7 @@ namespace mdbxc {
         }
 
         void clear(MDBX_txn* txn = nullptr) {
+            ensure_local_only();
             with_write_transaction([this](MDBX_txn* t) {
                 m_ids.reset(t);
                 m_records.clear(t);
@@ -228,36 +233,25 @@ namespace mdbxc {
             }
         }
 
+        void ensure_local_only() const {
+#       if MDBXC_SYNC_ENABLED
+            if (m_connection->sync_capture() != nullptr) {
+                throw std::logic_error(
+                    "ChunkStore mutations are unsupported while sync capture is attached");
+            }
+#       endif
+        }
+
         template<class Fn>
         void with_write_transaction(Fn fn, MDBX_txn* txn) {
-            if (txn != nullptr) {
-                fn(txn);
-                return;
-            }
-            Transaction managed = m_connection->transaction(TransactionMode::WRITABLE);
-            try {
-                fn(managed.handle());
-                managed.commit();
-            } catch (...) {
-                try { managed.rollback(); } catch (...) {}
-                throw;
-            }
+            detail::CompositeStoreTransaction::run(
+                *m_connection, fn, TransactionMode::WRITABLE, txn);
         }
 
         template<class Fn>
         void with_read_transaction(Fn fn, MDBX_txn* txn) const {
-            if (txn != nullptr) {
-                fn(txn);
-                return;
-            }
-            Transaction managed = m_connection->transaction(TransactionMode::READ_ONLY);
-            try {
-                fn(managed.handle());
-                managed.commit();
-            } catch (...) {
-                try { managed.rollback(); } catch (...) {}
-                throw;
-            }
+            detail::CompositeStoreTransaction::run(
+                *m_connection, fn, TransactionMode::READ_ONLY, txn);
         }
 
         std::shared_ptr<Connection> m_connection;

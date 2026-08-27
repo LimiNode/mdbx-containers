@@ -490,8 +490,12 @@ positive chunk ID and indexes it under `document_id`; `by_document()` returns
 the persisted chunks sorted by `chunk_index`.
 
 Each store owns three named DBIs: its records, its allocator, and one secondary
-index. Plan `Config::max_dbs` for six DBIs when opening both stores in one
-environment, in addition to other application tables.
+index. For a prefix `rag`, `DocumentStore` uses `rag_document_ids`,
+`rag_document_records`, and `rag_document_source_uris`; `ChunkStore` uses
+`rag_chunk_ids`, `rag_chunk_records`, and `rag_chunk_document_index`. One
+prefix can therefore safely name both stores. Plan `Config::max_dbs` for six
+DBIs when opening both stores in one environment, in addition to other
+application tables.
 
 ```cpp
 const uint64_t document_id = documents.add(document);
@@ -510,8 +514,9 @@ std::vector<mdbxc::Chunk> document_chunks = chunks.by_document(document_id);
   `documents.erase(document_id, txn)` in one writable `Transaction`.
 - The stores provide raw transaction and `Transaction` overloads. Their records
   use a versioned binary format and reject malformed/trailing data on read.
-- The secondary `KeyMultiValueTable` index has no sync-v0.1 capture contract;
-  these stores are local persistence primitives until a matching logical sync
+- The secondary `KeyMultiValueTable` index has no sync-v0.1 capture contract.
+  All store mutations fail closed while sync capture is attached, so these
+  stores remain local persistence primitives until a matching logical sync
   adapter is designed.
 
 `KeyMultiValueTable<K, V>` is the multimap-like table. It stores multiple values

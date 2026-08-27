@@ -42,6 +42,10 @@ namespace mdbxc {
         class VectorStoreLogicalAdapter;
     }
 
+    namespace detail {
+        class CompositeStoreTransaction;
+    }
+
     /// \class Connection
     /// \ingroup mdbxc_core
     /// \brief Manages a single MDBX environment and per-thread transaction tracking.
@@ -71,6 +75,7 @@ namespace mdbxc {
     private:
         friend class BaseTable;
         friend class TableSequence;
+        friend class detail::CompositeStoreTransaction;
 #   if MDBXC_SYNC_ENABLED
         friend class sync::SyncCaptureScope;
 #   endif
