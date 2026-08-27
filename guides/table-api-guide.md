@@ -442,8 +442,8 @@ const uint64_t id = chunk_ids.next();
 
 - `current()` reports the last allocated value, or zero before allocation.
 - `next()` increments the counter and returns the new value.
-- `reset(value)` explicitly sets the current value; `reset()` is equivalent to
-  `reset(0)`, so the following `next()` returns one.
+- `reset_to(value)` explicitly sets the current value. `reset()` resets it to
+  zero, so the following `next()` returns one.
 - All operations accept an optional `MDBX_txn*` and a `Transaction` overload.
   An allocation or reset becomes durable only if that writable transaction
   commits, and a rollback restores the prior counter value.
