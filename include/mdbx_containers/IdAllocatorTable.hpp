@@ -91,26 +91,27 @@ namespace mdbxc {
         ///          allocation returns one.
         /// \param value Value reported by subsequent \c current() calls.
         /// \param txn Optional writable transaction handle.
-        void reset(std::uint64_t value = 0u, MDBX_txn* txn = nullptr) {
+        void reset_to(std::uint64_t value, MDBX_txn* txn = nullptr) {
             with_transaction([this, value](MDBX_txn* t) {
-                ensure_writable(t, "IdAllocatorTable::reset");
+                ensure_writable(t, "IdAllocatorTable::reset_to");
                 db_set_current(value, t);
             }, TransactionMode::WRITABLE, txn);
         }
 
-        /// \brief Resets the allocator using an external writable transaction.
-        void reset(MDBX_txn* txn) {
-            reset(0u, txn);
+        /// \brief Resets the allocator so the next successful allocation returns one.
+        /// \param txn Optional writable transaction handle.
+        void reset(MDBX_txn* txn = nullptr) {
+            reset_to(0u, txn);
         }
 
         /// \brief Sets the last allocated identifier using an external writable transaction.
-        void reset(std::uint64_t value, const Transaction& txn) {
-            reset(value, txn.handle());
+        void reset_to(std::uint64_t value, const Transaction& txn) {
+            reset_to(value, txn.handle());
         }
 
         /// \brief Resets the allocator using an external writable transaction.
         void reset(const Transaction& txn) {
-            reset(0u, txn.handle());
+            reset(txn.handle());
         }
 
     private:

@@ -34,9 +34,11 @@ int main() {
         MDBXC_TEST_ASSERT(ids.next() == 2u);
         MDBXC_TEST_ASSERT(ids.current() == 2u);
 
-        ids.reset(41u);
+        ids.reset_to(41u);
         MDBXC_TEST_ASSERT(ids.current() == 41u);
         MDBXC_TEST_ASSERT(ids.next() == 42u);
+        ids.reset(0);
+        MDBXC_TEST_ASSERT(ids.current() == 0u);
         ids.reset();
         MDBXC_TEST_ASSERT(ids.next() == 1u);
     }
@@ -62,7 +64,7 @@ int main() {
         ids.reset();
         auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
         MDBXC_TEST_ASSERT(ids.next(txn) == 1u);
-        ids.reset(99u, txn);
+        ids.reset_to(99u, txn);
         MDBXC_TEST_ASSERT(ids.current(txn) == 99u);
         txn.rollback();
         MDBXC_TEST_ASSERT(ids.current() == 0u);
@@ -72,7 +74,7 @@ int main() {
     // --- 4. transaction_reset_overloads ---
     {
         auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
-        ids.reset(12u, txn);
+        ids.reset_to(12u, txn);
         MDBXC_TEST_ASSERT(ids.current(txn) == 12u);
         ids.reset(txn);
         MDBXC_TEST_ASSERT(ids.current(txn) == 0u);
@@ -93,7 +95,7 @@ int main() {
         MDBXC_TEST_ASSERT(read_only_threw);
         read_txn.commit();
 
-        ids.reset((std::numeric_limits<std::uint64_t>::max)());
+        ids.reset_to((std::numeric_limits<std::uint64_t>::max)());
         bool overflow_threw = false;
         try {
             (void)ids.next();
