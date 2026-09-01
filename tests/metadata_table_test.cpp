@@ -4,7 +4,9 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <vector>
 
+#include <mdbx_containers/KeyValueTable.hpp>
 #include <mdbx_containers/MetadataTable.hpp>
 
 namespace {
@@ -82,7 +84,23 @@ int main() {
         MDBXC_TEST_ASSERT(metadata.get_uint64("document_count") == 42u);
     }
 
-    // --- 4. erase_and_restart_persistence ---
+    // --- 4. malformed_bool_payload_fails_closed ---
+    {
+        mdbxc::KeyValueTable<std::string, std::vector<std::uint8_t>> raw_metadata(
+            conn, "collection_metadata");
+        raw_metadata.insert_or_assign(
+            "malformed_bool", std::vector<std::uint8_t>{6u, 2u});
+
+        bool malformed_threw = false;
+        try {
+            (void)metadata.get_bool("malformed_bool");
+        } catch (const std::runtime_error&) {
+            malformed_threw = true;
+        }
+        MDBXC_TEST_ASSERT(malformed_threw);
+    }
+
+    // --- 5. erase_and_restart_persistence ---
     {
         MDBXC_TEST_ASSERT(metadata.erase("normalized"));
         MDBXC_TEST_ASSERT(!metadata.erase("normalized"));
@@ -95,7 +113,7 @@ int main() {
         MDBXC_TEST_ASSERT(!reopened.get_bool_or("normalized", false));
     }
 
-    // --- 5. foreign_transaction_is_rejected_before_dbi_use ---
+    // --- 6. foreign_transaction_is_rejected_before_dbi_use ---
     {
         std::shared_ptr<mdbxc::Connection> foreign_connection =
             mdbxc::Connection::create(

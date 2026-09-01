@@ -330,6 +330,14 @@ namespace mdbxc {
             return result;
         }
 
+        static std::vector<std::uint8_t> encode(ValueType type, bool value) {
+            std::vector<std::uint8_t> result;
+            result.reserve(2u);
+            result.push_back(static_cast<std::uint8_t>(type));
+            result.push_back(value ? 1u : 0u);
+            return result;
+        }
+
         template<class ValueT>
         static ValueT decode(ValueType expected, const MDBX_val& stored) {
             if (stored.iov_len == 0u || stored.iov_base == nullptr) {
@@ -344,6 +352,21 @@ namespace mdbxc {
             payload.iov_base = const_cast<std::uint8_t*>(bytes + 1u);
             payload.iov_len = stored.iov_len - 1u;
             return deserialize_value<ValueT>(payload);
+        }
+
+        static bool decode_bool(ValueType expected, const MDBX_val& stored) {
+            if (stored.iov_len != 2u || stored.iov_base == nullptr) {
+                throw std::runtime_error("MetadataTable: malformed bool value");
+            }
+            const std::uint8_t* bytes =
+                static_cast<const std::uint8_t*>(stored.iov_base);
+            if (bytes[0] != static_cast<std::uint8_t>(expected)) {
+                throw std::invalid_argument("MetadataTable: stored value type mismatch");
+            }
+            if (bytes[1] > 1u) {
+                throw std::runtime_error("MetadataTable: malformed bool payload");
+            }
+            return bytes[1] == 1u;
         }
 
         template<class ValueT>
@@ -375,6 +398,20 @@ namespace mdbxc {
             }
             check_mdbx(rc, "Failed to read metadata value");
             value = decode<ValueT>(type, db_value);
+            return true;
+        }
+
+        bool db_try_get(const std::string& key, ValueType type, bool& value,
+                        MDBX_txn* txn) const {
+            SerializeScratch key_scratch;
+            MDBX_val db_key = make_key(key, key_scratch);
+            MDBX_val db_value;
+            const int rc = mdbx_get(txn, m_dbi, &db_key, &db_value);
+            if (rc == MDBX_NOTFOUND) {
+                return false;
+            }
+            check_mdbx(rc, "Failed to read metadata value");
+            value = decode_bool(type, db_value);
             return true;
         }
 
