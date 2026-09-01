@@ -2,11 +2,13 @@
 
 #include <cstdint>
 #include <iostream>
+#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
 
 #include <mdbx_containers/ChunkStore.hpp>
+#include <mdbx_containers/KeyMultiValueTable.hpp>
 #include <mdbx_containers/DocumentStore.hpp>
 #include <mdbx_containers/KeyValueTable.hpp>
 #include <mdbx_containers/sync.hpp>
@@ -117,7 +119,52 @@ int main() {
     MDBXC_TEST_ASSERT(!documents.find_by_source_uri_compat("file:///transient.md").first);
     MDBXC_TEST_ASSERT(chunks.count() == 2u);
 
-    // --- 4. document_and_chunk_deletion_can_share_one_transaction ---
+    // --- 4. corrupt_document_index_rejects_deletion_before_mutation ---
+    {
+        const std::uint64_t foreign_chunk =
+            chunks.add(make_chunk(second_id, 0u, 0u, 8u, "foreign"));
+        mdbxc::KeyMultiValueTable<std::uint64_t, std::uint64_t> document_index(
+            conn, "chunks_chunk_document_index");
+        document_index.insert(first_id, foreign_chunk);
+
+        bool by_document_threw = false;
+        try {
+            (void)chunks.by_document(first_id);
+        } catch (const std::runtime_error&) {
+            by_document_threw = true;
+        }
+        MDBXC_TEST_ASSERT(by_document_threw);
+
+        bool erase_threw = false;
+        try {
+            (void)chunks.erase_document(first_id);
+        } catch (const std::runtime_error&) {
+            erase_threw = true;
+        }
+        MDBXC_TEST_ASSERT(erase_threw);
+        MDBXC_TEST_ASSERT(chunks.count() == 3u);
+        MDBXC_TEST_ASSERT(chunks.get(foreign_chunk).document_id == second_id);
+        MDBXC_TEST_ASSERT(document_index.find(first_id).size() == 3u);
+        MDBXC_TEST_ASSERT(document_index.erase(first_id, foreign_chunk) == 1u);
+
+        document_index.insert(first_id, first_chunk);
+        bool duplicate_erase_threw = false;
+        {
+            auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+            try {
+                (void)chunks.erase_document(first_id, txn);
+            } catch (const std::runtime_error&) {
+                duplicate_erase_threw = true;
+            }
+            txn.commit();
+        }
+        MDBXC_TEST_ASSERT(duplicate_erase_threw);
+        MDBXC_TEST_ASSERT(chunks.count() == 3u);
+        MDBXC_TEST_ASSERT(document_index.erase(first_id, first_chunk) == 2u);
+        document_index.insert(first_id, first_chunk);
+    }
+
+    // --- 5. document_and_chunk_deletion_can_share_one_transaction ---
     {
         auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
         MDBXC_TEST_ASSERT(chunks.erase_document(first_id, txn) == 2u);
@@ -128,7 +175,7 @@ int main() {
     MDBXC_TEST_ASSERT(chunks.by_document(first_id).empty());
     MDBXC_TEST_ASSERT(documents.count() == 1u);
 
-    // --- 5. shared_prefix_uses_independent_dbi_names ---
+    // --- 6. shared_prefix_uses_independent_dbi_names ---
     {
         mdbxc::DocumentStore shared_documents(conn, "rag");
         mdbxc::ChunkStore shared_chunks(conn, "rag");
@@ -142,7 +189,27 @@ int main() {
         MDBXC_TEST_ASSERT(shared_chunks.count() == 1u);
     }
 
-    // --- 6. manual_connection_transaction_is_shared_by_both_stores ---
+    // --- 7. document_timestamp_codec_preserves_int64_boundaries ---
+    {
+        const std::int64_t timestamps[] = {
+            -1,
+            (std::numeric_limits<std::int64_t>::min)(),
+            0,
+            (std::numeric_limits<std::int64_t>::max)()
+        };
+        for (std::size_t i = 0u; i != sizeof(timestamps) / sizeof(timestamps[0]); ++i) {
+            mdbxc::Document document = make_document("file:///timestamp.md", "Timestamp");
+            document.id = static_cast<std::uint64_t>(i + 1u);
+            document.created_at_ms = timestamps[i];
+            document.indexed_at_ms = timestamps[i];
+            const mdbxc::Document decoded = mdbxc::detail::decode_document(
+                mdbxc::detail::encode_document(document));
+            MDBXC_TEST_ASSERT(decoded.created_at_ms == timestamps[i]);
+            MDBXC_TEST_ASSERT(decoded.indexed_at_ms == timestamps[i]);
+        }
+    }
+
+    // --- 8. manual_connection_transaction_is_shared_by_both_stores ---
     std::uint64_t manual_document_id = 0u;
     std::uint64_t manual_chunk_id = 0u;
     conn->begin(mdbxc::TransactionMode::WRITABLE);
@@ -163,7 +230,7 @@ int main() {
     MDBXC_TEST_ASSERT(!documents.find_compat(rolled_back_document_id).first);
     MDBXC_TEST_ASSERT(!chunks.find_compat(rolled_back_chunk_id).first);
 
-    // --- 7. source_uri_index_mismatch_fails_closed_before_erase ---
+    // --- 9. source_uri_index_mismatch_fails_closed_before_erase ---
     {
         mdbxc::KeyValueTable<std::string, std::uint64_t> source_index(
             conn, "documents_document_source_uris");
@@ -188,7 +255,7 @@ int main() {
         source_index.insert_or_assign("file:///faq.md", second_id);
     }
 
-    // --- 8. sync_capture_rejects_mutations_before_any_capture_or_write ---
+    // --- 10. sync_capture_rejects_mutations_before_any_capture_or_write ---
     {
         const std::size_t documents_before = documents.count();
         const std::size_t chunks_before = chunks.count();
@@ -217,7 +284,7 @@ int main() {
         MDBXC_TEST_ASSERT(capture.flush_count == 0u);
     }
 
-    // --- 9. restart_persistence ---
+    // --- 11. restart_persistence ---
     conn->disconnect();
     conn->connect();
     {
@@ -226,7 +293,7 @@ int main() {
         const mdbxc::Document reopened = reopened_documents.get(second_id);
         MDBXC_TEST_ASSERT(reopened.source_type == "markdown");
         MDBXC_TEST_ASSERT(reopened.metadata_json == "{\"lang\":\"en\"}");
-        MDBXC_TEST_ASSERT(reopened_chunks.count() == 1u);
+        MDBXC_TEST_ASSERT(reopened_chunks.count() == 2u);
         MDBXC_TEST_ASSERT(reopened_chunks.get(manual_chunk_id).document_id ==
                           manual_document_id);
     }

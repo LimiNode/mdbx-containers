@@ -44,6 +44,16 @@ namespace mdbxc {
             }
         }
 
+        inline std::int64_t rag_i64_from_u64(std::uint64_t value) {
+            const std::uint64_t int64_max = static_cast<std::uint64_t>(
+                (std::numeric_limits<std::int64_t>::max)());
+            if (value <= int64_max) {
+                return static_cast<std::int64_t>(value);
+            }
+            return -1 - static_cast<std::int64_t>(
+                (std::numeric_limits<std::uint64_t>::max)() - value);
+        }
+
         inline void rag_append_string(std::vector<std::uint8_t>& out, const std::string& value) {
             if (value.size() > (std::numeric_limits<std::uint32_t>::max)()) {
                 throw std::length_error("RAG record string exceeds uint32_t length");
@@ -129,8 +139,8 @@ namespace mdbxc {
             value.source_uri = reader.string();
             value.title = reader.string();
             value.source_type = reader.string();
-            value.created_at_ms = static_cast<std::int64_t>(reader.u64());
-            value.indexed_at_ms = static_cast<std::int64_t>(reader.u64());
+            value.created_at_ms = rag_i64_from_u64(reader.u64());
+            value.indexed_at_ms = rag_i64_from_u64(reader.u64());
             value.metadata_json = reader.string();
             reader.finish();
             return value;

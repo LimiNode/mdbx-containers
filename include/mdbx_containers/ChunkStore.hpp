@@ -14,6 +14,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <set>
 #include <stdexcept>
 #include <string>
 #include <utility>
@@ -93,16 +94,7 @@ namespace mdbxc {
                                        MDBX_txn* txn = nullptr) const {
             std::vector<Chunk> chunks;
             with_read_transaction([this, document_id, &chunks](MDBX_txn* t) {
-                const std::vector<std::uint64_t> ids =
-                    m_document_chunks.find(document_id, t);
-                chunks.reserve(ids.size());
-                for (std::size_t i = 0u; i < ids.size(); ++i) {
-                    std::pair<bool, Chunk> found = find_compat(ids[i], t);
-                    if (!found.first || found.second.document_id != document_id) {
-                        throw std::runtime_error("ChunkStore document index is stale");
-                    }
-                    chunks.push_back(std::move(found.second));
-                }
+                chunks = checked_document_chunks(document_id, t);
                 std::sort(chunks.begin(), chunks.end(),
                           [](const Chunk& left, const Chunk& right) {
                               if (left.chunk_index != right.chunk_index) {
@@ -148,15 +140,14 @@ namespace mdbxc {
             ensure_local_only();
             std::size_t removed = 0u;
             with_write_transaction([this, document_id, &removed](MDBX_txn* t) {
-                const std::vector<std::uint64_t> ids =
-                    m_document_chunks.find(document_id, t);
-                for (std::size_t i = 0u; i < ids.size(); ++i) {
-                    if (!m_records.erase(ids[i], t)) {
-                        throw std::runtime_error("ChunkStore document index is stale");
+                const std::vector<Chunk> chunks = checked_document_chunks(document_id, t);
+                for (std::size_t i = 0u; i < chunks.size(); ++i) {
+                    if (!m_records.erase(chunks[i].id, t)) {
+                        throw std::runtime_error("ChunkStore document index is inconsistent");
                     }
                     ++removed;
                 }
-                if (!ids.empty() && !m_document_chunks.erase(document_id, t)) {
+                if (!chunks.empty() && !m_document_chunks.erase(document_id, t)) {
                     throw std::runtime_error("ChunkStore failed to erase document index");
                 }
             }, txn);
@@ -221,16 +212,33 @@ namespace mdbxc {
         void ensure_chunk_index_available(std::uint64_t document_id,
                                           std::uint32_t chunk_index,
                                           MDBX_txn* txn) const {
-            const std::vector<std::uint64_t> ids = m_document_chunks.find(document_id, txn);
-            for (std::size_t i = 0u; i < ids.size(); ++i) {
-                std::pair<bool, Chunk> existing = find_compat(ids[i], txn);
-                if (!existing.first || existing.second.document_id != document_id) {
-                    throw std::runtime_error("ChunkStore document index is stale");
-                }
-                if (existing.second.chunk_index == chunk_index) {
+            const std::vector<Chunk> chunks =
+                checked_document_chunks(document_id, txn);
+            for (std::size_t i = 0u; i < chunks.size(); ++i) {
+                if (chunks[i].chunk_index == chunk_index) {
                     throw std::invalid_argument("ChunkStore chunk_index already exists for document");
                 }
             }
+        }
+
+        std::vector<Chunk> checked_document_chunks(std::uint64_t document_id,
+                                                    MDBX_txn* txn) const {
+            const std::vector<std::uint64_t> ids =
+                m_document_chunks.find(document_id, txn);
+            std::set<std::uint64_t> unique_ids;
+            std::vector<Chunk> chunks;
+            chunks.reserve(ids.size());
+            for (std::size_t i = 0u; i < ids.size(); ++i) {
+                if (!unique_ids.insert(ids[i]).second) {
+                    throw std::runtime_error("ChunkStore document index has duplicate chunk ID");
+                }
+                std::pair<bool, Chunk> found = find_compat(ids[i], txn);
+                if (!found.first || found.second.document_id != document_id) {
+                    throw std::runtime_error("ChunkStore document index is inconsistent");
+                }
+                chunks.push_back(std::move(found.second));
+            }
+            return chunks;
         }
 
         void ensure_local_only() const {
