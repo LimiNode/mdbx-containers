@@ -19,12 +19,19 @@ namespace mdbxc {
     /// \ingroup mdbxc_tables
     /// \brief Persistent typed metadata for a collection or component.
     /// \details
-    /// Each value stores a compact type tag before its serialized payload.
-    /// Reading a present key through a mismatched typed getter fails instead of
-    /// silently converting or interpreting its bytes as another type.
+    /// Supports string, uint32, uint64, int64, double, and bool values. Each
+    /// value stores a compact type tag before its serialized payload.
+    ///
+    /// Typed getters throw when a key is absent or has a different stored type.
+    /// The get_*_or() family returns its fallback only for an absent key; it
+    /// does not hide a type mismatch or malformed stored value. All operations
+    /// accept either an optional raw transaction handle or a Transaction wrapper.
     class MetadataTable final : public BaseTable {
     public:
         /// \brief Constructs metadata storage using an existing connection.
+        /// \param connection Existing connection.
+        /// \param name Name of the metadata DBI.
+        /// \param flags MDBX DBI flags.
         explicit MetadataTable(
             std::shared_ptr<Connection> connection,
             std::string name = "metadata",
@@ -32,134 +39,264 @@ namespace mdbxc {
             : BaseTable(std::move(connection), std::move(name), flags) {}
 
         /// \brief Constructs metadata storage using configuration settings.
+        /// \param config Connection configuration settings.
+        /// \param name Name of the metadata DBI.
+        /// \param flags MDBX DBI flags.
         explicit MetadataTable(
             const Config& config,
             std::string name = "metadata",
             MDBX_db_flags_t flags = MDBX_DB_DEFAULTS | MDBX_CREATE)
             : BaseTable(Connection::create(config), std::move(name), flags) {}
 
+        /// \brief Destroys the metadata table wrapper.
         ~MetadataTable() override = default;
 
+        /// \brief Stores a string metadata value.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Optional transaction handle.
         void set_string(const std::string& key, const std::string& value,
                         MDBX_txn* txn = nullptr) {
             set_value(key, ValueType::String, value, txn);
         }
 
+        /// \brief Stores a string metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Active transaction wrapper.
         void set_string(const std::string& key, const std::string& value,
                         const Transaction& txn) {
             set_string(key, value, txn.handle());
         }
 
+        /// \brief Stores an unsigned 32-bit metadata value.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Optional transaction handle.
         void set_uint32(const std::string& key, std::uint32_t value,
                         MDBX_txn* txn = nullptr) {
             set_value(key, ValueType::Uint32, value, txn);
         }
 
+        /// \brief Stores an unsigned 32-bit metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Active transaction wrapper.
         void set_uint32(const std::string& key, std::uint32_t value,
                         const Transaction& txn) {
             set_uint32(key, value, txn.handle());
         }
 
+        /// \brief Stores an unsigned 64-bit metadata value.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Optional transaction handle.
         void set_uint64(const std::string& key, std::uint64_t value,
                         MDBX_txn* txn = nullptr) {
             set_value(key, ValueType::Uint64, value, txn);
         }
 
+        /// \brief Stores an unsigned 64-bit metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Active transaction wrapper.
         void set_uint64(const std::string& key, std::uint64_t value,
                         const Transaction& txn) {
             set_uint64(key, value, txn.handle());
         }
 
+        /// \brief Stores a signed 64-bit metadata value.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Optional transaction handle.
         void set_int64(const std::string& key, std::int64_t value,
                        MDBX_txn* txn = nullptr) {
             set_value(key, ValueType::Int64, value, txn);
         }
 
+        /// \brief Stores a signed 64-bit metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Active transaction wrapper.
         void set_int64(const std::string& key, std::int64_t value,
                        const Transaction& txn) {
             set_int64(key, value, txn.handle());
         }
 
+        /// \brief Stores a double metadata value.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Optional transaction handle.
         void set_double(const std::string& key, double value,
                         MDBX_txn* txn = nullptr) {
             set_value(key, ValueType::Double, value, txn);
         }
 
+        /// \brief Stores a double metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Active transaction wrapper.
         void set_double(const std::string& key, double value,
                         const Transaction& txn) {
             set_double(key, value, txn.handle());
         }
 
+        /// \brief Stores a boolean metadata value.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Optional transaction handle.
         void set_bool(const std::string& key, bool value,
                       MDBX_txn* txn = nullptr) {
             set_value(key, ValueType::Bool, value, txn);
         }
 
+        /// \brief Stores a boolean metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param value Value to store.
+        /// \param txn Active transaction wrapper.
         void set_bool(const std::string& key, bool value,
                       const Transaction& txn) {
             set_bool(key, value, txn.handle());
         }
 
+        /// \brief Returns a stored string metadata value.
+        /// \param key Metadata key.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::string get_string(const std::string& key,
                                MDBX_txn* txn = nullptr) const {
             return get_required<std::string>(key, ValueType::String, txn);
         }
 
+        /// \brief Returns a stored string metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::string get_string(const std::string& key,
                                const Transaction& txn) const {
             return get_string(key, txn.handle());
         }
 
+        /// \brief Returns a stored unsigned 32-bit metadata value.
+        /// \param key Metadata key.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint32_t get_uint32(const std::string& key,
                                  MDBX_txn* txn = nullptr) const {
             return get_required<std::uint32_t>(key, ValueType::Uint32, txn);
         }
 
+        /// \brief Returns a stored unsigned 32-bit metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint32_t get_uint32(const std::string& key,
                                  const Transaction& txn) const {
             return get_uint32(key, txn.handle());
         }
 
+        /// \brief Returns a stored unsigned 64-bit metadata value.
+        /// \param key Metadata key.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint64_t get_uint64(const std::string& key,
                                  MDBX_txn* txn = nullptr) const {
             return get_required<std::uint64_t>(key, ValueType::Uint64, txn);
         }
 
+        /// \brief Returns a stored unsigned 64-bit metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint64_t get_uint64(const std::string& key,
                                  const Transaction& txn) const {
             return get_uint64(key, txn.handle());
         }
 
+        /// \brief Returns a stored signed 64-bit metadata value.
+        /// \param key Metadata key.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::int64_t get_int64(const std::string& key,
                                MDBX_txn* txn = nullptr) const {
             return get_required<std::int64_t>(key, ValueType::Int64, txn);
         }
 
+        /// \brief Returns a stored signed 64-bit metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::int64_t get_int64(const std::string& key,
                                const Transaction& txn) const {
             return get_int64(key, txn.handle());
         }
 
+        /// \brief Returns a stored double metadata value.
+        /// \param key Metadata key.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         double get_double(const std::string& key,
                           MDBX_txn* txn = nullptr) const {
             return get_required<double>(key, ValueType::Double, txn);
         }
 
+        /// \brief Returns a stored double metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         double get_double(const std::string& key,
                           const Transaction& txn) const {
             return get_double(key, txn.handle());
         }
 
+        /// \brief Returns a stored boolean metadata value.
+        /// \param key Metadata key.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         bool get_bool(const std::string& key,
                       MDBX_txn* txn = nullptr) const {
             return get_required<bool>(key, ValueType::Bool, txn);
         }
 
+        /// \brief Returns a stored boolean metadata value using an external transaction.
+        /// \param key Metadata key.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value.
+        /// \throws std::out_of_range if the key is absent.
+        /// \throws std::invalid_argument if the stored value has another type.
         bool get_bool(const std::string& key,
                       const Transaction& txn) const {
             return get_bool(key, txn.handle());
         }
 
+        /// \brief Returns a string metadata value or a fallback when the key is absent.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::string get_string_or(const std::string& key,
                                   std::string fallback,
                                   MDBX_txn* txn = nullptr) const {
@@ -167,92 +304,183 @@ namespace mdbxc {
                                        std::move(fallback), txn);
         }
 
+        /// \brief Returns a string metadata value or a fallback using an external transaction.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::string get_string_or(const std::string& key,
                                   std::string fallback,
                                   const Transaction& txn) const {
             return get_string_or(key, std::move(fallback), txn.handle());
         }
 
+        /// \brief Returns an unsigned 32-bit metadata value or a fallback when absent.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint32_t get_uint32_or(const std::string& key, std::uint32_t fallback,
                                     MDBX_txn* txn = nullptr) const {
             return get_or<std::uint32_t>(key, ValueType::Uint32, fallback, txn);
         }
 
+        /// \brief Returns an unsigned 32-bit metadata value or a fallback using an external transaction.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint32_t get_uint32_or(const std::string& key, std::uint32_t fallback,
                                     const Transaction& txn) const {
             return get_uint32_or(key, fallback, txn.handle());
         }
 
+        /// \brief Returns an unsigned 64-bit metadata value or a fallback when absent.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint64_t get_uint64_or(const std::string& key, std::uint64_t fallback,
                                     MDBX_txn* txn = nullptr) const {
             return get_or<std::uint64_t>(key, ValueType::Uint64, fallback, txn);
         }
 
+        /// \brief Returns an unsigned 64-bit metadata value or a fallback using an external transaction.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint64_t get_uint64_or(const std::string& key, std::uint64_t fallback,
                                     const Transaction& txn) const {
             return get_uint64_or(key, fallback, txn.handle());
         }
 
+        /// \brief Returns a signed 64-bit metadata value or a fallback when absent.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::int64_t get_int64_or(const std::string& key, std::int64_t fallback,
                                   MDBX_txn* txn = nullptr) const {
             return get_or<std::int64_t>(key, ValueType::Int64, fallback, txn);
         }
 
+        /// \brief Returns a signed 64-bit metadata value or a fallback using an external transaction.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::int64_t get_int64_or(const std::string& key, std::int64_t fallback,
                                   const Transaction& txn) const {
             return get_int64_or(key, fallback, txn.handle());
         }
 
+        /// \brief Returns a double metadata value or a fallback when the key is absent.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         double get_double_or(const std::string& key, double fallback,
                              MDBX_txn* txn = nullptr) const {
             return get_or<double>(key, ValueType::Double, fallback, txn);
         }
 
+        /// \brief Returns a double metadata value or a fallback using an external transaction.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         double get_double_or(const std::string& key, double fallback,
                              const Transaction& txn) const {
             return get_double_or(key, fallback, txn.handle());
         }
 
+        /// \brief Returns a boolean metadata value or a fallback when the key is absent.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Optional transaction handle.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         bool get_bool_or(const std::string& key, bool fallback,
                          MDBX_txn* txn = nullptr) const {
             return get_or<bool>(key, ValueType::Bool, fallback, txn);
         }
 
+        /// \brief Returns a boolean metadata value or a fallback using an external transaction.
+        /// \param key Metadata key.
+        /// \param fallback Value returned when the key is absent.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored value or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         bool get_bool_or(const std::string& key, bool fallback,
                          const Transaction& txn) const {
             return get_bool_or(key, fallback, txn.handle());
         }
 
         /// \brief Stores the collection schema version under the fixed key.
+        /// \param value Schema version to store.
+        /// \param txn Optional transaction handle.
         void set_schema_version(std::uint32_t value, MDBX_txn* txn = nullptr) {
             set_uint32(schema_version_key(), value, txn);
         }
 
+        /// \brief Stores the collection schema version using an external transaction.
+        /// \param value Schema version to store.
+        /// \param txn Active transaction wrapper.
         void set_schema_version(std::uint32_t value, const Transaction& txn) {
             set_schema_version(value, txn.handle());
         }
 
         /// \brief Returns the schema version or throws if it has not been set.
+        /// \param txn Optional transaction handle.
+        /// \return Stored schema version.
+        /// \throws std::out_of_range if no schema version has been stored.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint32_t schema_version(MDBX_txn* txn = nullptr) const {
             return get_uint32(schema_version_key(), txn);
         }
 
+        /// \brief Returns the schema version using an external transaction.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored schema version.
+        /// \throws std::out_of_range if no schema version has been stored.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint32_t schema_version(const Transaction& txn) const {
             return schema_version(txn.handle());
         }
 
         /// \brief Returns the schema version or a caller-supplied fallback.
+        /// \param fallback Value returned when no schema version has been stored.
+        /// \param txn Optional transaction handle.
+        /// \return Stored schema version or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint32_t schema_version_or(std::uint32_t fallback,
                                         MDBX_txn* txn = nullptr) const {
             return get_uint32_or(schema_version_key(), fallback, txn);
         }
 
+        /// \brief Returns the schema version or a fallback using an external transaction.
+        /// \param fallback Value returned when no schema version has been stored.
+        /// \param txn Active transaction wrapper.
+        /// \return Stored schema version or the fallback.
+        /// \throws std::invalid_argument if the stored value has another type.
         std::uint32_t schema_version_or(std::uint32_t fallback,
                                         const Transaction& txn) const {
             return schema_version_or(fallback, txn.handle());
         }
 
         /// \brief Removes a metadata key.
+        /// \param key Metadata key.
+        /// \param txn Optional transaction handle.
         /// \return True when a stored value was removed.
         bool erase(const std::string& key, MDBX_txn* txn = nullptr) {
             bool removed = false;
@@ -262,6 +490,10 @@ namespace mdbxc {
             return removed;
         }
 
+        /// \brief Removes a metadata key using an external transaction.
+        /// \param key Metadata key.
+        /// \param txn Active transaction wrapper.
+        /// \return True when a stored value was removed.
         bool erase(const std::string& key, const Transaction& txn) {
             return erase(key, txn.handle());
         }
