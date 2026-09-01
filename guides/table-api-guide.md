@@ -447,7 +447,8 @@ metadata.set_schema_version(1);
 - `get_*_or(key, fallback)` returns its fallback only when the key is absent;
   a stored type mismatch still fails closed.
 - `set_schema_version`, `schema_version`, and `schema_version_or` use the
-  fixed `schema_version` metadata key for a small collection-schema contract.
+  fixed, reserved `schema_version` metadata key for a small collection-schema
+  contract. Do not use that key for unrelated metadata.
 - `erase(key)` removes one metadata value and reports whether it existed.
 
 Use it for schema versions, model names, dimensions, migration state, and small

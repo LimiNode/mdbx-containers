@@ -427,6 +427,8 @@ namespace mdbxc {
         }
 
         /// \brief Stores the collection schema version under the fixed key.
+        /// \details The \c schema_version key is reserved by the schema-version
+        /// helpers and must not be used for unrelated metadata.
         /// \param value Schema version to store.
         /// \param txn Optional transaction handle.
         void set_schema_version(std::uint32_t value, MDBX_txn* txn = nullptr) {
