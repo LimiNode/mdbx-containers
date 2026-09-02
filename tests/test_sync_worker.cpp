@@ -116,6 +116,43 @@ private:
     int m_cancel_count;
 };
 
+class ForeignScopeSelectivePeer : public mdbxc::sync::ISyncPeer {
+public:
+    ForeignScopeSelectivePeer(
+            const mdbxc::sync::SelectiveReplicationHello& hello,
+            const mdbxc::sync::ScopedPullResponse& response)
+        : m_hello(hello), m_response(response) {}
+
+    mdbxc::sync::PullResponse pull(
+            const mdbxc::sync::PullRequest& request) override {
+        (void)request;
+        return mdbxc::sync::PullResponse();
+    }
+
+    mdbxc::sync::PushResponse push(
+            const mdbxc::sync::PushRequest& request) override {
+        (void)request;
+        return mdbxc::sync::PushResponse();
+    }
+
+    bool supports_selective_replication() const override { return true; }
+
+    mdbxc::sync::SelectiveReplicationHello
+    selective_replication_hello() override {
+        return m_hello;
+    }
+
+    mdbxc::sync::ScopedPullResponse scoped_pull(
+            const mdbxc::sync::ScopedPullRequest& request) override {
+        (void)request;
+        return m_response;
+    }
+
+private:
+    mdbxc::sync::SelectiveReplicationHello m_hello;
+    mdbxc::sync::ScopedPullResponse m_response;
+};
+
 void test_selective_worker_drains_and_resumes_durable_cursor() {
     using namespace mdbxc;
     const std::string source_path =
@@ -191,6 +228,65 @@ void test_selective_worker_drains_and_resumes_durable_cursor() {
     source_conn->disconnect();
     cleanup(source_path);
     cleanup(replica_path);
+}
+
+void test_selective_worker_rejects_foreign_scope_response() {
+    using namespace mdbxc;
+    const std::string path =
+        "test_selective_worker_foreign_scope.mdbx";
+    cleanup(path);
+
+    const sync::NodeId remote_node = make_node(0x25);
+    const sync::NodeId receiver_node = make_node(0x65);
+    const sync::DbId db_id = make_node(0xB5);
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine receiver(conn);
+    receiver.initialize_local_identity(receiver_node, db_id);
+    KeyValueTable<int, int> orders(conn, "orders");
+
+    sync::SelectiveReplicationDescriptor descriptor;
+    descriptor.scope_id = "scope_B";
+    descriptor.designated_writer_origin = remote_node;
+    descriptor.manifest.push_back(
+        sync::SelectiveReplicationDbi::from(orders));
+    sync::ScopedChangeBatch batch;
+    batch.scope_id = descriptor.scope_id;
+    batch.designated_writer_origin = remote_node;
+    batch.scope_sequence = 1u;
+    sync::ChangeOp op;
+    op.op_type = sync::ChangeOpType::Put;
+    op.dbi_name = descriptor.manifest[0].dbi_name();
+    op.dbi_flags = descriptor.manifest[0].dbi_flags();
+    op.storage_key.push_back(0x01u);
+    op.value.push_back(0x02u);
+    batch.ops.push_back(op);
+
+    sync::ScopedPullResponse response;
+    response.descriptor = descriptor;
+    response.remote_tail = 1u;
+    response.remote_tail_known = true;
+    response.batches.push_back(batch);
+    sync::SelectiveReplicationHello hello;
+    hello.node_id = remote_node;
+    hello.db_id = db_id;
+    hello.capabilities.flags =
+        sync::selective_replication_supported_capability_flags();
+    ForeignScopeSelectivePeer peer(hello, response);
+
+    sync::SelectiveSyncWorker worker(receiver, peer, "scope_A");
+    const sync::SelectiveSyncWorkerRoundResult result = worker.run_once();
+    if (result.ok || result.error_code !=
+            sync::SelectiveReplicationErrorCode::ScopeDescriptorMismatch ||
+        result.pages_pulled != 0u || result.batches_applied != 0u ||
+        receiver.scoped_applied_sequence("scope_A") != 0u ||
+        receiver.scoped_applied_sequence("scope_B") != 0u ||
+        !orders.empty()) {
+        throw std::runtime_error(
+            "selective worker accepted or applied another scope");
+    }
+
+    conn->disconnect();
+    cleanup(path);
 }
 
 class NodeSessionApplyObserver : public mdbxc::sync::ISyncApplyObserver {
@@ -3542,6 +3638,8 @@ int main() {
     const Case cases[] = {
         { "test_selective_worker_drains_and_resumes_durable_cursor",
           &test_selective_worker_drains_and_resumes_durable_cursor },
+        { "test_selective_worker_rejects_foreign_scope_response",
+          &test_selective_worker_rejects_foreign_scope_response },
         { "test_worker_recovers_fresh_replica_with_full_snapshot",
           &test_worker_recovers_fresh_replica_with_full_snapshot },
         { "test_worker_resumes_persisted_full_snapshot_after_restart",

@@ -91,6 +91,9 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   `SelectiveSyncWorker` provide foreground in-process orchestration with
   durable resume. HTTP/WebSocket routing, background scheduling,
   snapshots/resume, and retention are not implemented yet.
+  Until scoped baselines land, a designated writer can activate a new scope
+  only over empty existing manifest DBIs; repeated descriptor verification and
+  non-designated write-guard installation do not impose that emptiness rule.
 - `SyncEngine` pull / push / apply protocol logic, `DirectSyncPeer`
   in-process transport, detailed apply conflict diagnostics, multi-origin
   pagination, origin-index fallback for legacy changelogs, and

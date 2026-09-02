@@ -125,7 +125,8 @@ namespace sync {
             do {
                 if (request.cancel_token.is_cancellation_requested()) {
                     return fail(result, "selective worker cancelled",
-                                SelectiveReplicationErrorCode::None, true);
+                                SelectiveReplicationErrorCode::Cancelled,
+                                true);
                 }
                 ScopedPullResponse pulled;
                 try {
@@ -140,6 +141,13 @@ namespace sync {
                                     ? "selective pull failed" : pulled.error,
                                 pulled.error_code,
                                 pulled.error_retryable);
+                }
+                if (pulled.descriptor.scope_id != m_scope_id) {
+                    return fail(result,
+                                "selective pull returned another scope",
+                                SelectiveReplicationErrorCode::
+                                    ScopeDescriptorMismatch,
+                                false);
                 }
                 ++result.pages_pulled;
                 result.remote_tail = pulled.remote_tail;

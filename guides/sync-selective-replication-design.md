@@ -238,6 +238,14 @@ Capture uses a durable scope-membership and designated-writer lookup and writes
 the scoped projection beside, not instead of, global capture. It never filters
 the global changelog after the fact.
 
+Until the scoped-baseline phase is implemented, activating a new scope at its
+designated writer requires every existing manifest DBI to be empty. Otherwise
+registration fails with a baseline-required error instead of advertising an
+empty scoped history as convergence. Re-verifying an already registered scope
+does not repeat this emptiness precondition, and a non-designated origin may
+install the descriptor over existing replica data solely to enforce its local
+write guard.
+
 ## Scoped Baseline And Resume
 
 The scoped baseline exists only for recovery of one scope. It is not an
