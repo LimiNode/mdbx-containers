@@ -390,6 +390,86 @@ void test_replication_value_table_singleton_key() {
     cleanup(p); cleanup(r);
 }
 
+void test_replication_metadata_table_roundtrip() {
+    using namespace mdbxc;
+    const std::string p = "test_rep_metadata_table.mdbx";
+    const std::string r = "test_rep_metadata_table_replica.mdbx";
+    cleanup(p); cleanup(r);
+
+    const sync::NodeId primary_node = make_node(0xA0);
+    const sync::NodeId replica_node = make_node(0xB0);
+    const sync::NodeId db_id = make_node(0xD0);
+    auto primary = open(p);
+    auto replica = open(r);
+    sync::SyncEngine pe(primary), re(replica);
+    pe.initialize_local_identity(primary_node, db_id);
+    re.initialize_local_identity(replica_node, db_id);
+
+    MetadataTable primary_metadata(primary, "metadata");
+    sync::ThreadLocalChangeAccumulator sink(primary);
+    primary->attach_sync_capture(&sink);
+    {
+        auto txn = primary->transaction(TransactionMode::WRITABLE);
+        primary_metadata.set_string("name", "primary", txn);
+        primary_metadata.set_uint32("dimension", 1536u, txn);
+        primary_metadata.set_uint64("generation", 9001u, txn);
+        primary_metadata.set_int64("offset", -17, txn);
+        primary_metadata.set_double("threshold", 0.25, txn);
+        primary_metadata.set_bool("enabled", true, txn);
+        primary_metadata.set_schema_version(3u, txn);
+        primary_metadata.set_string("transient", "remove", txn);
+        txn.commit();
+    }
+    if (pull_all_to_replica(pe, re, primary_node, replica_node, db_id) != 1u) {
+        throw std::runtime_error("metadata transaction expected one sync batch");
+    }
+
+    {
+        MetadataTable metadata(replica, "metadata");
+        if (metadata.get_string("name") != "primary" ||
+            metadata.get_uint32("dimension") != 1536u ||
+            metadata.get_uint64("generation") != 9001u ||
+            metadata.get_int64("offset") != -17 ||
+            metadata.get_double("threshold") != 0.25 ||
+            !metadata.get_bool("enabled") ||
+            metadata.schema_version() != 3u ||
+            metadata.get_string("transient") != "remove") {
+            throw std::runtime_error("metadata typed values did not replicate");
+        }
+        bool mismatch_threw = false;
+        try {
+            (void)metadata.get_string("dimension");
+        } catch (const std::invalid_argument&) {
+            mismatch_threw = true;
+        }
+        if (!mismatch_threw) {
+            throw std::runtime_error("replicated metadata type mismatch did not fail");
+        }
+    }
+
+    primary_metadata.set_bool("enabled", false);
+    if (!primary_metadata.erase("transient")) {
+        throw std::runtime_error("metadata erase unexpectedly returned false");
+    }
+    if (pull_all_to_replica(pe, re, primary_node, replica_node, db_id) != 2u) {
+        throw std::runtime_error("metadata updates expected two automatic batches");
+    }
+
+    {
+        MetadataTable metadata(replica, "metadata");
+        if (metadata.get_bool("enabled")) {
+            throw std::runtime_error("metadata bool update did not replicate");
+        }
+        if (metadata.get_string_or("transient", "fallback") != "fallback") {
+            throw std::runtime_error("metadata erase did not replicate");
+        }
+    }
+
+    primary->detach_sync_capture();
+    primary->disconnect(); replica->disconnect();
+    cleanup(p); cleanup(r);
+}
+
 void test_replication_sequence_table_roundtrip() {
     using namespace mdbxc;
     const std::string p = "test_rep_sequence_roundtrip.mdbx";
@@ -1427,6 +1507,8 @@ int main() {
         { "test_replication_push_three_tables",  &test_replication_push_three_tables },
         { "test_replication_mixed_ops",          &test_replication_mixed_ops },
         { "test_replication_value_table_singleton_key", &test_replication_value_table_singleton_key },
+        { "test_replication_metadata_table_roundtrip",
+          &test_replication_metadata_table_roundtrip },
         { "test_replication_sequence_table_roundtrip",
           &test_replication_sequence_table_roundtrip },
         { "test_replication_key_value_bulk_roundtrip", &test_replication_key_value_bulk_roundtrip },

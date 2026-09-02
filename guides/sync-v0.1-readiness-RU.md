@@ -6,8 +6,8 @@ Sync экспериментален и включается через `MDBXC_SY
 
 ## Готово для v0.1
 
-- `KeyValueTable`, `KeyTable`, `ValueTable` и `SequenceTable` захватываются
-  `ThreadLocalChangeAccumulator` через `SyncCaptureScope`.
+- `KeyValueTable`, `KeyTable`, `ValueTable`, `SequenceTable` и `MetadataTable`
+  захватываются `ThreadLocalChangeAccumulator` через `SyncCaptureScope`.
 - Самостоятельная запись образует один batch; явная транзакция через несколько
   поддержанных таблиц — один атомарный batch. Чтения и scan не захватываются.
 - `SyncEngine::handle_push()` применяет одну полученную страницу в одной MDBX

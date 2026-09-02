@@ -62,9 +62,9 @@ quotes.insert_or_assign("binance/BTCUSDT", latest_quote);
 const Quote visible_quote = replica_quotes.at("binance/BTCUSDT");
 ```
 
-`KeyValueTable`, `KeyTable`, `ValueTable`, and `SequenceTable` have raw
-capture support. `SequenceTable::append()` remains single-writer: independent
-appenders must be serialized externally.
+`KeyValueTable`, `KeyTable`, `ValueTable`, `SequenceTable`, and `MetadataTable`
+have raw capture support. `SequenceTable::append()` remains single-writer:
+independent appenders must be serialized externally.
 
 ## Case: Market Ticks, Trades, And Other Immutable Events
 

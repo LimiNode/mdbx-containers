@@ -169,6 +169,14 @@ std::vector<std::uint8_t> storage_key_bytes(int key) {
     return std::vector<std::uint8_t>(data, data + value.iov_len);
 }
 
+std::vector<std::uint8_t> metadata_storage_key_bytes(const std::string& key) {
+    mdbxc::SerializeScratch scratch;
+    const MDBX_val value = mdbxc::serialize_key<true>(key, scratch);
+    const std::uint8_t* data =
+        static_cast<const std::uint8_t*>(value.iov_base);
+    return std::vector<std::uint8_t>(data, data + value.iov_len);
+}
+
 void test_no_sink_no_capture() {
     using namespace mdbxc;
     const std::string p = "test_capture_no_sink.mdbx";
@@ -729,6 +737,74 @@ void test_value_table_writes_storage_key_via_sink() {
         if (op.op_type == sync::ChangeOpType::Put && op.value.empty()) {
             throw std::runtime_error("value table Put missing value bytes");
         }
+    }
+}
+
+void test_metadata_table_writes_via_sink() {
+    using namespace mdbxc;
+    const std::string p = "test_capture_metadata_table.mdbx";
+    cleanup(p);
+
+    Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = Connection::create(cfg);
+    MetadataTable metadata(conn, "metadata");
+
+    StubSink sink;
+    conn->attach_sync_capture(&sink);
+    {
+        auto txn = conn->transaction(TransactionMode::WRITABLE);
+        metadata.set_string("name", "primary", txn);
+        metadata.set_uint32("dimension", 1536u, txn);
+        metadata.set_uint64("generation", 9001u, txn);
+        metadata.set_int64("offset", -17, txn);
+        metadata.set_double("threshold", 0.25, txn);
+        metadata.set_bool("enabled", true, txn);
+        metadata.set_schema_version(3u, txn);
+        metadata.set_string("transient", "remove", txn);
+        if (!metadata.erase("transient", txn)) {
+            throw std::runtime_error("metadata erase unexpectedly returned false");
+        }
+        txn.commit();
+    }
+    conn->detach_sync_capture();
+    conn->disconnect();
+    cleanup(p);
+
+    const char* keys[] = {
+        "name", "dimension", "generation", "offset", "threshold",
+        "enabled", "schema_version", "transient"
+    };
+    const std::uint8_t tags[] = { 1u, 2u, 3u, 4u, 5u, 6u, 2u, 1u };
+    const std::size_t put_count = sizeof(keys) / sizeof(keys[0]);
+    if (sink.m_recorded.size() != put_count + 1u) {
+        throw std::runtime_error("expected metadata puts and delete, got " +
+                                 std::to_string(sink.m_recorded.size()));
+    }
+    if (sink.m_flushed.size() != 1u) {
+        throw std::runtime_error("metadata transaction must flush one batch");
+    }
+    for (std::size_t i = 0; i < put_count; ++i) {
+        const sync::ChangeOp& op = sink.m_recorded[i];
+        if (op.dbi_name != "metadata" ||
+            op.op_type != sync::ChangeOpType::Put) {
+            throw std::runtime_error("metadata Put capture identity incorrect");
+        }
+        if (op.storage_key != metadata_storage_key_bytes(keys[i])) {
+            throw std::runtime_error("metadata Put captured wrong storage key");
+        }
+        if (op.value.empty() || op.value[0] != tags[i]) {
+            throw std::runtime_error("metadata Put captured wrong type tag");
+        }
+    }
+    const sync::ChangeOp& erased = sink.m_recorded[put_count];
+    if (erased.dbi_name != "metadata" ||
+        erased.op_type != sync::ChangeOpType::Delete ||
+        erased.storage_key != metadata_storage_key_bytes("transient") ||
+        !erased.value.empty()) {
+        throw std::runtime_error("metadata Delete capture incorrect");
     }
 }
 
@@ -1946,6 +2022,8 @@ int main(int argc, char** argv) {
         { "test_sequence_set_writes_via_sink", &test_sequence_set_writes_via_sink },
         { "test_value_table_writes_storage_key_via_sink",
           &test_value_table_writes_storage_key_via_sink },
+        { "test_metadata_table_writes_via_sink",
+          &test_metadata_table_writes_via_sink },
         { "test_key_value_bulk_writes_via_sink",
           &test_key_value_bulk_writes_via_sink },
         { "test_range_erase_writes_via_sink", &test_range_erase_writes_via_sink },

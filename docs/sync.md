@@ -105,7 +105,7 @@ and snapshots.
 
 | Table family | Raw status | Important boundary |
 | --- | --- | --- |
-| `KeyValueTable`, `KeyTable`, `ValueTable`, `SequenceTable` | Supported | Operations are captured as raw physical DBI changes. |
+| `KeyValueTable`, `KeyTable`, `ValueTable`, `SequenceTable`, `MetadataTable` | Supported | Operations are captured as raw physical DBI changes. `MetadataTable` preserves its stored type tags. |
 | `VectorStore` | Supported through owned tables | Raw replication updates its four underlying DBIs; open instances rebuild the in-memory index lazily after remote apply. |
 | `KeyMultiValueTable` | Not raw-replicated | Use its explicit logical adapter when its documented typed contract fits. |
 | `KeyOrderedMultiValueTable` | Not raw-replicated | Use ordered logical delivery for its supported schemas. |
