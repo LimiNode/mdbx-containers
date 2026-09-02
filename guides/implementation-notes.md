@@ -252,8 +252,8 @@ Operational rules:
   full-snapshot requests are permanent until the caller changes behavior.
   This flag is independent from `SyncTransportRetryHint`.
 - v0.1 sync captures normal write paths for `KeyValueTable`, `KeyTable`,
-  `ValueTable`, and `SequenceTable`. `VectorStore` is covered indirectly by
-  those internal member tables and also has an explicit schema-v1
+  `ValueTable`, `SequenceTable`, and `MetadataTable`. `VectorStore` is covered
+  indirectly by those internal member tables and also has an explicit schema-v1
   `VectorStoreLogicalAdapter` for add, erase, and clear across its four DBIs.
   Both paths require one authoritative or application-serialized writer.
 - Use `SyncCaptureScope` for temporary capture attachment around a bounded

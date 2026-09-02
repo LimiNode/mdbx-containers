@@ -81,7 +81,8 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   pagination, origin-index fallback for legacy changelogs, and
   `make_push_request()` for example / transport code.
 - Replicated table operation capture for `KeyValueTable`, `KeyTable`,
-  `ValueTable`, and `SequenceTable` normal write paths, including bulk
+  `ValueTable`, `SequenceTable`, and `MetadataTable` normal write paths,
+  including bulk
   upserts, reconcile deletes, singleton value writes, and range erases.
   `SequenceTable` `append()` remains a local single-writer operation with
   existing external synchronisation requirements. `VectorStore` is covered
@@ -89,8 +90,9 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   `KeyValueTable`. It also has an explicit schema-v1 logical adapter for
   add, erase, and clear operations over its four owned DBIs.
 - End-to-end replication tests cover `ValueTable`, `KeyValueTable`,
-  `KeyTable`, `SequenceTable` insert/update/delete including empty serialized
-  values, and `VectorStore` add/erase/rebuild through its public API. A
+  `KeyTable`, `SequenceTable`, and `MetadataTable` insert/update/delete,
+  including empty serialized values and all metadata value tags, plus
+  `VectorStore` add/erase/rebuild through its public API. A
   separate logical-adapter regression covers VectorStore add/erase/clear
   round-trip and fail-closed duplicate, schema, malformed-payload, and
   capture-rollback cases.
@@ -113,6 +115,7 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
 | `KeyTable` | Supported | Captures insert/delete, range erase, reconcile/clear paths that operate on physical keys. |
 | `ValueTable` | Supported | Captures singleton put/delete/clear using its fixed physical key. |
 | `SequenceTable` | Supported | Captures set/append/delete/clear against stable `uint64_t` record ids. `append()` remains a local single-writer helper; external synchronization is still required for concurrent appenders. |
+| `MetadataTable` | Supported | Captures tagged-value put/delete operations in its single DBI. Raw apply preserves the stored type tag; typed getters still reject mismatches or malformed payloads after replication. |
 | `VectorStore` | Raw plus limited logical adapter | Raw replication covers its `SequenceTable` and `KeyValueTable` member writes. The explicit schema-v1 logical adapter captures and applies add, erase, and clear over the ids, embeddings, text, and metadata DBIs with explicit record ids. Erase retains the ids marker as the persistent allocation high-water; clear resets all four DBIs. Both paths require one authoritative or application-serialized writer per collection; the logical adapter is not a multi-writer conflict resolver or automatic transport path. Already-open instances refresh their RAM index lazily after completed remote apply when the connection sync-apply generation changes. |
 | `AnyValueTable` | Not supported in v0.1 | Deferred until heterogeneous value type tags are part of the sync wire format. |
 | `KeyMultiValueTable` | Schema-v3 logical adapter plus automatic capture | Raw v0.1 capture remains unsupported. `SyncEngine::bind_key_multi_value_logical_capture()` durably binds one DBI to a receiver-neutral logical dataset and makes ordinary supported writes publish schema-v3 frames atomically into `LogicalJournalStore`. `erase_range()` remains fail-closed because its normal API is unbounded. All destructive modes require one-writer or causally serialized updates. |

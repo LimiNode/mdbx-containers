@@ -11,7 +11,7 @@ rules, see [Sync table coverage matrix](sync-table-coverage.md).
 ## Ready For v0.1 Use
 
 - Supported table capture paths are explicit: `KeyValueTable`, `KeyTable`,
-  `ValueTable`, and `SequenceTable` writes are captured when a
+  `ValueTable`, `SequenceTable`, and `MetadataTable` writes are captured when a
   `ThreadLocalChangeAccumulator` is attached to the writing `Connection`;
   `SyncCaptureScope` provides RAII attach/restore for write phases.
 - `VectorStore` is covered indirectly through its internal `SequenceTable` and

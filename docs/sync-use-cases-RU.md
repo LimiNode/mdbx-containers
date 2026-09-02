@@ -62,9 +62,9 @@ quotes.insert_or_assign("binance/BTCUSDT", latest_quote);
 const Quote visible_quote = replica_quotes.at("binance/BTCUSDT");
 ```
 
-`KeyValueTable`, `KeyTable`, `ValueTable` и `SequenceTable` поддерживают raw
-захват. `SequenceTable::append()` остаётся операцией для одного пишущего узла: независимые
-вызовы `append()` нужно сериализовать вне библиотеки.
+`KeyValueTable`, `KeyTable`, `ValueTable`, `SequenceTable` и `MetadataTable`
+поддерживают raw-захват. `SequenceTable::append()` остаётся операцией для одного
+пишущего узла: независимые вызовы `append()` нужно сериализовать вне библиотеки.
 
 ## Сценарий: рыночные тики, сделки и другие immutable events
 
