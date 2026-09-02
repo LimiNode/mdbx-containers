@@ -235,6 +235,22 @@ void test_pull_round_trip(ProtocolFixture& fixture) {
     MDBXC_TEST_ASSERT(!decoded_failure.ok);
     MDBXC_TEST_ASSERT(decoded_failure.error_code == failure.error_code);
     MDBXC_TEST_ASSERT(decoded_failure.batches.empty());
+
+    ScopedPullResponse cancelled;
+    cancelled.ok = false;
+    cancelled.error = "cancelled";
+    cancelled.error_code = SelectiveReplicationErrorCode::Cancelled;
+    cancelled.error_retryable = true;
+    const ScopedPullResponse decoded_cancelled =
+        SelectiveReplicationProtocolCodec::decode_pull_response(
+            SelectiveReplicationProtocolCodec::encode_pull_response(
+                cancelled));
+    MDBXC_TEST_ASSERT(!decoded_cancelled.ok);
+    MDBXC_TEST_ASSERT(decoded_cancelled.error_code ==
+                      SelectiveReplicationErrorCode::Cancelled);
+    MDBXC_TEST_ASSERT(decoded_cancelled.error_retryable);
+    MDBXC_TEST_ASSERT(std::string(selective_replication_error_code_name(
+                          decoded_cancelled.error_code)) == "cancelled");
 }
 
 void test_push_round_trip(ProtocolFixture& fixture) {
@@ -477,6 +493,79 @@ void test_envelope_and_bounds_rejections(ProtocolFixture& fixture) {
     expect_throw("selective message bound ignored", [request, &message_bounds] {
         (void)SelectiveReplicationProtocolCodec::encode_pull_request(
             request, &message_bounds);
+    });
+
+    CodecBounds request_batch_count_bounds;
+    request_batch_count_bounds.max_batches_per_message = 1u;
+    expect_throw("selective pull max_batches bound ignored",
+                 [request, &request_batch_count_bounds] {
+        ScopedPullRequest bad = request;
+        bad.max_batches = 2u;
+        (void)SelectiveReplicationProtocolCodec::encode_pull_request(
+            bad, &request_batch_count_bounds);
+    });
+
+    CodecBounds request_page_bytes_bounds;
+    request_page_bytes_bounds.max_transport_message_bytes = 1024u;
+    expect_throw("selective pull max_bytes bound ignored",
+                 [request, &request_page_bytes_bounds] {
+        ScopedPullRequest bad = request;
+        bad.max_bytes = 1025u;
+        (void)SelectiveReplicationProtocolCodec::encode_pull_request(
+            bad, &request_page_bytes_bounds);
+    });
+
+    CodecBounds request_single_batch_bounds;
+    request_single_batch_bounds.max_batch_total_bytes = 512u;
+    expect_throw("selective pull single batch bound ignored",
+                 [request, &request_single_batch_bounds] {
+        ScopedPullRequest bad = request;
+        bad.max_single_batch_bytes = 513u;
+        (void)SelectiveReplicationProtocolCodec::encode_pull_request(
+            bad, &request_single_batch_bounds);
+    });
+
+    ScopedPullRequest wire_oversized = request;
+    CodecBounds wider_wire_bounds;
+    wire_oversized.max_batches =
+        static_cast<std::uint64_t>(wider_wire_bounds.max_batches_per_message) +
+        1u;
+    ++wider_wire_bounds.max_batches_per_message;
+    const std::vector<std::uint8_t> oversized_count_wire =
+        SelectiveReplicationProtocolCodec::encode_pull_request(
+            wire_oversized, &wider_wire_bounds);
+    expect_throw("oversized selective pull count decoded",
+                 [oversized_count_wire] {
+        (void)SelectiveReplicationProtocolCodec::decode_pull_request(
+            oversized_count_wire);
+    });
+
+    wire_oversized = request;
+    wire_oversized.max_bytes =
+        static_cast<std::uint64_t>(
+            wider_wire_bounds.max_transport_message_bytes) + 1u;
+    ++wider_wire_bounds.max_transport_message_bytes;
+    const std::vector<std::uint8_t> oversized_page_wire =
+        SelectiveReplicationProtocolCodec::encode_pull_request(
+            wire_oversized, &wider_wire_bounds);
+    expect_throw("oversized selective pull page decoded",
+                 [oversized_page_wire] {
+        (void)SelectiveReplicationProtocolCodec::decode_pull_request(
+            oversized_page_wire);
+    });
+
+    wire_oversized = request;
+    wire_oversized.max_single_batch_bytes =
+        static_cast<std::uint64_t>(
+            wider_wire_bounds.max_batch_total_bytes) + 1u;
+    ++wider_wire_bounds.max_batch_total_bytes;
+    const std::vector<std::uint8_t> oversized_batch_wire =
+        SelectiveReplicationProtocolCodec::encode_pull_request(
+            wire_oversized, &wider_wire_bounds);
+    expect_throw("oversized selective single batch decoded",
+                 [oversized_batch_wire] {
+        (void)SelectiveReplicationProtocolCodec::decode_pull_request(
+            oversized_batch_wire);
     });
 
     CodecBounds manifest_bounds;

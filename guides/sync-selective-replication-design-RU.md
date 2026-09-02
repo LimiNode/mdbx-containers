@@ -176,6 +176,11 @@ descriptor-а, они несут полный `SelectiveReplicationDescriptor`. 
 ошибок и сообщения целиком, отклоняет неизвестные обязательные flags/types и
 не сериализует cancellation token. Snapshot messages намеренно отсутствуют в
 codec версии 1 и относятся к последующей фазе baseline.
+Заданные в pull request пределы числа batch, байтов страницы и размера одного
+batch не могут превышать активные codec bounds. Каждый неуспешный response
+содержит структурированный error code, отличный от `None`; кооперативная
+отмена использует `Cancelled` и не переносит descriptor, tail, batches или
+pagination state, предназначенные только для успешного ответа.
 Неизвестные capability-биты hello сохраняются как необязательные объявления,
 но не включают ни одну известную возможность: `ScopedPull` и `ScopedPush`
 разрешаются только пересечением известных битов обоих peer-ов.

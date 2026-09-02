@@ -174,6 +174,10 @@ The decoder bounds scope ids, manifests, DBI names, batches, nested raw batch
 payloads, errors, and whole messages, rejects unknown mandatory flags/types,
 and does not serialize cancellation tokens. Snapshot messages are deliberately
 absent from codec version 1 and belong to the later baseline phase.
+The pull request's batch count, page-byte budget, and single-batch budget may
+not exceed the active codec bounds. Every failed response carries a non-`None`
+structured error code; cooperative cancellation uses `Cancelled` and carries
+no success-only descriptor, tail, batch, or pagination state.
 Unknown hello capability bits are preserved as optional advertisements but do
 not negotiate either known feature; only the intersection of known bits grants
 `ScopedPull` or `ScopedPush`.

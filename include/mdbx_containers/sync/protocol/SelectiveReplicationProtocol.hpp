@@ -81,7 +81,8 @@ namespace sync {
         OutOfScopeOperation             = 6u,
         ReceiverModeConflict            = 7u,
         ScopedSnapshotRequired          = 8u,
-        BatchTooLarge                   = 9u
+        BatchTooLarge                   = 9u,
+        Cancelled                       = 10u
     };
 
     /// \brief Returns a stable diagnostic name for a selective error code.
@@ -108,6 +109,8 @@ namespace sync {
                 return "scoped_snapshot_required";
             case SelectiveReplicationErrorCode::BatchTooLarge:
                 return "batch_too_large";
+            case SelectiveReplicationErrorCode::Cancelled:
+                return "cancelled";
         }
         return "unknown";
     }
@@ -596,6 +599,19 @@ namespace sync {
                 throw std::invalid_argument(
                     "scoped pull request bounds must not be zero");
             }
+            if (request.max_batches > bounds.max_batches_per_message) {
+                throw std::length_error(
+                    "scoped pull max_batches exceeds codec bounds");
+            }
+            if (request.max_bytes > bounds.max_transport_message_bytes) {
+                throw std::length_error(
+                    "scoped pull max_bytes exceeds codec bounds");
+            }
+            if (request.max_single_batch_bytes >
+                bounds.max_batch_total_bytes) {
+                throw std::length_error(
+                    "scoped pull max_single_batch_bytes exceeds codec bounds");
+            }
         }
 
         static void validate_response_status(
@@ -841,6 +857,7 @@ namespace sync {
                 case SelectiveReplicationErrorCode::ReceiverModeConflict:
                 case SelectiveReplicationErrorCode::ScopedSnapshotRequired:
                 case SelectiveReplicationErrorCode::BatchTooLarge:
+                case SelectiveReplicationErrorCode::Cancelled:
                     return;
             }
             throw std::runtime_error(

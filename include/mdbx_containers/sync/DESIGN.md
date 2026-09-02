@@ -80,7 +80,10 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   pull/push DTOs, immutable descriptors, and `ScopedChangeBatch`. Decode is
   bounded and fail-closed for malformed descriptors, wrong writers,
   non-contiguous message pages, out-of-manifest DBIs/flags, unknown mandatory
-  values, and trailing/truncated bytes. Cancellation tokens remain local.
+  values, and trailing/truncated bytes. Pull paging knobs cannot exceed the
+  active codec bounds. Cancellation tokens remain local, while a failed wire
+  response classifies cooperative cancellation as `Cancelled` and carries no
+  success-only pull state.
   Engine apply, transport/worker orchestration, snapshots/resume, and retention
   are not implemented yet.
 - `SyncEngine` pull / push / apply protocol logic, `DirectSyncPeer`
