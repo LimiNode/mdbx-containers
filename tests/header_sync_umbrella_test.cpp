@@ -150,6 +150,17 @@ int main() {
         std::string(mdbxc::sync::sync_response_error_code_name(
             mdbxc::sync::SyncResponseErrorCode::BatchTooLarge)) ==
         "batch_too_large");
+    mdbxc::sync::SelectiveReplicationHello selective_hello;
+    selective_hello.node_id = node;
+    selective_hello.db_id = node;
+    selective_hello.capabilities.flags =
+        mdbxc::sync::selective_replication_supported_capability_flags();
+    MDBXC_TEST_ASSERT(selective_hello.capabilities.supports(
+        mdbxc::sync::SelectiveReplicationCapability::ScopedPull));
+    MDBXC_TEST_ASSERT(
+        std::string(mdbxc::sync::selective_replication_error_code_name(
+            mdbxc::sync::SelectiveReplicationErrorCode::ReceiverModeConflict)) ==
+        "receiver_mode_conflict");
     mdbxc::sync::SyncCaptureScope* capture_scope = nullptr;
     mdbxc::sync::SyncWorkerGuard* worker_guard = nullptr;
     mdbxc::sync::SyncNodeSession* node_session = nullptr;

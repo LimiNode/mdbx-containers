@@ -11,6 +11,7 @@
 #include "common.hpp"
 #include "core/cancellation.hpp"
 #include "core/ConflictPolicy.hpp"
+#include "core/SelectiveReplication.hpp"
 #include "core/SyncApplyObserver.hpp"
 #endif
 

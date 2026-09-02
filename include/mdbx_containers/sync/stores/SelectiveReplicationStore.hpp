@@ -16,57 +16,7 @@
 #include <mdbx_containers/detail/utils.hpp>
 
 namespace mdbxc {
-template<class KeyT, class ValueT, class Options> class KeyValueTable;
-template<class KeyT, class Options> class KeyTable;
-template<class ValueT> class ValueTable;
-template<class ValueT> class SequenceTable;
-
 namespace sync {
-
-    /// \brief One immutable DBI member of a selective replication scope.
-    class SelectiveReplicationDbi {
-    public:
-        /// \brief Creates a scope member from a raw-capture-supported table.
-        template<class KeyT, class ValueT, class Options>
-        static SelectiveReplicationDbi from(
-            const ::mdbxc::KeyValueTable<KeyT, ValueT, Options>& table);
-
-        /// \brief Creates a scope member from a raw-capture-supported table.
-        template<class KeyT, class Options>
-        static SelectiveReplicationDbi from(
-            const ::mdbxc::KeyTable<KeyT, Options>& table);
-
-        /// \brief Creates a scope member from a raw-capture-supported table.
-        template<class ValueT>
-        static SelectiveReplicationDbi from(
-            const ::mdbxc::ValueTable<ValueT>& table);
-
-        /// \brief Creates a scope member from a raw-capture-supported table.
-        template<class ValueT>
-        static SelectiveReplicationDbi from(
-            const ::mdbxc::SequenceTable<ValueT>& table);
-
-        const std::string& dbi_name() const { return m_dbi_name; }
-        std::uint32_t dbi_flags() const { return m_dbi_flags; }
-
-    private:
-        SelectiveReplicationDbi() : m_dbi_flags(0u) {}
-        SelectiveReplicationDbi(const std::string& dbi_name,
-                                std::uint32_t dbi_flags)
-            : m_dbi_name(dbi_name), m_dbi_flags(dbi_flags) {}
-
-        std::string m_dbi_name;
-        std::uint32_t m_dbi_flags;
-
-        friend class SelectiveReplicationStore;
-    };
-
-    /// \brief Durable identity and write authority for one selective scope.
-    struct SelectiveReplicationDescriptor {
-        std::string scope_id;
-        NodeId designated_writer_origin{};
-        std::vector<SelectiveReplicationDbi> manifest;
-    };
 
     /// \brief Resolved owner of one DBI registered in a selective scope.
     struct SelectiveReplicationDbiBinding {
@@ -308,6 +258,11 @@ namespace sync {
                 throw std::invalid_argument(
                     "selective replication scope_id must not be empty");
             }
+            if (descriptor.scope_id.size() >
+                selective_replication_max_scope_id_len) {
+                throw std::length_error(
+                    "selective replication scope_id exceeds the v1 wire limit");
+            }
             if (is_zero_sync_id(descriptor.designated_writer_origin)) {
                 throw std::invalid_argument(
                     "selective replication designated writer must not be zero");
@@ -316,12 +271,22 @@ namespace sync {
                 throw std::invalid_argument(
                     "selective replication manifest must not be empty");
             }
+            if (descriptor.manifest.size() >
+                selective_replication_max_manifest_entries) {
+                throw std::length_error(
+                    "selective replication manifest exceeds the v1 wire limit");
+            }
             for (std::size_t i = 0; i < descriptor.manifest.size(); ++i) {
                 const std::string& dbi_name = descriptor.manifest[i].dbi_name();
                 if (dbi_name.empty() ||
                     ::mdbxc::is_reserved_dbi_name(dbi_name)) {
                     throw std::invalid_argument(
                         "selective replication manifest contains invalid DBI name");
+                }
+                if (dbi_name.size() >
+                    selective_replication_max_dbi_name_len) {
+                    throw std::length_error(
+                        "selective replication DBI name exceeds the v1 wire limit");
                 }
                 if (i != 0u &&
                     descriptor.manifest[i - 1u].dbi_name() >= dbi_name) {
@@ -696,30 +661,6 @@ namespace sync {
         MDBX_dbi m_dbi;
         bool m_open;
     };
-
-    template<class KeyT, class ValueT, class Options>
-    inline SelectiveReplicationDbi SelectiveReplicationDbi::from(
-            const ::mdbxc::KeyValueTable<KeyT, ValueT, Options>& table) {
-        return SelectiveReplicationDbi(table.dbi_name(), table.dbi_flags());
-    }
-
-    template<class KeyT, class Options>
-    inline SelectiveReplicationDbi SelectiveReplicationDbi::from(
-            const ::mdbxc::KeyTable<KeyT, Options>& table) {
-        return SelectiveReplicationDbi(table.dbi_name(), table.dbi_flags());
-    }
-
-    template<class ValueT>
-    inline SelectiveReplicationDbi SelectiveReplicationDbi::from(
-            const ::mdbxc::ValueTable<ValueT>& table) {
-        return SelectiveReplicationDbi(table.dbi_name(), table.dbi_flags());
-    }
-
-    template<class ValueT>
-    inline SelectiveReplicationDbi SelectiveReplicationDbi::from(
-            const ::mdbxc::SequenceTable<ValueT>& table) {
-        return SelectiveReplicationDbi(table.dbi_name(), table.dbi_flags());
-    }
 
 } // namespace sync
 } // namespace mdbxc

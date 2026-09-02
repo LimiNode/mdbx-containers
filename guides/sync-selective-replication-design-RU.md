@@ -1,11 +1,12 @@
 # Проектирование выборочной репликации
 
 Этот документ задаёт контракт для репликации выбранного набора raw user DBI.
-Базовая часть capture уже реализована: неизменяемые descriptor-ы, локальные
-ограничения для назначенного origin с правом записи, scope-local
-changelog/progress и атомарная публикация global и scoped batch. Scoped wire
-protocol, применение у получателя, snapshot/resume и retention ещё не
-реализованы. Нынешние observers с фильтрами по таблицам ограничивают только
+Базовая часть capture и ограниченный wire-контракт уже реализованы:
+неизменяемые descriptor-ы, локальные ограничения для назначенного origin с
+правом записи, scope-local changelog/progress, атомарная публикация global и
+scoped batch и capability-gated семейство scoped DTO/codec. Применение у
+получателя, orchestration для transport/worker, snapshot/resume и retention
+ещё не реализованы. Нынешние observers с фильтрами по таблицам ограничивают только
 локальную доставку callback; они не фильтруют capture, transport, apply,
 snapshots или retention.
 
@@ -165,11 +166,32 @@ ScopedSnapshotRequest = ScopeId + пустой scoped cursor
 ScopedSnapshotChunk   = неизменяемый descriptor + scoped source tail + page data
 ```
 
-Конкретная версия codec, имена capability и публичные C++ types определяются
-только в implementation PR. Peer без scoped capability отклоняет request и не
-переходит молча к полному raw pull/push. Scoped request направляется
-назначенному descriptor-ом origin с правом записи; другой peer отклоняет его,
-а не передаёт scoped history дальше.
+Реализованный wire-контракт — это `SelectiveReplicationProtocolCodec` версии
+1 с отдельным magic `MDBXCSRP`. `SelectiveReplicationHello` объявляет
+независимые capability-биты `ScopedPull` и `ScopedPush`. Публичные DTO —
+`ScopedPullRequest`, `ScopedPullResponse`, `ScopedPushRequest`,
+`ScopedPushResponse` и `ScopedChangeBatch`; там, где требуется проверка
+descriptor-а, они несут полный `SelectiveReplicationDescriptor`. Decoder
+ограничивает размеры ScopeId, manifest, имён DBI, batches, вложенных raw batch,
+ошибок и сообщения целиком, отклоняет неизвестные обязательные flags/types и
+не сериализует cancellation token. Snapshot messages намеренно отсутствуют в
+codec версии 1 и относятся к последующей фазе baseline.
+Неизвестные capability-биты hello сохраняются как необязательные объявления,
+но не включают ни одну известную возможность: `ScopedPull` и `ScopedPush`
+разрешаются только пересечением известных битов обоих peer-ов.
+Global raw codec не меняется. Любое несовместимое изменение scoped envelope
+или расположения полей требует новой версии selective codec; добавление
+capability не переопределяет смысл сообщений версии 1.
+Регистрация descriptor-а обеспечивает канонические ограничения v1: 256 байт
+для ScopeId, 10 000 записей manifest и 256 байт для имени DBI. Поэтому
+невозможно создать постоянное capture-состояние для descriptor-а, который не
+помещается в wire codec с ограничениями по умолчанию.
+
+Peer без требуемой scoped capability отклоняет request и не переходит молча к
+полному raw pull/push. Scoped request направляется назначенному descriptor-ом
+origin с правом записи; другой peer отклоняет его, а не передаёт scoped history
+дальше. Capability negotiation и строгая проверка сообщений реализованы;
+engine apply и transport routing остаются следующей фазой.
 
 Каждая операция `ScopedChangeBatch` называет DBI из manifest descriptor-а, а
 его origin обязан совпадать с назначенным в descriptor-е origin с правом
@@ -284,9 +306,12 @@ reset-and-bootstrap.
 2. **Реализованная базовая часть.** Scope-local capture/changelog/progress
    атомарно публикуют полный global batch и его единственную scoped projection.
    Транзакция, затрагивающая две области, отклоняется до commit.
-3. Capability-gated scoped pull/push и tests для contiguous delivery,
-   duplicates, gaps, origin, не совпадающего с назначенным, foreign scope,
-   descriptor mismatch и restart.
+3. **Wire-фаза реализована; engine-фаза ожидает реализации.** Отдельные
+   capability-gated scoped pull/push DTO и строгий codec версии 1 отклоняют
+   повреждённые descriptor-ы, gaps внутри сообщения, неверный writer, foreign
+   scope и операции вне manifest. Engine delivery/apply, постоянный receiver
+   mode, обработка duplicate/gap между сообщениями и restart tests ещё не
+   реализованы.
 4. Scoped snapshot sessions, staging и optional persisted resume с atomic final
    replacement и bootstrap scoped cursor.
 5. Retention/pruning и tests контролируемого membership cutover.

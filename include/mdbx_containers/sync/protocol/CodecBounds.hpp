@@ -28,6 +28,10 @@ namespace sync {
         std::uint32_t max_logical_schema_id_len = 16u * 1024u;        ///< Max logical frame schema id bytes.
         std::uint32_t max_logical_delivery_frame_id_len =
             16u * 1024u; ///< Max logical delivery frame id bytes.
+        std::uint32_t max_selective_scope_id_len =
+            selective_replication_max_scope_id_len; ///< Max selective-replication scope identity bytes.
+        std::uint32_t max_selective_manifest_entries =
+            selective_replication_max_manifest_entries; ///< Max DBIs in one selective-replication manifest.
         std::uint32_t max_transport_message_bytes =
             128u * 1024u * 1024u; ///< Max encoded transport message bytes.
         std::uint32_t max_snapshot_id_len = 256u; ///< Max snapshot identity bytes.

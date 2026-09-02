@@ -74,8 +74,15 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   `ThreadLocalChangeAccumulator` keeps the global `ChangeBatch` complete and,
   for one scoped transaction, atomically writes its scope-local projection and
   sequence. A non-designated local write, raw external writable transaction,
-  or public capture suppression fails closed before commit. Scoped wire
-  delivery, snapshots/resume, and retention are not implemented yet.
+  or public capture suppression fails closed before commit.
+- Selective-replication wire foundation: `SelectiveReplicationProtocolCodec`
+  version 1 uses a separate `MDBXCSRP` envelope for capability hello, scoped
+  pull/push DTOs, immutable descriptors, and `ScopedChangeBatch`. Decode is
+  bounded and fail-closed for malformed descriptors, wrong writers,
+  non-contiguous message pages, out-of-manifest DBIs/flags, unknown mandatory
+  values, and trailing/truncated bytes. Cancellation tokens remain local.
+  Engine apply, transport/worker orchestration, snapshots/resume, and retention
+  are not implemented yet.
 - `SyncEngine` pull / push / apply protocol logic, `DirectSyncPeer`
   in-process transport, detailed apply conflict diagnostics, multi-origin
   pagination, origin-index fallback for legacy changelogs, and
