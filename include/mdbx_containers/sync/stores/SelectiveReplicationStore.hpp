@@ -507,6 +507,19 @@ namespace sync {
             m_open = true;
         }
 
+        /// \brief Opens retained scoped history without creating its DBI.
+        bool open_existing(MDBX_txn* txn) {
+            txn = checked_txn(txn, "ScopedChangeLogStore::open_existing");
+            if (m_open) return true;
+            const int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
+                                         static_cast<MDBX_db_flags_t>(0),
+                                         &m_dbi);
+            if (rc == MDBX_NOTFOUND) return false;
+            check_mdbx(rc, "Failed to open existing scoped changelog DBI");
+            m_open = true;
+            return true;
+        }
+
         void reset_open() { m_open = false; }
         bool is_open() const { return m_open; }
 
@@ -598,6 +611,19 @@ namespace sync {
             }
             check_mdbx(rc, "Failed to open scoped progress DBI");
             m_open = true;
+        }
+
+        /// \brief Opens scoped progress without creating its optional DBI.
+        bool open_existing(MDBX_txn* txn) {
+            txn = checked_txn(txn, "ScopedProgressStore::open_existing");
+            if (m_open) return true;
+            const int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
+                                         static_cast<MDBX_db_flags_t>(0),
+                                         &m_dbi);
+            if (rc == MDBX_NOTFOUND) return false;
+            check_mdbx(rc, "Failed to open existing scoped progress DBI");
+            m_open = true;
+            return true;
         }
 
         void reset_open() { m_open = false; }

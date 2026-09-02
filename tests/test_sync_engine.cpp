@@ -75,7 +75,7 @@ std::shared_ptr<mdbxc::Connection> open_env(const std::string& path) {
     using namespace mdbxc;
     Config cfg;
     cfg.pathname = path;
-    cfg.max_dbs = 16;
+    cfg.max_dbs = 32;
     cfg.no_subdir = true;
     return Connection::create(cfg);
 }
@@ -101,6 +101,297 @@ void require_logical_snapshot_rejected(
         throw std::runtime_error(
             std::string("complete snapshot accepted ") + context);
     }
+}
+
+void test_selective_engine_delivery_and_receiver_modes() {
+    using namespace mdbxc;
+    const std::string source_path =
+        "test_selective_engine_source.mdbx";
+    const std::string selective_path =
+        "test_selective_engine_receiver.mdbx";
+    const std::string global_path =
+        "test_selective_engine_global_receiver.mdbx";
+    const std::string flags_path =
+        "test_selective_engine_flags_receiver.mdbx";
+    cleanup(source_path);
+    cleanup(selective_path);
+    cleanup(global_path);
+    cleanup(flags_path);
+
+    const sync::NodeId source_node = make_node(0x31);
+    const sync::NodeId selective_node = make_node(0x51);
+    const sync::NodeId global_node = make_node(0x71);
+    const sync::DbId db_id = make_node(0xD1);
+
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(source_conn);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<int, int> source_orders(source_conn, "orders");
+    KeyValueTable<int, int> source_catalog(source_conn, "catalog");
+    KeyValueTable<int, int> source_inventory(source_conn, "inventory");
+
+    sync::SelectiveReplicationDescriptor orders_descriptor;
+    orders_descriptor.scope_id = "orders_scope";
+    orders_descriptor.designated_writer_origin = source_node;
+    orders_descriptor.manifest.push_back(
+        sync::SelectiveReplicationDbi::from(source_orders));
+    source.register_selective_replication_scope(orders_descriptor);
+
+    sync::SelectiveReplicationDescriptor inventory_descriptor;
+    inventory_descriptor.scope_id = "inventory_scope";
+    inventory_descriptor.designated_writer_origin = source_node;
+    inventory_descriptor.manifest.push_back(
+        sync::SelectiveReplicationDbi::from(source_inventory));
+    source.register_selective_replication_scope(inventory_descriptor);
+
+    sync::ThreadLocalChangeAccumulator capture(source_conn);
+    source_conn->attach_sync_capture(&capture);
+    {
+        auto txn = source_conn->transaction(TransactionMode::WRITABLE);
+        source_orders.insert_or_assign(1, 100, txn.handle());
+        source_catalog.insert_or_assign(1, 900, txn.handle());
+        txn.commit();
+    }
+    source_orders.insert_or_assign(2, 200);
+    source_inventory.insert_or_assign(7, 700);
+    source_conn->detach_sync_capture();
+
+    sync::ScopedPullRequest first_pull;
+    first_pull.requester = selective_node;
+    first_pull.db_id = db_id;
+    first_pull.scope_id = orders_descriptor.scope_id;
+    first_pull.max_batches = 1u;
+    const sync::ScopedPullResponse first_page =
+        source.handle_scoped_pull(first_pull);
+    if (!first_page.ok || first_page.batches.size() != 1u ||
+        !first_page.has_more || first_page.remote_tail != 2u ||
+        first_page.batches[0].ops.size() != 1u ||
+        first_page.batches[0].ops[0].dbi_name != "orders") {
+        throw std::runtime_error(
+            "scoped first page did not preserve projection or pagination");
+    }
+    sync::ScopedPullRequest second_pull = first_pull;
+    second_pull.have_sequence = 1u;
+    const sync::ScopedPullResponse second_page =
+        source.handle_scoped_pull(second_pull);
+    if (!second_page.ok || second_page.batches.size() != 1u ||
+        second_page.has_more ||
+        second_page.batches[0].scope_sequence != 2u) {
+        throw std::runtime_error("scoped second page is not contiguous");
+    }
+
+    sync::ScopedPullRequest inventory_pull = first_pull;
+    inventory_pull.scope_id = inventory_descriptor.scope_id;
+    inventory_pull.max_batches = 8u;
+    const sync::ScopedPullResponse inventory_page =
+        source.handle_scoped_pull(inventory_pull);
+    if (!inventory_page.ok || inventory_page.batches.size() != 1u ||
+        inventory_page.batches[0].ops[0].dbi_name != "inventory") {
+        throw std::runtime_error("disjoint scope pull failed");
+    }
+
+    sync::PushRequest global_history = source.make_push_request(1u, 0u);
+    {
+        std::shared_ptr<Connection> receiver_conn = open_env(selective_path);
+        sync::SyncEngine receiver(receiver_conn);
+        receiver.initialize_local_identity(selective_node, db_id);
+        KeyValueTable<int, int> receiver_orders(receiver_conn, "orders");
+        KeyValueTable<int, int> receiver_catalog(receiver_conn, "catalog");
+        KeyValueTable<int, int> receiver_inventory(receiver_conn, "inventory");
+
+        sync::ScopedPushRequest apply_first;
+        apply_first.sender = source_node;
+        apply_first.db_id = db_id;
+        apply_first.descriptor = first_page.descriptor;
+        apply_first.batches = first_page.batches;
+        const sync::ScopedPushResponse first_applied =
+            receiver.handle_scoped_push(apply_first);
+        if (!first_applied.ok || first_applied.receiver_sequence != 1u ||
+            kv_or_throw(receiver_conn, receiver_orders, 1,
+                        "selective orders[1]") != 100 ||
+            kv_has(receiver_conn, receiver_catalog, 1) ||
+            !receiver.applied_cursor().last_seq_by_origin.empty()) {
+            throw std::runtime_error(
+                "scoped apply changed wrong state or global cursor");
+        }
+
+        sync::ScopedPushRequest apply_second = apply_first;
+        apply_second.batches = second_page.batches;
+        const sync::ScopedPushResponse second_applied =
+            receiver.handle_scoped_push(apply_second);
+        if (!second_applied.ok || second_applied.receiver_sequence != 2u ||
+            kv_or_throw(receiver_conn, receiver_orders, 2,
+                        "selective orders[2]") != 200) {
+            throw std::runtime_error("scoped second apply failed");
+        }
+        const sync::ScopedPushResponse duplicate =
+            receiver.handle_scoped_push(apply_second);
+        if (!duplicate.ok || duplicate.receiver_sequence != 2u) {
+            throw std::runtime_error("exact scoped duplicate was not idempotent");
+        }
+
+        sync::ScopedPushRequest corrupt_duplicate = apply_second;
+        corrupt_duplicate.batches[0].ops[0].value.push_back(0xEEu);
+        const sync::ScopedPushResponse corrupt =
+            receiver.handle_scoped_push(corrupt_duplicate);
+        if (corrupt.ok || corrupt.error_code !=
+                sync::SelectiveReplicationErrorCode::ScopedSequenceGap ||
+            receiver.scoped_applied_sequence("orders_scope") != 2u) {
+            throw std::runtime_error(
+                "conflicting scoped duplicate was not rejected durably");
+        }
+
+        sync::ScopedPushRequest gap = apply_second;
+        gap.batches[0].scope_sequence = 4u;
+        const sync::ScopedPushResponse gap_result =
+            receiver.handle_scoped_push(gap);
+        if (gap_result.ok || gap_result.error_code !=
+                sync::SelectiveReplicationErrorCode::ScopedSequenceGap ||
+            receiver.scoped_applied_sequence("orders_scope") != 2u) {
+            throw std::runtime_error("scoped gap advanced durable progress");
+        }
+
+        sync::ScopedPushRequest out_of_scope = apply_second;
+        out_of_scope.batches[0].ops[0].dbi_name = "catalog";
+        const sync::ScopedPushResponse foreign_operation =
+            receiver.handle_scoped_push(out_of_scope);
+        if (foreign_operation.ok || foreign_operation.error_code !=
+                sync::SelectiveReplicationErrorCode::OutOfScopeOperation) {
+            throw std::runtime_error("out-of-scope operation was accepted");
+        }
+
+        sync::ScopedPushRequest wrong_writer = apply_second;
+        wrong_writer.sender = make_node(0x91);
+        const sync::ScopedPushResponse wrong_writer_result =
+            receiver.handle_scoped_push(wrong_writer);
+        if (wrong_writer_result.ok || wrong_writer_result.error_code !=
+                sync::SelectiveReplicationErrorCode::WrongDesignatedWriter) {
+            throw std::runtime_error("foreign scoped sender was accepted");
+        }
+
+        sync::ScopedPushRequest changed_descriptor = apply_second;
+        changed_descriptor.descriptor.designated_writer_origin =
+            make_node(0xA1);
+        changed_descriptor.sender =
+            changed_descriptor.descriptor.designated_writer_origin;
+        changed_descriptor.batches[0].designated_writer_origin =
+            changed_descriptor.descriptor.designated_writer_origin;
+        const sync::ScopedPushResponse descriptor_mismatch =
+            receiver.handle_scoped_push(changed_descriptor);
+        if (descriptor_mismatch.ok || descriptor_mismatch.error_code !=
+                sync::SelectiveReplicationErrorCode::ScopeDescriptorMismatch ||
+            receiver.scoped_applied_sequence("orders_scope") != 2u) {
+            throw std::runtime_error(
+                "immutable scoped descriptor mismatch was accepted");
+        }
+
+        sync::ScopedPushRequest apply_inventory;
+        apply_inventory.sender = source_node;
+        apply_inventory.db_id = db_id;
+        apply_inventory.descriptor = inventory_page.descriptor;
+        apply_inventory.batches = inventory_page.batches;
+        const sync::ScopedPushResponse inventory_applied =
+            receiver.handle_scoped_push(apply_inventory);
+        if (!inventory_applied.ok ||
+            kv_or_throw(receiver_conn, receiver_inventory, 7,
+                        "selective inventory[7]") != 700) {
+            throw std::runtime_error(
+                "second disjoint selective scope did not converge");
+        }
+
+        const sync::PushResponse mixed_global =
+            receiver.handle_push(global_history);
+        if (mixed_global.ok ||
+            kv_has(receiver_conn, receiver_catalog, 1) ||
+            !receiver.applied_cursor().last_seq_by_origin.empty()) {
+            throw std::runtime_error(
+                "selective receiver accepted the full-global stream");
+        }
+
+        sync::ScopedPullRequest relay_request = first_pull;
+        relay_request.requester = global_node;
+        const sync::ScopedPullResponse relay =
+            receiver.handle_scoped_pull(relay_request);
+        if (relay.ok || relay.error_code !=
+                sync::SelectiveReplicationErrorCode::WrongDesignatedWriter) {
+            throw std::runtime_error(
+                "selective receiver became a scoped relay");
+        }
+        receiver_conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<Connection> reopened_conn = open_env(selective_path);
+        sync::SyncEngine reopened(reopened_conn);
+        if (reopened.scoped_applied_sequence("orders_scope") != 2u ||
+            reopened.scoped_applied_sequence("inventory_scope") != 1u ||
+            reopened.handle_push(global_history).ok) {
+            throw std::runtime_error(
+                "selective receiver mode or progress did not survive restart");
+        }
+        reopened_conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<Connection> receiver_conn = open_env(global_path);
+        sync::SyncEngine receiver(receiver_conn);
+        receiver.initialize_local_identity(global_node, db_id);
+        const sync::PushResponse global_applied =
+            receiver.handle_push(global_history);
+        if (!global_applied.ok) {
+            throw std::runtime_error("full-global setup apply failed");
+        }
+        sync::ScopedPushRequest scoped_after_global;
+        scoped_after_global.sender = source_node;
+        scoped_after_global.db_id = db_id;
+        scoped_after_global.descriptor = first_page.descriptor;
+        scoped_after_global.batches = first_page.batches;
+        const sync::ScopedPushResponse rejected =
+            receiver.handle_scoped_push(scoped_after_global);
+        if (rejected.ok || rejected.error_code !=
+                sync::SelectiveReplicationErrorCode::ReceiverModeConflict ||
+            receiver.scoped_applied_sequence("orders_scope") != 0u) {
+            throw std::runtime_error(
+                "full-global receiver accepted a selective stream");
+        }
+        receiver_conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<Connection> receiver_conn = open_env(flags_path);
+        sync::SyncEngine receiver(receiver_conn);
+        receiver.initialize_local_identity(make_node(0x81), db_id);
+        {
+            auto txn = receiver_conn->transaction(TransactionMode::WRITABLE);
+            MDBX_dbi incompatible = 0;
+            check_mdbx(mdbx_dbi_open(
+                txn.handle(), "orders",
+                static_cast<MDBX_db_flags_t>(MDBX_CREATE | MDBX_DUPSORT),
+                &incompatible),
+                "create incompatible selective destination DBI");
+            txn.commit();
+        }
+        sync::ScopedPushRequest apply;
+        apply.sender = source_node;
+        apply.db_id = db_id;
+        apply.descriptor = first_page.descriptor;
+        apply.batches = first_page.batches;
+        const sync::ScopedPushResponse rejected =
+            receiver.handle_scoped_push(apply);
+        if (rejected.ok || rejected.error_code !=
+                sync::SelectiveReplicationErrorCode::ScopeDescriptorMismatch ||
+            receiver.scoped_applied_sequence("orders_scope") != 0u) {
+            throw std::runtime_error(
+                "selective destination DBI flags mismatch was accepted");
+        }
+        receiver_conn->disconnect();
+    }
+
+    source_conn->disconnect();
+    cleanup(source_path);
+    cleanup(selective_path);
+    cleanup(global_path);
+    cleanup(flags_path);
 }
 
 mdbxc::sync::PullResponse request_complete_snapshot(
@@ -5161,6 +5452,8 @@ int main() {
     struct Case { const char* name; void (*fn)(); };
     const Case cases[] = {
         { "test_engine_round_trip_kv",          &test_engine_round_trip_kv },
+        { "test_selective_engine_delivery_and_receiver_modes",
+          &test_selective_engine_delivery_and_receiver_modes },
         { "test_selective_scope_rejects_non_designated_writer",
           &test_selective_scope_rejects_non_designated_local_writer },
         { "test_selective_scope_rejects_corrupt_durable_guard_state",

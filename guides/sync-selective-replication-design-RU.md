@@ -1,12 +1,13 @@
 # Проектирование выборочной репликации
 
 Этот документ задаёт контракт для репликации выбранного набора raw user DBI.
-Базовая часть capture и ограниченный wire-контракт уже реализованы:
+Capture, ограниченный wire-контракт и внутрипроцессный engine path уже реализованы:
 неизменяемые descriptor-ы, локальные ограничения для назначенного origin с
 правом записи, scope-local changelog/progress, атомарная публикация global и
-scoped batch и capability-gated семейство scoped DTO/codec. Применение у
-получателя, orchestration для transport/worker, snapshot/resume и retention
-ещё не реализованы. Нынешние observers с фильтрами по таблицам ограничивают только
+scoped batch, capability-gated семейство scoped DTO/codec, применение у
+получателя, постоянный receiver mode, direct peer и foreground selective worker.
+HTTP/WebSocket routing, background scheduling, snapshot/resume и retention ещё
+не реализованы. Нынешние observers с фильтрами по таблицам ограничивают только
 локальную доставку callback; они не фильтруют capture, transport, apply,
 snapshots или retention.
 
@@ -156,6 +157,20 @@ push переносят все поддержанные raw DBI, а `CompleteUse
 снова выглядел бы корректным. Один full-global receiver и несколько
 selective receivers могут сосуществовать для одной базы источника.
 
+`ReceiverReplicationModeStore` сохраняет этот выбор в
+`_mdbxc_receiver_mode` с ключом `DbId`. Постоянный формат версии 1 хранит либо
+`full-global` без областей, либо `selective` с отсортированными уникальными
+допущенными `ScopeId`. Неизвестные версии и режимы, неканонический список
+областей и trailing bytes отклоняются; миграции между режимами на месте нет.
+Первый входящий global batch или полный raw snapshot выбирает full-global mode.
+Первый scoped batch выбирает selective mode в той же транзакции, что admission
+descriptor-а, пользовательские мутации, доказательство duplicate и scope-local
+progress. Для legacy receiver-а с `_mdbxc_applied`, но без mode record, scoped
+apply считает существующий progress уже выбранным full-global mode. Read-only
+проверки не создают optional store режима.
+Получатели raw replication должны зарезервировать для этого mode record ещё
+один named-DBI slot через `Config::max_dbs`.
+
 Предлагаемое семейство содержит следующие концептуальные записи:
 
 ```text
@@ -195,8 +210,10 @@ capability не переопределяет смысл сообщений ве�
 Peer без требуемой scoped capability отклоняет request и не переходит молча к
 полному raw pull/push. Scoped request направляется назначенному descriptor-ом
 origin с правом записи; другой peer отклоняет его, а не передаёт scoped history
-дальше. Capability negotiation и строгая проверка сообщений реализованы;
-engine apply и transport routing остаются следующей фазой.
+дальше. Capability negotiation, строгая проверка сообщений, engine pull/push/apply,
+`DirectSyncPeer` и foreground orchestration через `SelectiveSyncWorker`
+реализованы. Routing через конкретные HTTP/WebSocket transport остаётся
+последующей фазой.
 
 Каждая операция `ScopedChangeBatch` называет DBI из manifest descriptor-а, а
 его origin обязан совпадать с назначенным в descriptor-е origin с правом
@@ -213,14 +230,17 @@ Global batch всегда содержит полную транзакцию п�
 транзакция может изменить и unscoped DBI. Транзакция, изменяющая DBI двух
 selective областей, отклоняется до commit, а не разделяет scoped effects.
 Получатель проверяет descriptor, назначенный origin с правом записи и каждую
-DBI до открытия write transaction, применяет batch и атомарно продвигает
-соответствующий scoped cursor. Duplicate, gap, origin, не совпадающий с
-назначенным, и batch вне области отклоняются по тому же принципу непрерывной доставки, что и
-нынешний raw cursor.
+DBI до мутации, применяет batch и атомарно продвигает соответствующий scoped
+cursor. Точный duplicate пропускается только тогда, когда его канонический
+encoded batch совпадает с сохранённым receiver evidence. Конфликтующий
+duplicate, gap, неверный writer, descriptor mismatch и batch вне области
+отклоняются без продвижения progress. Полученную scoped history нельзя
+ретранслировать: scoped pull обслуживает только локальный designated writer.
+Scoped apply никогда не продвигает `_mdbxc_applied`.
 
-Первая реализация обязана находить membership области и назначенный origin с
-правом записи во время capture и писать scoped projection рядом с global
-capture, а не вместо него. Global changelog нельзя фильтровать постфактум.
+Capture использует постоянный lookup membership области и назначенного origin
+с правом записи и пишет scoped projection рядом с global capture, а не вместо
+него. Global changelog никогда не фильтруется постфактум.
 
 ## Scoped baseline и resume
 
@@ -311,12 +331,13 @@ reset-and-bootstrap.
 2. **Реализованная базовая часть.** Scope-local capture/changelog/progress
    атомарно публикуют полный global batch и его единственную scoped projection.
    Транзакция, затрагивающая две области, отклоняется до commit.
-3. **Wire-фаза реализована; engine-фаза ожидает реализации.** Отдельные
+3. **Wire-фаза и внутрипроцессная engine-фаза реализованы.** Отдельные
    capability-gated scoped pull/push DTO и строгий codec версии 1 отклоняют
    повреждённые descriptor-ы, gaps внутри сообщения, неверный writer, foreign
    scope и операции вне manifest. Engine delivery/apply, постоянный receiver
-   mode, обработка duplicate/gap между сообщениями и restart tests ещё не
-   реализованы.
+   mode, обработка duplicate/gap между сообщениями, непересекающиеся scopes,
+   restart, direct-peer и worker-resume regressions реализованы. Конкретные
+   сетевые transports не входят в эту фазу.
 4. Scoped snapshot sessions, staging и optional persisted resume с atomic final
    replacement и bootstrap scoped cursor.
 5. Retention/pruning и tests контролируемого membership cutover.

@@ -46,6 +46,44 @@ namespace sync {
         /// \brief Sends a push request and returns the response.
         virtual PushResponse push(const PushRequest& request) = 0;
 
+        /// \brief Returns whether this peer exposes the separate selective
+        /// replication protocol family.
+        virtual bool supports_selective_replication() const {
+            return false;
+        }
+
+        /// \brief Returns selective protocol identity and capabilities.
+        virtual SelectiveReplicationHello selective_replication_hello() {
+            throw std::logic_error(
+                "Sync peer does not support selective replication");
+        }
+
+        /// \brief Sends a scope-local pull request.
+        virtual ScopedPullResponse scoped_pull(
+                const ScopedPullRequest& request) {
+            ScopedPullResponse response;
+            response.ok = false;
+            response.error =
+                "Sync peer does not support selective replication";
+            response.error_code = SelectiveReplicationErrorCode::
+                UnsupportedSelectiveReplication;
+            (void)request;
+            return response;
+        }
+
+        /// \brief Sends a scope-local push request.
+        virtual ScopedPushResponse scoped_push(
+                const ScopedPushRequest& request) {
+            ScopedPushResponse response;
+            response.scope_id = request.descriptor.scope_id;
+            response.ok = false;
+            response.error =
+                "Sync peer does not support selective replication";
+            response.error_code = SelectiveReplicationErrorCode::
+                UnsupportedSelectiveReplication;
+            return response;
+        }
+
         /// \brief Requests cancellation of in-flight transport operations.
         /// \details Best-effort hook for blocking transports. The default
         /// implementation is a no-op, so token-only and non-interruptible

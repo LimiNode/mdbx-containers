@@ -52,7 +52,7 @@ mdbxc::sync::ChangeBatch make_raw_batch(const mdbxc::sync::NodeId& origin,
 std::shared_ptr<mdbxc::Connection> open_env(const std::string& path) {
     mdbxc::Config config;
     config.pathname = path;
-    config.max_dbs = 16;
+    config.max_dbs = 32;
     config.no_subdir = true;
     return mdbxc::Connection::create(config);
 }
@@ -115,6 +115,83 @@ private:
     int m_pull_count;
     int m_cancel_count;
 };
+
+void test_selective_worker_drains_and_resumes_durable_cursor() {
+    using namespace mdbxc;
+    const std::string source_path =
+        "test_selective_worker_source.mdbx";
+    const std::string replica_path =
+        "test_selective_worker_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0x24);
+    const sync::NodeId replica_node = make_node(0x64);
+    const sync::DbId db_id = make_node(0xB4);
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(source_conn);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<int, int> source_orders(source_conn, "orders");
+    sync::SelectiveReplicationDescriptor descriptor;
+    descriptor.scope_id = "orders_scope";
+    descriptor.designated_writer_origin = source_node;
+    descriptor.manifest.push_back(
+        sync::SelectiveReplicationDbi::from(source_orders));
+    source.register_selective_replication_scope(descriptor);
+    sync::ThreadLocalChangeAccumulator capture(source_conn);
+    source_conn->attach_sync_capture(&capture);
+    source_orders.insert_or_assign(1, 10);
+    source_orders.insert_or_assign(2, 20);
+    source_orders.insert_or_assign(3, 30);
+    source_conn->detach_sync_capture();
+    sync::DirectSyncPeer peer(&source);
+
+    {
+        std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+        sync::SyncEngine replica(replica_conn);
+        replica.initialize_local_identity(replica_node, db_id);
+        KeyValueTable<int, int> replica_orders(replica_conn, "orders");
+        sync::SelectiveSyncWorkerOptions options;
+        options.max_batches = 1u;
+        options.drain_pages = true;
+        sync::SelectiveSyncWorker worker(
+            replica, peer, descriptor.scope_id, options);
+        const sync::SelectiveSyncWorkerRoundResult first = worker.run_once();
+        if (!first.ok || first.pages_pulled != 3u ||
+            first.batches_applied != 3u ||
+            first.receiver_sequence != 3u ||
+            kv_or_throw(replica_conn, replica_orders, 1,
+                        "selective worker orders[1]") != 10 ||
+            kv_or_throw(replica_conn, replica_orders, 3,
+                        "selective worker orders[3]") != 30 ||
+            !replica.applied_cursor().last_seq_by_origin.empty()) {
+            throw std::runtime_error(
+                "selective worker did not drain scoped pages");
+        }
+        replica_conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+        sync::SyncEngine replica(replica_conn);
+        sync::SelectiveSyncWorkerOptions options;
+        options.max_batches = 1u;
+        sync::SelectiveSyncWorker resumed(
+            replica, peer, descriptor.scope_id, options);
+        const sync::SelectiveSyncWorkerRoundResult second = resumed.run_once();
+        if (!second.ok || second.pages_pulled != 1u ||
+            second.batches_applied != 0u ||
+            second.receiver_sequence != 3u || second.has_more) {
+            throw std::runtime_error(
+                "selective worker did not resume its durable cursor");
+        }
+        replica_conn->disconnect();
+    }
+
+    source_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
 
 class NodeSessionApplyObserver : public mdbxc::sync::ISyncApplyObserver {
 public:
@@ -3463,6 +3540,8 @@ void test_worker_rejects_logical_complete_snapshot_fallback() {
 int main() {
     struct Case { const char* name; void (*fn)(); };
     const Case cases[] = {
+        { "test_selective_worker_drains_and_resumes_durable_cursor",
+          &test_selective_worker_drains_and_resumes_durable_cursor },
         { "test_worker_recovers_fresh_replica_with_full_snapshot",
           &test_worker_recovers_fresh_replica_with_full_snapshot },
         { "test_worker_resumes_persisted_full_snapshot_after_restart",

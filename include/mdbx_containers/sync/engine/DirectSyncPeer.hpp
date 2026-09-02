@@ -33,6 +33,27 @@ namespace sync {
             return m_remote->handle_push(request);
         }
 
+        bool supports_selective_replication() const override {
+            return true;
+        }
+
+        SelectiveReplicationHello selective_replication_hello() override {
+            assert(m_remote != nullptr);
+            return m_remote->selective_replication_hello();
+        }
+
+        ScopedPullResponse scoped_pull(
+                const ScopedPullRequest& request) override {
+            assert(m_remote != nullptr);
+            return m_remote->handle_scoped_pull(request);
+        }
+
+        ScopedPushResponse scoped_push(
+                const ScopedPushRequest& request) override {
+            assert(m_remote != nullptr);
+            return m_remote->handle_scoped_push(request);
+        }
+
         bool supports_logical_delivery() const override {
             return true;
         }

@@ -63,6 +63,7 @@ namespace sync {
         UnsupportedLwwOperation,  ///< LWW accepts only raw put/delete without identity remapping.
         LwwPolicyDisabled,        ///< A registered LWW DBI requires LastWriterWins policy.
         UnexpectedLwwRevision,    ///< A normal DBI received source-version metadata.
+        ReceiverModeConflict,     ///< Full-global and selective raw apply were mixed.
     };
 
     /// \brief Detailed result for callers that need conflict diagnostics.
@@ -1566,6 +1567,18 @@ namespace sync {
             if (!preflight_batch_user_dbis(txn, batch_dbis, dbi_cache, &outcome)) {
                 return outcome;
             }
+            const DbId local_db_id = meta.get_db_uuid(txn);
+            if (!is_zero_sync_id(local_db_id)) {
+                ReceiverReplicationModeStore receiver_mode(
+                    m_conn->env_handle());
+                receiver_mode.open(txn);
+                if (!receiver_mode.claim_full_global(txn, local_db_id)) {
+                    outcome.result = ApplyResult::Conflict;
+                    outcome.conflict_reason =
+                        ApplyConflictReason::ReceiverModeConflict;
+                    return outcome;
+                }
+            }
             IdentityIndexStore identity_index(m_conn->env_handle());
             if (std::find(versioned_ops.begin(), versioned_ops.end(), true) !=
                 versioned_ops.end()) {
@@ -1608,8 +1621,436 @@ namespace sync {
                     return "lww_policy_disabled";
                 case ApplyConflictReason::UnexpectedLwwRevision:
                     return "unexpected_lww_revision";
+                case ApplyConflictReason::ReceiverModeConflict:
+                    return "receiver_mode_conflict";
             }
             return "unknown";
+        }
+
+        /// \brief Advertises the separate selective-replication v1 protocol.
+        SelectiveReplicationHello selective_replication_hello() const {
+            SelectiveReplicationHello hello;
+            hello.node_id = local_node_id();
+            hello.db_id = db_uuid();
+            hello.capabilities.flags =
+                selective_replication_supported_capability_flags();
+            return hello;
+        }
+
+        /// \brief Reads one durable scope-local receiver cursor.
+        /// \details Absence of optional selective state returns zero without
+        /// creating a named DBI.
+        std::uint64_t scoped_applied_sequence(
+                const std::string& scope_id) const {
+            if (scope_id.empty()) {
+                throw std::invalid_argument("scope_id must not be empty");
+            }
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            ScopedProgressStore progress(m_conn->env_handle());
+            if (!progress.open_existing(txn.handle())) return 0u;
+            return progress.last_sequence(txn.handle(), scope_id);
+        }
+
+        /// \brief Serves one bounded contiguous page from designated-writer
+        /// scope-local history.
+        ScopedPullResponse handle_scoped_pull(
+                const ScopedPullRequest& request) {
+            ScopedPullResponse out;
+            try {
+                (void)SelectiveReplicationProtocolCodec::encode_pull_request(
+                    request);
+            } catch (const std::exception& error) {
+                out.ok = false;
+                out.error = error.what();
+                out.error_code =
+                    SelectiveReplicationErrorCode::ScopeDescriptorMismatch;
+                return out;
+            }
+            if (!db_id_matches(request.db_id)) {
+                out.ok = false;
+                out.error = "db_id mismatch";
+                out.error_code =
+                    SelectiveReplicationErrorCode::DbIdMismatch;
+                return out;
+            }
+            if (request.cancel_token.is_cancellation_requested()) {
+                out.ok = false;
+                out.error = "scoped pull cancelled";
+                out.error_retryable = true;
+                return out;
+            }
+
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            SelectiveReplicationStore scopes(m_conn->env_handle());
+            if (!scopes.open_existing(txn.handle()) ||
+                !scopes.get(txn.handle(), request.scope_id, out.descriptor)) {
+                out.ok = false;
+                out.error = "selective scope is not registered";
+                out.error_code =
+                    SelectiveReplicationErrorCode::ScopeDescriptorMismatch;
+                return out;
+            }
+            MetaStore meta(m_conn->env_handle());
+            meta.open(txn.handle());
+            if (compare_node_id(meta.get_node_id(txn.handle()),
+                                out.descriptor.designated_writer_origin) != 0) {
+                out.ok = false;
+                out.error = "scoped pull must target the designated writer";
+                out.error_code =
+                    SelectiveReplicationErrorCode::WrongDesignatedWriter;
+                return out;
+            }
+
+            ScopedProgressStore progress(m_conn->env_handle());
+            ScopedChangeLogStore history(m_conn->env_handle());
+            const bool has_progress = progress.open_existing(txn.handle());
+            const bool has_history = history.open_existing(txn.handle());
+            out.remote_tail = has_progress
+                ? progress.last_sequence(txn.handle(), request.scope_id)
+                : 0u;
+            out.remote_tail_known = true;
+            if (request.have_sequence > out.remote_tail) {
+                out.ok = false;
+                out.error = "receiver scoped cursor is ahead of source tail";
+                out.error_code =
+                    SelectiveReplicationErrorCode::ScopedSequenceGap;
+                return out;
+            }
+            if (request.have_sequence == out.remote_tail) return out;
+            if (!has_history) {
+                out.ok = false;
+                out.error = "scoped history is not retained";
+                out.error_code =
+                    SelectiveReplicationErrorCode::ScopedSnapshotRequired;
+                return out;
+            }
+
+            std::uint64_t total_bytes = 0u;
+            for (std::uint64_t sequence = request.have_sequence + 1u;
+                 sequence <= out.remote_tail; ++sequence) {
+                if (request.cancel_token.is_cancellation_requested()) {
+                    out.ok = false;
+                    out.error = "scoped pull cancelled";
+                    out.error_retryable = true;
+                    out.batches.clear();
+                    return out;
+                }
+                if (out.batches.size() >= request.max_batches) {
+                    out.has_more = true;
+                    break;
+                }
+                std::vector<std::uint8_t> bytes;
+                if (!history.get(txn.handle(), request.scope_id,
+                                 sequence, bytes)) {
+                    out.ok = false;
+                    out.error = "required scoped history was pruned";
+                    out.error_code = SelectiveReplicationErrorCode::
+                        ScopedSnapshotRequired;
+                    out.batches.clear();
+                    return out;
+                }
+                if (bytes.size() > request.max_single_batch_bytes) {
+                    out.ok = false;
+                    out.error = "scoped batch exceeds hard size limit";
+                    out.error_code =
+                        SelectiveReplicationErrorCode::BatchTooLarge;
+                    out.batches.clear();
+                    return out;
+                }
+                if (!out.batches.empty() &&
+                    (total_bytes >= request.max_bytes ||
+                     bytes.size() > request.max_bytes - total_bytes)) {
+                    out.has_more = true;
+                    break;
+                }
+                const ChangeBatch raw = ChangeBatchCodec::decode_exact(bytes);
+                ScopedChangeBatch scoped = make_scoped_change_batch(
+                    request.scope_id, raw);
+                SelectiveReplicationErrorCode validation_error =
+                    SelectiveReplicationErrorCode::None;
+                std::string validation_message;
+                if (!validate_scoped_batch_for_descriptor(
+                        scoped, out.descriptor, validation_error,
+                        validation_message)) {
+                    out.ok = false;
+                    out.error = validation_message;
+                    out.error_code = validation_error;
+                    out.batches.clear();
+                    return out;
+                }
+                out.batches.push_back(scoped);
+                total_bytes += static_cast<std::uint64_t>(bytes.size());
+                if (sequence == std::numeric_limits<std::uint64_t>::max()) {
+                    break;
+                }
+            }
+            if (!out.batches.empty() &&
+                out.batches.back().scope_sequence < out.remote_tail) {
+                out.has_more = true;
+            }
+            return out;
+        }
+
+        /// \brief Atomically applies descriptor-bound scoped history.
+        /// \details Receiver mode, descriptor admission, user mutations,
+        /// retained duplicate evidence, and scoped progress commit together.
+        /// The global `_mdbxc_applied` cursor is never changed.
+        ScopedPushResponse handle_scoped_push(
+                const ScopedPushRequest& request) {
+            ScopedPushResponse out;
+            out.scope_id = request.descriptor.scope_id;
+            if (!db_id_matches(request.db_id)) {
+                out.ok = false;
+                out.error = "db_id mismatch";
+                out.error_code =
+                    SelectiveReplicationErrorCode::DbIdMismatch;
+                return out;
+            }
+            if (compare_node_id(request.sender,
+                                request.descriptor.designated_writer_origin) != 0) {
+                out.ok = false;
+                out.error = "scoped push sender is not the designated writer";
+                out.error_code =
+                    SelectiveReplicationErrorCode::WrongDesignatedWriter;
+                out.receiver_sequence = scoped_applied_sequence(out.scope_id);
+                return out;
+            }
+            for (std::size_t i = 0u; i < request.batches.size(); ++i) {
+                SelectiveReplicationErrorCode validation_error =
+                    SelectiveReplicationErrorCode::None;
+                std::string validation_message;
+                if (!validate_scoped_batch_for_descriptor(
+                        request.batches[i], request.descriptor,
+                        validation_error, validation_message)) {
+                    out.ok = false;
+                    out.error = validation_message;
+                    out.error_code = validation_error;
+                    out.receiver_sequence = out.scope_id.empty()
+                        ? 0u : scoped_applied_sequence(out.scope_id);
+                    return out;
+                }
+            }
+            try {
+                (void)SelectiveReplicationProtocolCodec::encode_push_request(
+                    request);
+            } catch (const std::exception& error) {
+                out.ok = false;
+                out.error = error.what();
+                out.error_code =
+                    SelectiveReplicationErrorCode::ScopeDescriptorMismatch;
+                out.receiver_sequence = out.scope_id.empty()
+                    ? 0u : scoped_applied_sequence(out.scope_id);
+                return out;
+            }
+            if (request.cancel_token.is_cancellation_requested()) {
+                out.ok = false;
+                out.error = "scoped push cancelled";
+                out.error_retryable = true;
+                out.receiver_sequence = scoped_applied_sequence(out.scope_id);
+                return out;
+            }
+            Connection::SyncApplyNotification notification;
+            std::size_t applied_batches = 0u;
+            std::size_t applied_ops = 0u;
+            std::vector<std::string> affected_dbi_names;
+            {
+                const Connection::SyncApplyWriteGuard sync_apply_guard =
+                    m_conn->sync_apply_write_guard();
+                auto txn = m_conn->transaction(TransactionMode::WRITABLE);
+                MetaStore meta(m_conn->env_handle());
+                meta.open(txn.handle());
+                ReceiverReplicationModeStore mode(m_conn->env_handle());
+                mode.open(txn.handle());
+                ReceiverReplicationModeState existing_mode;
+                const bool has_mode = mode.get(
+                    txn.handle(), request.db_id, existing_mode);
+                if ((!has_mode && !read_applied_cursor(
+                         txn.handle(), SyncCursor()).last_seq_by_origin.empty()) ||
+                    !mode.claim_selective(txn.handle(), request.db_id,
+                                          out.scope_id)) {
+                    txn.rollback();
+                    out.ok = false;
+                    out.error =
+                        "receiver already uses full-global raw replication";
+                    out.error_code = SelectiveReplicationErrorCode::
+                        ReceiverModeConflict;
+                    out.receiver_sequence = scoped_applied_sequence(out.scope_id);
+                    return out;
+                }
+
+                SelectiveReplicationStore scopes(m_conn->env_handle());
+                scopes.open(txn.handle());
+                try {
+                    validate_selective_descriptor_for_apply(
+                        txn.handle(), request.descriptor);
+                    scopes.register_or_verify(txn.handle(), request.descriptor);
+                } catch (const std::exception& error) {
+                    txn.rollback();
+                    out.ok = false;
+                    out.error = error.what();
+                    out.error_code = SelectiveReplicationErrorCode::
+                        ScopeDescriptorMismatch;
+                    out.receiver_sequence = scoped_applied_sequence(out.scope_id);
+                    return out;
+                }
+
+                ScopedProgressStore progress(m_conn->env_handle());
+                ScopedChangeLogStore history(m_conn->env_handle());
+                progress.open(txn.handle());
+                history.open(txn.handle());
+                std::uint64_t last = progress.last_sequence(
+                    txn.handle(), out.scope_id);
+                for (std::size_t i = 0u; i < request.batches.size(); ++i) {
+                    if (request.cancel_token.is_cancellation_requested()) {
+                        txn.rollback();
+                        out.ok = false;
+                        out.error = "scoped push cancelled";
+                        out.error_retryable = true;
+                        out.receiver_sequence = scoped_applied_sequence(
+                            out.scope_id);
+                        return out;
+                    }
+                    const ScopedChangeBatch& scoped = request.batches[i];
+                    SelectiveReplicationErrorCode validation_error =
+                        SelectiveReplicationErrorCode::None;
+                    std::string validation_message;
+                    if (!validate_scoped_batch_for_descriptor(
+                            scoped, request.descriptor, validation_error,
+                            validation_message)) {
+                        txn.rollback();
+                        out.ok = false;
+                        out.error = validation_message;
+                        out.error_code = validation_error;
+                        out.receiver_sequence = scoped_applied_sequence(
+                            out.scope_id);
+                        return out;
+                    }
+                    const ChangeBatch raw = make_raw_change_batch(scoped);
+                    const std::vector<std::uint8_t> encoded =
+                        ChangeBatchCodec::encode(raw);
+                    if (scoped.scope_sequence <= last) {
+                        std::vector<std::uint8_t> existing;
+                        if (!history.get(txn.handle(), out.scope_id,
+                                         scoped.scope_sequence, existing) ||
+                            existing != encoded) {
+                            txn.rollback();
+                            out.ok = false;
+                            out.error =
+                                "scoped duplicate does not match durable history";
+                            out.error_code = SelectiveReplicationErrorCode::
+                                ScopedSequenceGap;
+                            out.receiver_sequence = scoped_applied_sequence(
+                                out.scope_id);
+                            return out;
+                        }
+                        continue;
+                    }
+                    if (scoped.scope_sequence != last + 1u) {
+                        txn.rollback();
+                        out.ok = false;
+                        out.error = "scoped sequence gap";
+                        out.error_code = SelectiveReplicationErrorCode::
+                            ScopedSequenceGap;
+                        out.error_retryable = true;
+                        out.receiver_sequence = scoped_applied_sequence(
+                            out.scope_id);
+                        return out;
+                    }
+                    ApplyOutcome preflight = make_apply_outcome(
+                        ApplyResult::Applied, raw, last);
+                    std::vector<BatchDbiFlags> batch_dbis;
+                    if (!collect_batch_dbi_flags(
+                            raw, batch_dbis, &preflight)) {
+                        txn.rollback();
+                        out.ok = false;
+                        out.error = apply_conflict_message(preflight);
+                        out.error_code = SelectiveReplicationErrorCode::
+                            OutOfScopeOperation;
+                        out.receiver_sequence = scoped_applied_sequence(
+                            out.scope_id);
+                        return out;
+                    }
+                    std::unordered_map<std::string, MDBX_dbi> dbi_cache;
+                    if (!preflight_batch_user_dbis(
+                            txn.handle(), batch_dbis, dbi_cache, &preflight)) {
+                        txn.rollback();
+                        out.ok = false;
+                        out.error = apply_conflict_message(preflight);
+                        out.error_code = SelectiveReplicationErrorCode::
+                            ScopeDescriptorMismatch;
+                        out.receiver_sequence = scoped_applied_sequence(
+                            out.scope_id);
+                        return out;
+                    }
+                    for (std::size_t op_index = 0u;
+                         op_index < raw.ops.size(); ++op_index) {
+                        apply_one_op(txn.handle(), raw.ops[op_index], dbi_cache);
+                        add_unique_dbi_name(
+                            affected_dbi_names, raw.ops[op_index].dbi_name);
+                    }
+                    history.append(txn.handle(), out.scope_id,
+                                   scoped.scope_sequence, encoded);
+                    progress.set_last_sequence(txn.handle(), out.scope_id,
+                                               scoped.scope_sequence);
+                    last = scoped.scope_sequence;
+                    ++applied_batches;
+                    applied_ops += raw.ops.size();
+                }
+                txn.commit();
+                out.receiver_sequence = last;
+                if (applied_batches != 0u) {
+                    notification = m_conn->mark_sync_apply_committed(
+                        applied_batches, applied_ops, affected_dbi_names);
+                }
+            }
+            m_conn->notify_sync_apply_observers(notification);
+            return out;
+        }
+
+        /// \brief Builds a descriptor-bound scoped push from local retained
+        /// history. Only the designated writer can produce this request.
+        ScopedPushRequest make_scoped_push_request(
+                const std::string& scope_id, std::uint64_t from_sequence,
+                std::uint64_t to_sequence = 0u) const {
+            ScopedPushRequest request;
+            request.db_id = db_uuid();
+            auto txn = m_conn->transaction(TransactionMode::READ_ONLY);
+            MetaStore meta(m_conn->env_handle());
+            meta.open(txn.handle());
+            request.sender = meta.get_node_id(txn.handle());
+            SelectiveReplicationStore scopes(m_conn->env_handle());
+            if (!scopes.open_existing(txn.handle()) ||
+                !scopes.get(txn.handle(), scope_id, request.descriptor)) {
+                throw std::logic_error("selective scope is not registered");
+            }
+            if (compare_node_id(request.sender,
+                                request.descriptor.designated_writer_origin) != 0) {
+                throw std::logic_error(
+                    "only the designated writer can send scoped history");
+            }
+            ScopedProgressStore progress(m_conn->env_handle());
+            ScopedChangeLogStore history(m_conn->env_handle());
+            const std::uint64_t tail = progress.open_existing(txn.handle())
+                ? progress.last_sequence(txn.handle(), scope_id) : 0u;
+            if (to_sequence == 0u || to_sequence > tail) to_sequence = tail;
+            if (from_sequence == 0u || from_sequence > to_sequence) {
+                return request;
+            }
+            if (!history.open_existing(txn.handle())) {
+                throw std::runtime_error("scoped history is not retained");
+            }
+            for (std::uint64_t sequence = from_sequence;; ++sequence) {
+                std::vector<std::uint8_t> bytes;
+                if (!history.get(txn.handle(), scope_id, sequence, bytes)) {
+                    throw std::runtime_error(
+                        "scoped history has a gap at sequence " +
+                        std::to_string(sequence));
+                }
+                request.batches.push_back(make_scoped_change_batch(
+                    scope_id, ChangeBatchCodec::decode_exact(bytes)));
+                if (sequence == to_sequence) break;
+            }
+            return request;
         }
 
         /// \brief Handles an incremental pull or explicitly configured
@@ -3263,6 +3704,18 @@ namespace sync {
                 MetaStore meta(m_conn->env_handle());
                 meta.open(txn.handle());
                 require_fresh_full_snapshot_target(txn.handle(), meta, session);
+                if (!logical_recovery &&
+                    session.replacement_scope ==
+                        FullSnapshotScope::CompleteUserDatabase) {
+                    ReceiverReplicationModeStore receiver_mode(
+                        m_conn->env_handle());
+                    receiver_mode.open(txn.handle());
+                    if (!receiver_mode.claim_full_global(
+                            txn.handle(), meta.get_db_uuid(txn.handle()))) {
+                        throw std::logic_error(
+                            "selective receiver cannot import a complete raw snapshot");
+                    }
+                }
                 if (logical_recovery) {
                     validate_logical_recovery_baseline(session,
                                                        *logical_baseline);
@@ -3325,6 +3778,109 @@ namespace sync {
             const NodeId zero{};
             if (compare_node_id(request_db_id, zero) == 0) return false;
             return compare_node_id(request_db_id, db_uuid()) == 0;
+        }
+
+        static ChangeBatch make_raw_change_batch(
+                const ScopedChangeBatch& scoped) {
+            ChangeBatch raw;
+            raw.version = scoped.version;
+            raw.batch_flags = scoped.batch_flags;
+            raw.origin_node_id = scoped.designated_writer_origin;
+            raw.seq = scoped.scope_sequence;
+            raw.time_unix_ns = scoped.time_unix_ns;
+            raw.ops = scoped.ops;
+            return raw;
+        }
+
+        static ScopedChangeBatch make_scoped_change_batch(
+                const std::string& scope_id, const ChangeBatch& raw) {
+            ScopedChangeBatch scoped;
+            scoped.version = raw.version;
+            scoped.batch_flags = raw.batch_flags;
+            scoped.scope_id = scope_id;
+            scoped.designated_writer_origin = raw.origin_node_id;
+            scoped.scope_sequence = raw.seq;
+            scoped.time_unix_ns = raw.time_unix_ns;
+            scoped.ops = raw.ops;
+            return scoped;
+        }
+
+        static const SelectiveReplicationDbi* find_scoped_manifest_dbi(
+                const SelectiveReplicationDescriptor& descriptor,
+                const std::string& dbi_name) {
+            for (std::size_t i = 0u; i < descriptor.manifest.size(); ++i) {
+                if (descriptor.manifest[i].dbi_name() == dbi_name) {
+                    return &descriptor.manifest[i];
+                }
+            }
+            return nullptr;
+        }
+
+        static bool validate_scoped_batch_for_descriptor(
+                const ScopedChangeBatch& batch,
+                const SelectiveReplicationDescriptor& descriptor,
+                SelectiveReplicationErrorCode& error_code,
+                std::string& error) {
+            if (batch.scope_id != descriptor.scope_id) {
+                error_code = SelectiveReplicationErrorCode::
+                    ScopeDescriptorMismatch;
+                error = "scoped batch scope does not match descriptor";
+                return false;
+            }
+            if (compare_node_id(batch.designated_writer_origin,
+                                descriptor.designated_writer_origin) != 0) {
+                error_code = SelectiveReplicationErrorCode::
+                    WrongDesignatedWriter;
+                error = "scoped batch origin is not the designated writer";
+                return false;
+            }
+            if (batch.version != 1u || batch.batch_flags != BATCH_NONE ||
+                batch.scope_sequence == 0u || batch.ops.empty()) {
+                error_code = SelectiveReplicationErrorCode::
+                    ScopeDescriptorMismatch;
+                error = "scoped batch header is invalid";
+                return false;
+            }
+            for (std::size_t i = 0u; i < batch.ops.size(); ++i) {
+                const SelectiveReplicationDbi* manifest_dbi =
+                    find_scoped_manifest_dbi(
+                        descriptor, batch.ops[i].dbi_name);
+                if (manifest_dbi == nullptr ||
+                    manifest_dbi->dbi_flags() != batch.ops[i].dbi_flags) {
+                    error_code = SelectiveReplicationErrorCode::
+                        OutOfScopeOperation;
+                    error =
+                        "scoped operation is outside the descriptor manifest";
+                    return false;
+                }
+            }
+            error_code = SelectiveReplicationErrorCode::None;
+            error.clear();
+            return true;
+        }
+
+        void validate_selective_descriptor_for_apply(
+                MDBX_txn* txn,
+                const SelectiveReplicationDescriptor& descriptor) const {
+            for (std::size_t i = 0u; i < descriptor.manifest.size(); ++i) {
+                const SelectiveReplicationDbi& dbi = descriptor.manifest[i];
+                if (dbi.dbi_flags() != persistent_dbi_flags(dbi.dbi_flags())) {
+                    throw std::invalid_argument(
+                        "selective descriptor has unsupported DBI flags");
+                }
+                if (m_conn->is_sync_versioned_dbi(txn, dbi.dbi_name()) ||
+                    m_conn->is_sync_logical_dbi(txn, dbi.dbi_name())) {
+                    throw std::logic_error(
+                        "selective DBI is already owned by another sync authority");
+                }
+                std::uint32_t actual_flags = 0u;
+                if (read_existing_user_dbi_flags(
+                        txn, dbi.dbi_name(), actual_flags) &&
+                    actual_flags != dbi.dbi_flags()) {
+                    throw std::logic_error(
+                        "selective descriptor DBI flags mismatch");
+                }
+            }
         }
 
         void initialize_system_stores(MDBX_txn* txn) {
