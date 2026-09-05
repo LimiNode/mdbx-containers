@@ -17,6 +17,7 @@
 #include "protocol/IdentityProvider.hpp"
 #include "protocol/SyncCursor.hpp"
 #include "protocol/FullSnapshotProtocol.hpp"
+#include "protocol/SelectiveReplicationProtocol.hpp"
 #endif
 
 #if MDBXC_SYNC_ENABLED

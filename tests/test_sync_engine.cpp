@@ -815,6 +815,20 @@ void test_selective_scope_rejects_immutable_descriptor_changes() {
             "selective descriptor accepted DBI ownership in two scopes");
     }
 
+    sync::SelectiveReplicationDescriptor oversized_scope = descriptor;
+    oversized_scope.scope_id.assign(
+        sync::selective_replication_max_scope_id_len + 1u, 'x');
+    bool oversized_rejected = false;
+    try {
+        engine.register_selective_replication_scope(oversized_scope);
+    } catch (const std::length_error&) {
+        oversized_rejected = true;
+    }
+    if (!oversized_rejected) {
+        throw std::runtime_error(
+            "selective descriptor exceeded the canonical wire scope limit");
+    }
+
     conn->disconnect();
     cleanup(path);
 }

@@ -1,10 +1,11 @@
 # Selective Replication Design
 
 This document specifies the contract for replicating a selected set of raw
-user DBIs. The capture foundation is implemented: immutable descriptors,
-designated-writer local-write guards, scope-local changelog/progress storage,
-and atomic global-plus-scoped publication. It does not yet provide a scoped
-wire protocol, receiver apply, snapshots/resume, or retention. Current
+user DBIs. The capture foundation and bounded wire contract are implemented:
+immutable descriptors, designated-writer local-write guards, scope-local
+changelog/progress storage, atomic global-plus-scoped publication, and the
+capability-gated scoped DTO/codec family. It does not yet provide receiver
+apply, transport/worker orchestration, snapshots/resume, or retention. Current
 table-filtered apply observers filter local callback delivery only; they do
 not filter capture, transport, apply, snapshots, or retention.
 
@@ -163,11 +164,35 @@ ScopedSnapshotRequest = ScopeId + empty scoped cursor
 ScopedSnapshotChunk   = immutable descriptor + scoped source tail + page data
 ```
 
-The concrete codec version, capability names, and public C++ types are deferred
-to the implementation PR. A peer without the scoped capability rejects the
-request; it must not silently fall back to complete raw pull/push. A scoped
-request must target the descriptor's designated writer origin; another peer
-rejects it rather than relaying scoped history.
+The implemented wire contract is `SelectiveReplicationProtocolCodec` version
+1 with its own `MDBXCSRP` magic. `SelectiveReplicationHello` advertises the
+independent `ScopedPull` and `ScopedPush` capability bits. The public DTOs are
+`ScopedPullRequest`, `ScopedPullResponse`, `ScopedPushRequest`,
+`ScopedPushResponse`, and `ScopedChangeBatch`; they carry one complete
+`SelectiveReplicationDescriptor` where descriptor validation is required.
+The decoder bounds scope ids, manifests, DBI names, batches, nested raw batch
+payloads, errors, and whole messages, rejects unknown mandatory flags/types,
+and does not serialize cancellation tokens. Snapshot messages are deliberately
+absent from codec version 1 and belong to the later baseline phase.
+The pull request's batch count, page-byte budget, and single-batch budget may
+not exceed the active codec bounds. Every failed response carries a non-`None`
+structured error code; cooperative cancellation uses `Cancelled` and carries
+no success-only descriptor, tail, batch, or pagination state.
+Unknown hello capability bits are preserved as optional advertisements but do
+not negotiate either known feature; only the intersection of known bits grants
+`ScopedPull` or `ScopedPush`.
+The global raw codec remains unchanged. Any incompatible scoped envelope or
+field-layout change requires a new selective codec version; adding a capability
+does not reinterpret version-1 messages.
+Descriptor registration enforces the canonical v1 limits (256-byte ScopeId,
+10,000 manifest entries, and 256-byte DBI names), so durable capture state
+cannot be created for a descriptor that the default wire codec cannot carry.
+
+A peer without the required scoped capability rejects the request; it must not
+silently fall back to complete raw pull/push. A scoped request must target the
+descriptor's designated writer origin; another peer rejects it rather than
+relaying scoped history. Capability negotiation and strict message validation
+are implemented; engine apply and transport routing remain the next phase.
 
 Every operation in `ScopedChangeBatch` names a DBI in the descriptor manifest,
 and its origin must equal the descriptor's designated writer origin. Only that
@@ -281,9 +306,11 @@ Implementation should be split into reviewable PRs:
 2. **Implemented foundation.** Scope-local capture/changelog/progress storage
    publishes an atomic complete global batch plus its single scoped projection.
    A transaction that touches two scopes rejects before commit.
-3. Add capability-gated scoped pull/push and tests for contiguous delivery,
-   duplicates, gaps, wrong writer, foreign scope, descriptor mismatch, and
-   restart.
+3. **Wire phase implemented; engine phase pending.** The separate version-1
+   capability-gated scoped pull/push DTOs and strict codec reject malformed
+   descriptors, gaps within a message, wrong writers, foreign scopes, and
+   out-of-manifest operations. Engine delivery/apply, durable receiver mode,
+   cross-message duplicate/gap handling, and restart tests remain pending.
 4. Add scoped snapshot sessions, staging, and optional persisted resume with
    atomic final replacement and scoped cursor bootstrap.
 5. Add retention/pruning and controlled membership-cutover tests.

@@ -13,6 +13,7 @@
 #if MDBXC_SYNC_ENABLED
 #include <mdbx_containers/detail/utils.hpp>
 #include "common.hpp"
+#include "core/SelectiveReplication.hpp"
 #include "logical/LogicalChange.hpp"
 #include "capture/ILogicalDbiCapture.hpp"
 #include "logical/stores/LogicalDbiBindingStore.hpp"
