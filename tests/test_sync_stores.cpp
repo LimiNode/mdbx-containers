@@ -229,6 +229,97 @@ void test_origin_index_store() {
     cleanup(p);
 }
 
+void test_receiver_replication_mode_store_is_durable_and_strict() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_receiver_replication_mode_store.mdbx";
+    cleanup(p);
+
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 8;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+    const DbId db_id = make_node(0xE1);
+
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        ReceiverReplicationModeStore absent(conn->env_handle());
+        if (absent.open_existing(txn.handle())) {
+            throw std::runtime_error(
+                "receiver mode probe created optional state");
+        }
+    }
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        ReceiverReplicationModeStore store(conn->env_handle());
+        store.open(txn.handle());
+        if (!store.claim_selective(txn.handle(), db_id, "scope_z") ||
+            !store.claim_selective(txn.handle(), db_id, "scope_a") ||
+            store.claim_full_global(txn.handle(), db_id)) {
+            throw std::runtime_error("receiver selective mode claim failed");
+        }
+        txn.commit();
+    }
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        ReceiverReplicationModeStore reopened(conn->env_handle());
+        ReceiverReplicationModeState state;
+        if (!reopened.open_existing(txn.handle()) ||
+            !reopened.get(txn.handle(), db_id, state) ||
+            state.mode != ReceiverReplicationMode::Selective ||
+            state.scope_ids.size() != 2u ||
+            state.scope_ids[0] != "scope_a" ||
+            state.scope_ids[1] != "scope_z") {
+            throw std::runtime_error(
+                "receiver mode did not restore canonical scopes");
+        }
+    }
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::WRITABLE);
+        MDBX_dbi dbi = 0;
+        mdbxc::check_mdbx(mdbx_dbi_open(
+            txn.handle(), "_mdbxc_receiver_mode",
+            static_cast<MDBX_db_flags_t>(0), &dbi),
+            "open receiver mode DBI for corruption probe");
+        MDBX_val key = {
+            const_cast<std::uint8_t*>(db_id.data()), db_id.size()
+        };
+        const std::uint8_t malformed[] = {
+            2u, 0u, 0u, 0u,
+            static_cast<std::uint8_t>(ReceiverReplicationMode::Selective),
+            0u, 0u, 0u, 0u
+        };
+        MDBX_val value = {
+            const_cast<std::uint8_t*>(malformed), sizeof(malformed)
+        };
+        mdbxc::check_mdbx(mdbx_put(
+            txn.handle(), dbi, &key, &value, MDBX_UPSERT),
+            "write malformed receiver mode record");
+        txn.commit();
+    }
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        ReceiverReplicationModeStore corrupted(conn->env_handle());
+        ReceiverReplicationModeState state;
+        if (!corrupted.open_existing(txn.handle())) {
+            throw std::runtime_error("corrupted receiver mode disappeared");
+        }
+        bool rejected = false;
+        try {
+            (void)corrupted.get(txn.handle(), db_id, state);
+        } catch (const std::runtime_error&) {
+            rejected = true;
+        }
+        if (!rejected) {
+            throw std::runtime_error(
+                "unknown receiver mode format was accepted");
+        }
+    }
+
+    conn->disconnect();
+    cleanup(p);
+}
+
 void test_changelog_store() {
     using namespace mdbxc::sync;
     const std::string p = "test_sync_stores_changelog.mdbx";
@@ -1354,6 +1445,7 @@ void test_stores_require_open() {
 int main() {
     test_meta_store();
     test_origin_index_store();
+    test_receiver_replication_mode_store_is_durable_and_strict();
     test_changelog_store();
     test_changelog_updates_origin_index();
     test_changelog_backfills_legacy_origins_on_append();

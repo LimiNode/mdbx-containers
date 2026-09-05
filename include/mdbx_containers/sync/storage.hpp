@@ -15,6 +15,7 @@
 #include "stores/OriginIndexStore.hpp"
 #include "stores/ChangeLogStore.hpp"
 #include "stores/SelectiveReplicationStore.hpp"
+#include "stores/ReceiverReplicationModeStore.hpp"
 #include "stores/FullSnapshotImportStore.hpp"
 #include "stores/IdentityIndexStore.hpp"
 #include "stores/VersionedDbiStore.hpp"

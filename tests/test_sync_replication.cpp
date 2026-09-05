@@ -87,7 +87,7 @@ mdbxc::Embedding make_embedding(float x, float y) {
 mdbxc::Config cfg(const std::string& path) {
     mdbxc::Config c;
     c.pathname = path;
-    c.max_dbs = 16;
+    c.max_dbs = 24;
     c.no_subdir = true;
     return c;
 }

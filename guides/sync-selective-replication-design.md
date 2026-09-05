@@ -1,11 +1,12 @@
 # Selective Replication Design
 
 This document specifies the contract for replicating a selected set of raw
-user DBIs. The capture foundation and bounded wire contract are implemented:
+user DBIs. The capture, bounded wire, and in-process engine paths are implemented:
 immutable descriptors, designated-writer local-write guards, scope-local
 changelog/progress storage, atomic global-plus-scoped publication, and the
-capability-gated scoped DTO/codec family. It does not yet provide receiver
-apply, transport/worker orchestration, snapshots/resume, or retention. Current
+capability-gated scoped DTO/codec family, receiver apply, durable receiver
+mode, direct peers, and a foreground selective worker. It does not yet provide
+HTTP/WebSocket routing, background scheduling, snapshots/resume, or retention. Current
 table-filtered apply observers filter local callback delivery only; they do
 not filter capture, transport, apply, snapshots, or retention.
 
@@ -154,6 +155,20 @@ those operations at a selective receiver would again make an incomplete global
 cursor appear valid. A full-global receiver and one or more selective receivers
 can coexist for the same source database.
 
+`ReceiverReplicationModeStore` persists this choice in
+`_mdbxc_receiver_mode`, keyed by `DbId`. Durable format version 1 stores either
+`full-global` with no scopes or `selective` with sorted unique admitted
+`ScopeId` values. Unknown versions, modes, non-canonical scope lists, and
+trailing bytes fail closed; there is no in-place migration between modes.
+The first incoming global batch or complete raw snapshot claims full-global
+mode. The first scoped batch claims selective mode in the same transaction as
+descriptor admission, user mutations, retained duplicate evidence, and
+scope-local progress. For a legacy receiver with `_mdbxc_applied` progress but
+no mode record, scoped apply treats that progress as an existing full-global
+claim. Read-only probes do not create the optional mode store.
+Deployments that receive raw replication must reserve one additional named-DBI
+slot for this mode record through `Config::max_dbs`.
+
 The proposed family has these conceptual records:
 
 ```text
@@ -191,8 +206,10 @@ cannot be created for a descriptor that the default wire codec cannot carry.
 A peer without the required scoped capability rejects the request; it must not
 silently fall back to complete raw pull/push. A scoped request must target the
 descriptor's designated writer origin; another peer rejects it rather than
-relaying scoped history. Capability negotiation and strict message validation
-are implemented; engine apply and transport routing remain the next phase.
+relaying scoped history. Capability negotiation, strict message validation,
+engine pull/push/apply, `DirectSyncPeer`, and `SelectiveSyncWorker` foreground
+orchestration are implemented. Concrete HTTP/WebSocket routing remains a later
+transport phase.
 
 Every operation in `ScopedChangeBatch` names a DBI in the descriptor manifest,
 and its origin must equal the descriptor's designated writer origin. Only that
@@ -209,14 +226,25 @@ source atomically adds one scoped batch containing that scope's operations; it
 may also change unscoped DBIs. A transaction that changes DBIs from two
 selective scopes fails closed before commit, rather than splitting its scoped
 effects. The receiver validates the descriptor, designated writer origin, and
-every DBI before opening its write transaction, then applies the batch and
-advances the matching scoped cursor atomically. Duplicate, gap, wrong-writer,
-and out-of-scope batches fail closed under the same contiguous-delivery
-principle as the existing raw cursor.
+every DBI before mutation, then applies the batch and advances the matching
+scoped cursor atomically. An exact duplicate is skipped only when its canonical
+encoded batch matches retained receiver evidence. A conflicting duplicate,
+gap, wrong-writer, descriptor mismatch, or out-of-scope batch fails closed
+without advancing progress. Received scoped history cannot be relayed because
+scoped pull is served only when the local node is the descriptor's designated
+writer. Scoped apply never advances `_mdbxc_applied`.
 
-The first implementation must define a capture-time scope-membership and
-designated-writer lookup and write the scoped projection beside, not instead
-of, the global capture. It must not filter the global changelog after the fact.
+Capture uses a durable scope-membership and designated-writer lookup and writes
+the scoped projection beside, not instead of, global capture. It never filters
+the global changelog after the fact.
+
+Until the scoped-baseline phase is implemented, activating a new scope at its
+designated writer requires every existing manifest DBI to be empty. Otherwise
+registration fails with a baseline-required error instead of advertising an
+empty scoped history as convergence. Re-verifying an already registered scope
+does not repeat this emptiness precondition, and a non-designated origin may
+install the descriptor over existing replica data solely to enforce its local
+write guard.
 
 ## Scoped Baseline And Resume
 
@@ -306,11 +334,13 @@ Implementation should be split into reviewable PRs:
 2. **Implemented foundation.** Scope-local capture/changelog/progress storage
    publishes an atomic complete global batch plus its single scoped projection.
    A transaction that touches two scopes rejects before commit.
-3. **Wire phase implemented; engine phase pending.** The separate version-1
+3. **Wire and in-process engine phase implemented.** The separate version-1
    capability-gated scoped pull/push DTOs and strict codec reject malformed
    descriptors, gaps within a message, wrong writers, foreign scopes, and
    out-of-manifest operations. Engine delivery/apply, durable receiver mode,
-   cross-message duplicate/gap handling, and restart tests remain pending.
+   cross-message duplicate/gap handling, disjoint scopes, restart, direct-peer,
+   and worker-resume regressions are implemented. Concrete network transports
+   remain outside this phase.
 4. Add scoped snapshot sessions, staging, and optional persisted resume with
    atomic final replacement and scoped cursor bootstrap.
 5. Add retention/pruning and controlled membership-cutover tests.

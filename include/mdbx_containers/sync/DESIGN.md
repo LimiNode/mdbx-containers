@@ -75,7 +75,8 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   for one scoped transaction, atomically writes its scope-local projection and
   sequence. A non-designated local write, raw external writable transaction,
   or public capture suppression fails closed before commit.
-- Selective-replication wire foundation: `SelectiveReplicationProtocolCodec`
+- Selective-replication wire and in-process engine path:
+  `SelectiveReplicationProtocolCodec`
   version 1 uses a separate `MDBXCSRP` envelope for capability hello, scoped
   pull/push DTOs, immutable descriptors, and `ScopedChangeBatch`. Decode is
   bounded and fail-closed for malformed descriptors, wrong writers,
@@ -84,8 +85,15 @@ Wire is transport-agnostic, codec is versioned, storage uses named DBIs.
   active codec bounds. Cancellation tokens remain local, while a failed wire
   response classifies cooperative cancellation as `Cancelled` and carries no
   success-only pull state.
-  Engine apply, transport/worker orchestration, snapshots/resume, and retention
-  are not implemented yet.
+  `SyncEngine` serves and applies bounded scope-local pages, persists mutually
+  exclusive full-global/selective receiver mode, compares duplicate evidence,
+  and keeps `_mdbxc_applied` separate. `DirectSyncPeer` and
+  `SelectiveSyncWorker` provide foreground in-process orchestration with
+  durable resume. HTTP/WebSocket routing, background scheduling,
+  snapshots/resume, and retention are not implemented yet.
+  Until scoped baselines land, a designated writer can activate a new scope
+  only over empty existing manifest DBIs; repeated descriptor verification and
+  non-designated write-guard installation do not impose that emptiness rule.
 - `SyncEngine` pull / push / apply protocol logic, `DirectSyncPeer`
   in-process transport, detailed apply conflict diagnostics, multi-origin
   pagination, origin-index fallback for legacy changelogs, and

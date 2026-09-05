@@ -16,6 +16,7 @@
 #include "engine/ISyncPeer.hpp"
 #include "engine/SyncEngine.hpp"
 #include "engine/SyncWorker.hpp"
+#include "engine/SelectiveSyncWorker.hpp"
 #include "engine/SyncWorkerGuard.hpp"
 #include "engine/SyncNodeSession.hpp"
 #include "engine/DirectSyncPeer.hpp"

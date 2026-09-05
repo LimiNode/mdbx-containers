@@ -52,7 +52,7 @@ mdbxc::sync::ChangeBatch make_raw_batch(const mdbxc::sync::NodeId& origin,
 std::shared_ptr<mdbxc::Connection> open_env(const std::string& path) {
     mdbxc::Config config;
     config.pathname = path;
-    config.max_dbs = 16;
+    config.max_dbs = 32;
     config.no_subdir = true;
     return mdbxc::Connection::create(config);
 }
@@ -115,6 +115,179 @@ private:
     int m_pull_count;
     int m_cancel_count;
 };
+
+class ForeignScopeSelectivePeer : public mdbxc::sync::ISyncPeer {
+public:
+    ForeignScopeSelectivePeer(
+            const mdbxc::sync::SelectiveReplicationHello& hello,
+            const mdbxc::sync::ScopedPullResponse& response)
+        : m_hello(hello), m_response(response) {}
+
+    mdbxc::sync::PullResponse pull(
+            const mdbxc::sync::PullRequest& request) override {
+        (void)request;
+        return mdbxc::sync::PullResponse();
+    }
+
+    mdbxc::sync::PushResponse push(
+            const mdbxc::sync::PushRequest& request) override {
+        (void)request;
+        return mdbxc::sync::PushResponse();
+    }
+
+    bool supports_selective_replication() const override { return true; }
+
+    mdbxc::sync::SelectiveReplicationHello
+    selective_replication_hello() override {
+        return m_hello;
+    }
+
+    mdbxc::sync::ScopedPullResponse scoped_pull(
+            const mdbxc::sync::ScopedPullRequest& request) override {
+        (void)request;
+        return m_response;
+    }
+
+private:
+    mdbxc::sync::SelectiveReplicationHello m_hello;
+    mdbxc::sync::ScopedPullResponse m_response;
+};
+
+void test_selective_worker_drains_and_resumes_durable_cursor() {
+    using namespace mdbxc;
+    const std::string source_path =
+        "test_selective_worker_source.mdbx";
+    const std::string replica_path =
+        "test_selective_worker_replica.mdbx";
+    cleanup(source_path);
+    cleanup(replica_path);
+
+    const sync::NodeId source_node = make_node(0x24);
+    const sync::NodeId replica_node = make_node(0x64);
+    const sync::DbId db_id = make_node(0xB4);
+    std::shared_ptr<Connection> source_conn = open_env(source_path);
+    sync::SyncEngine source(source_conn);
+    source.initialize_local_identity(source_node, db_id);
+    KeyValueTable<int, int> source_orders(source_conn, "orders");
+    sync::SelectiveReplicationDescriptor descriptor;
+    descriptor.scope_id = "orders_scope";
+    descriptor.designated_writer_origin = source_node;
+    descriptor.manifest.push_back(
+        sync::SelectiveReplicationDbi::from(source_orders));
+    source.register_selective_replication_scope(descriptor);
+    sync::ThreadLocalChangeAccumulator capture(source_conn);
+    source_conn->attach_sync_capture(&capture);
+    source_orders.insert_or_assign(1, 10);
+    source_orders.insert_or_assign(2, 20);
+    source_orders.insert_or_assign(3, 30);
+    source_conn->detach_sync_capture();
+    sync::DirectSyncPeer peer(&source);
+
+    {
+        std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+        sync::SyncEngine replica(replica_conn);
+        replica.initialize_local_identity(replica_node, db_id);
+        KeyValueTable<int, int> replica_orders(replica_conn, "orders");
+        sync::SelectiveSyncWorkerOptions options;
+        options.max_batches = 1u;
+        options.drain_pages = true;
+        sync::SelectiveSyncWorker worker(
+            replica, peer, descriptor.scope_id, options);
+        const sync::SelectiveSyncWorkerRoundResult first = worker.run_once();
+        if (!first.ok || first.pages_pulled != 3u ||
+            first.batches_applied != 3u ||
+            first.receiver_sequence != 3u ||
+            kv_or_throw(replica_conn, replica_orders, 1,
+                        "selective worker orders[1]") != 10 ||
+            kv_or_throw(replica_conn, replica_orders, 3,
+                        "selective worker orders[3]") != 30 ||
+            !replica.applied_cursor().last_seq_by_origin.empty()) {
+            throw std::runtime_error(
+                "selective worker did not drain scoped pages");
+        }
+        replica_conn->disconnect();
+    }
+
+    {
+        std::shared_ptr<Connection> replica_conn = open_env(replica_path);
+        sync::SyncEngine replica(replica_conn);
+        sync::SelectiveSyncWorkerOptions options;
+        options.max_batches = 1u;
+        sync::SelectiveSyncWorker resumed(
+            replica, peer, descriptor.scope_id, options);
+        const sync::SelectiveSyncWorkerRoundResult second = resumed.run_once();
+        if (!second.ok || second.pages_pulled != 1u ||
+            second.batches_applied != 0u ||
+            second.receiver_sequence != 3u || second.has_more) {
+            throw std::runtime_error(
+                "selective worker did not resume its durable cursor");
+        }
+        replica_conn->disconnect();
+    }
+
+    source_conn->disconnect();
+    cleanup(source_path);
+    cleanup(replica_path);
+}
+
+void test_selective_worker_rejects_foreign_scope_response() {
+    using namespace mdbxc;
+    const std::string path =
+        "test_selective_worker_foreign_scope.mdbx";
+    cleanup(path);
+
+    const sync::NodeId remote_node = make_node(0x25);
+    const sync::NodeId receiver_node = make_node(0x65);
+    const sync::DbId db_id = make_node(0xB5);
+    std::shared_ptr<Connection> conn = open_env(path);
+    sync::SyncEngine receiver(conn);
+    receiver.initialize_local_identity(receiver_node, db_id);
+    KeyValueTable<int, int> orders(conn, "orders");
+
+    sync::SelectiveReplicationDescriptor descriptor;
+    descriptor.scope_id = "scope_B";
+    descriptor.designated_writer_origin = remote_node;
+    descriptor.manifest.push_back(
+        sync::SelectiveReplicationDbi::from(orders));
+    sync::ScopedChangeBatch batch;
+    batch.scope_id = descriptor.scope_id;
+    batch.designated_writer_origin = remote_node;
+    batch.scope_sequence = 1u;
+    sync::ChangeOp op;
+    op.op_type = sync::ChangeOpType::Put;
+    op.dbi_name = descriptor.manifest[0].dbi_name();
+    op.dbi_flags = descriptor.manifest[0].dbi_flags();
+    op.storage_key.push_back(0x01u);
+    op.value.push_back(0x02u);
+    batch.ops.push_back(op);
+
+    sync::ScopedPullResponse response;
+    response.descriptor = descriptor;
+    response.remote_tail = 1u;
+    response.remote_tail_known = true;
+    response.batches.push_back(batch);
+    sync::SelectiveReplicationHello hello;
+    hello.node_id = remote_node;
+    hello.db_id = db_id;
+    hello.capabilities.flags =
+        sync::selective_replication_supported_capability_flags();
+    ForeignScopeSelectivePeer peer(hello, response);
+
+    sync::SelectiveSyncWorker worker(receiver, peer, "scope_A");
+    const sync::SelectiveSyncWorkerRoundResult result = worker.run_once();
+    if (result.ok || result.error_code !=
+            sync::SelectiveReplicationErrorCode::ScopeDescriptorMismatch ||
+        result.pages_pulled != 0u || result.batches_applied != 0u ||
+        receiver.scoped_applied_sequence("scope_A") != 0u ||
+        receiver.scoped_applied_sequence("scope_B") != 0u ||
+        !orders.empty()) {
+        throw std::runtime_error(
+            "selective worker accepted or applied another scope");
+    }
+
+    conn->disconnect();
+    cleanup(path);
+}
 
 class NodeSessionApplyObserver : public mdbxc::sync::ISyncApplyObserver {
 public:
@@ -3463,6 +3636,10 @@ void test_worker_rejects_logical_complete_snapshot_fallback() {
 int main() {
     struct Case { const char* name; void (*fn)(); };
     const Case cases[] = {
+        { "test_selective_worker_drains_and_resumes_durable_cursor",
+          &test_selective_worker_drains_and_resumes_durable_cursor },
+        { "test_selective_worker_rejects_foreign_scope_response",
+          &test_selective_worker_rejects_foreign_scope_response },
         { "test_worker_recovers_fresh_replica_with_full_snapshot",
           &test_worker_recovers_fresh_replica_with_full_snapshot },
         { "test_worker_resumes_persisted_full_snapshot_after_restart",

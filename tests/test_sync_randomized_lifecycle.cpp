@@ -26,7 +26,7 @@ void cleanup(const std::string& path) {
 std::shared_ptr<mdbxc::Connection> open_env(const std::string& path) {
     mdbxc::Config config;
     config.pathname = path;
-    config.max_dbs = 16;
+    config.max_dbs = 24;
     config.no_subdir = true;
     return mdbxc::Connection::create(config);
 }
