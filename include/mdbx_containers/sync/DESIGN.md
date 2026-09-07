@@ -1799,6 +1799,19 @@ before a user-DBI commit.
 Starting a new non-persistent `CompleteUserDatabase` import, or explicitly
 disabling persisted staging, abandons any existing durable session.
 
+The currently shipped headerless `_mdbxc_snapshot_import` layout is legacy raw
+staging. The new durable format does not migrate it and never interprets a
+missing header as `raw-complete`; a newly constructed engine reports it as
+unsupported for resume until the caller explicitly discards it. This is a
+fail-closed boundary for transient staging, not a user-data migration path.
+
+Raw and logical resume expose separate public contracts. The logical path will
+provide a `LogicalRecoveryImportResume` result instead of widening
+`FullSnapshotImportResume`, with at least `available`, `source_node_id`,
+`requester_node_id`, `db_id`, `snapshot_id`, `continuation`, and
+`next_chunk_index`. Its continuation is accepted only by
+`LogicalRecoveryRequest` and cannot be passed to the raw snapshot API.
+
 The next recovery design extends this durable staging contract to the separate
 logical-aware path without changing raw snapshot semantics. Every persisted
 session records an explicit protocol kind (`raw-complete` or `logical-aware`)
@@ -1821,6 +1834,11 @@ The implementation must fail closed on protocol-kind, source/requester/DB,
 scope, manifest, tail, continuation, adapter/schema, or durable-format
 mismatch; corrupt or stale staging; an already-populated logical receiver; or
 materialization-bound violations. Raw and logical sessions cannot be mixed.
+Discard must not decode staged pages or the logical baseline. A corrupt header
+or page therefore makes resume fail closed while leaving user and logical state
+unchanged, but `discard_full_snapshot_import()` still succeeds by dropping the
+staging DBI directly; a fresh recovery can then start. Acceptance coverage
+must exercise this cleanup path.
 The one-lazy-staging-DBI budget remains the default; any additional durable
 records must be bounded and versioned. Acceptance coverage must exercise
 restart after a non-final logical page, exactly-once baseline installation,

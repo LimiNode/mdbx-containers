@@ -69,6 +69,9 @@ frames не входят в raw pull/push. Replay watermark создаётся �
   сессии, сохранять точную identity источника/requester/DB/snapshot и
   continuation, восстанавливать logical baseline только в финальном атомарном
   commit и работать fail-closed при устаревшем или смешанном durable-состоянии.
+  Legacy raw-staging без заголовка не возобновляется и требует явного discard;
+  logical resume использует отдельный типизированный результат, а discard не
+  должен зависеть от декодирования содержимого.
   См. [восстановление и полные снимки](../docs/sync-recovery-RU.md).
 - Новые logical-frame capability различия — только при реальном adapter-е.
 - Новые `KeyMultiValueTable` операции — только с explicit multiset replay и

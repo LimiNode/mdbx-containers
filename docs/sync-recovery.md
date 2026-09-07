@@ -83,6 +83,20 @@ promise in the current release. A durable staged session must record an
 explicit protocol kind (`raw-complete` or `logical-aware`); the receiver must
 never infer that kind from the physical pages stored in the staging DBI.
 
+The current headerless `_mdbxc_snapshot_import` layout is a legacy raw-staging
+format. The new durable format does not migrate it and does not interpret a
+missing header as `raw-complete`. A newly constructed engine reports that
+legacy state as unsupported for resume; the caller must explicitly discard it
+before starting a new recovery session. This is a deliberate fail-closed
+compatibility boundary for transient staging, not a user-data migration path.
+
+Raw and logical resume remain separate public contracts. The implementation
+will expose a `LogicalRecoveryImportResume` result, rather than widening
+`FullSnapshotImportResume`, with at least `available`, `source_node_id`,
+`requester_node_id`, `db_id`, `snapshot_id`, `continuation`, and
+`next_chunk_index`. The logical continuation is accepted only by
+`LogicalRecoveryRequest`; it cannot be passed to the raw snapshot API.
+
 The durable identity is the complete recovery binding: source `NodeId`,
 requester/receiver `NodeId`, `DbId`, `snapshot_id`, replacement scope, manifest
 version and manifest contents, immutable source tail, next chunk index and
@@ -109,6 +123,12 @@ manifest, tail, continuation, adapter/schema, or durable-format mismatch; for
 corrupt or stale staging; for an already-populated logical receiver; and when
 materialization bounds are exceeded. Raw and logical staged sessions cannot be
 mixed or silently upgraded.
+
+Discard must not decode the staged pages or baseline. A corrupt header or page
+therefore makes resume fail closed while leaving user and logical state
+unchanged, but `discard_full_snapshot_import()` still succeeds by dropping the
+staging DBI directly. Acceptance coverage must prove that this cleanup permits
+a fresh recovery session.
 
 The implementation should keep the one-lazy-staging-DBI budget while a session
 is incomplete. If the durable format needs additional records, they must be

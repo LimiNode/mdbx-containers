@@ -85,6 +85,20 @@ sequenceDiagram
 (`raw-complete` или `logical-aware`); получатель не должен выводить его только
 из физических страниц в staging DBI.
 
+Текущий формат `_mdbxc_snapshot_import` без заголовка считается legacy raw-
+форматом подготовки. Новый durable-формат не мигрирует его и не трактует
+отсутствующий заголовок как `raw-complete`. Новый engine сообщает о таком
+состоянии как о неподдерживаемом для resume; перед новой сессией его нужно
+явно удалить. Это намеренная fail-closed граница совместимости временного
+staging, а не миграция пользовательских данных.
+
+Raw- и logical-resume остаются разными публичными контрактами. Реализация
+предоставит результат `LogicalRecoveryImportResume`, не расширяя
+`FullSnapshotImportResume`; в нём как минимум будут `available`,
+`source_node_id`, `requester_node_id`, `db_id`, `snapshot_id`, `continuation` и
+`next_chunk_index`. Logical continuation принимается только
+`LogicalRecoveryRequest` и не может передаваться в raw snapshot API.
+
 Сохраняемая идентичность включает всю привязку восстановления: `NodeId`
 источника, `NodeId` requester/receiver, `DbId`, `snapshot_id`, область замены,
 версию и содержимое manifest, неизменяемый хвост источника, следующий индекс
@@ -112,6 +126,13 @@ source/requester/DB, scope, manifest, tail, continuation, adapter/schema или
 durable-формата; при повреждённом или устаревшем staging; при уже заполненном
 logical receiver; и при превышении лимитов материализации. Raw- и logical-сессии
 в staging нельзя смешивать или неявно преобразовывать.
+
+Удаление не должно декодировать подготовленные страницы или baseline. Поэтому
+повреждённый заголовок или страница делает resume fail-closed и оставляет
+пользовательское и logical-состояние неизменным, но
+`discard_full_snapshot_import()` всё равно успешно удаляет staging DBI
+напрямую. Acceptance-тест должен доказать, что после такой очистки можно
+начать новое восстановление.
 
 При реализации следует сохранить бюджет одной лениво создаваемой staging DBI
 на время незавершённой сессии. Если durable-формату потребуются дополнительные
