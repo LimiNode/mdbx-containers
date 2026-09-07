@@ -64,6 +64,12 @@ frames не входят в raw pull/push. Replay watermark создаётся �
 
 ## Следующие задачи
 
+- Сначала спроектировать, затем реализовать сохраняемое возобновление
+  logical-aware recovery. Дизайн должен различать raw-complete и logical
+  сессии, сохранять точную identity источника/requester/DB/snapshot и
+  continuation, восстанавливать logical baseline только в финальном атомарном
+  commit и работать fail-closed при устаревшем или смешанном durable-состоянии.
+  См. [восстановление и полные снимки](../docs/sync-recovery-RU.md).
 - Новые logical-frame capability различия — только при реальном adapter-е.
 - Новые `KeyMultiValueTable` операции — только с explicit multiset replay и
   round-trip coverage.

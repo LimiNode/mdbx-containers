@@ -172,6 +172,11 @@ tables.
 
 ## Suggested Next PRs
 
+- Define and then implement persisted resume for logical-aware recovery. The
+  design must distinguish raw-complete and logical sessions, persist the exact
+  source/requester/DB/snapshot identity and continuation, restore the logical
+  baseline only in the final atomic commit, and fail closed on stale or mixed
+  durable state. See [Sync Recovery And Full Snapshots](../docs/sync-recovery.md).
 - Extend logical-frame capability negotiation only when a new adapter requires
   a compatibility distinction beyond the existing schema marker and adapter
   registry fail-closed checks.
