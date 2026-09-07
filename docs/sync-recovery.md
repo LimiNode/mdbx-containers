@@ -75,6 +75,69 @@ staging. The option consumes one named-DBI slot only while an import is
 incomplete. `ManifestOnly` and logical-aware recovery keep their existing
 in-memory staging contract in this v1.
 
+### Design: Persisted Logical-Aware Recovery Resume
+
+The next recovery extension is a separate durable protocol for the
+`LogicalRecoveryRequest` path. It is a design contract, not an implementation
+promise in the current release. A durable staged session must record an
+explicit protocol kind (`raw-complete` or `logical-aware`); the receiver must
+never infer that kind from the physical pages stored in the staging DBI.
+
+The current headerless `_mdbxc_snapshot_import` layout is a legacy raw-staging
+format. The new durable format does not migrate it and does not interpret a
+missing header as `raw-complete`. A newly constructed engine reports that
+legacy state as unsupported for resume; the caller must explicitly discard it
+before starting a new recovery session. This is a deliberate fail-closed
+compatibility boundary for transient staging, not a user-data migration path.
+
+Raw and logical resume remain separate public contracts. The implementation
+will expose a `LogicalRecoveryImportResume` result, rather than widening
+`FullSnapshotImportResume`, with at least `available`, `source_node_id`,
+`requester_node_id`, `db_id`, `snapshot_id`, `continuation`, and
+`next_chunk_index`. The logical continuation is accepted only by
+`LogicalRecoveryRequest`; it cannot be passed to the raw snapshot API.
+
+The durable identity is the complete recovery binding: source `NodeId`,
+requester/receiver `NodeId`, `DbId`, `snapshot_id`, replacement scope, manifest
+version and manifest contents, immutable source tail, next chunk index and
+opaque continuation, plus a durable-format/schema version. The accepted page
+and the metadata describing the exact next continuation are committed in one
+MDBX transaction. User DBIs remain untouched until the final page.
+
+For logical-aware sessions, the final commit also restores the logical baseline:
+schema markers, replay markers and pruning watermark, ordered-delivery
+frontiers, and the receiver-specific pending source-outbox suffix. Source
+outbox entries are never copied into the receiver's local outbox. The baseline
+is installed only with the final physical replacement, raw cursor bootstrap,
+and staging removal, atomically.
+
+After a process restart, a new engine must reconstruct the same logical session
+and continue with the unchanged `snapshot_id` and continuation. It must not
+start a new source session unless the durable state is explicitly discarded or
+the source reports the session expired/invalid. Cancellation or a transient
+transport failure preserves resumable staging; explicit discard and permanent
+session invalidation remove it.
+
+Resume is fail-closed for a protocol-kind, source/requester/DB, scope,
+manifest, tail, continuation, adapter/schema, or durable-format mismatch; for
+corrupt or stale staging; for an already-populated logical receiver; and when
+materialization bounds are exceeded. Raw and logical staged sessions cannot be
+mixed or silently upgraded.
+
+Discard must not decode the staged pages or baseline. A corrupt header or page
+therefore makes resume fail closed while leaving user and logical state
+unchanged, but `discard_full_snapshot_import()` still succeeds by dropping the
+staging DBI directly. Acceptance coverage must prove that this cleanup permits
+a fresh recovery session.
+
+The implementation should keep the one-lazy-staging-DBI budget while a session
+is incomplete. If the durable format needs additional records, they must be
+bounded and versioned rather than creating an unbounded per-session DBI set.
+Acceptance coverage must interrupt after a non-final logical page, restart the
+engine, resume the same session, commit the baseline exactly once, and prove
+that malformed state, cancellation, duplicate final delivery, and raw/logical
+session mixing all fail closed.
+
 ## Logical-State Boundary
 
 Raw `CompleteUserDatabase` is raw-sync-only. The source rejects it with
