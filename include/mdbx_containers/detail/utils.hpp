@@ -504,7 +504,7 @@ namespace mdbxc {
     /// - `view_bytes()` exposes the current contents of `bytes` without copying.
     /// - Do **not** store the returned `MDBX_val` beyond the scope of immediate MDBX API call.
     struct SerializeScratch {
-        alignas(8) unsigned char small[16]; ///< Small inline buffer (16 bytes) aligned to 8 — good for 4/8-byte keys
+        alignas(8) unsigned char inline_buffer[16]; ///< Small inline buffer (16 bytes) aligned to 8 — good for 4/8-byte keys
         std::vector<uint8_t> bytes; ///< Owned dynamic buffer for cases when data must be copied
 
         /// \brief Zero-copy view over external memory (no ownership).
@@ -536,11 +536,11 @@ namespace mdbxc {
         }
         
         /// \brief Copy \a n bytes into the small inline buffer and return a view.
-        /// \note \a n must be <= sizeof(small).
+        /// \note \a n must be <= sizeof(inline_buffer).
         MDBXC_NODISCARD inline MDBX_val view_small_copy(const void* p, size_t n) noexcept {
-            std::memcpy(small, p, n);
+            std::memcpy(inline_buffer, p, n);
             MDBX_val v; 
-            v.iov_base = (n ? static_cast<void*>(small) : nullptr); 
+            v.iov_base = (n ? static_cast<void*>(inline_buffer) : nullptr);
             v.iov_len = n; 
             return v;
         }
