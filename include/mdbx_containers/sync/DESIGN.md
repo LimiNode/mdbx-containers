@@ -1786,7 +1786,7 @@ on every continuation. Its default staging is bounded process memory. With
 `CompleteUserDatabase` pages are instead additionally recorded in one lazy
 reserved DBI, so a newly constructed engine can reconstruct the exact validated
 replacement plan and resume with the stored source continuation. This durable
-mode excludes `ManifestOnly` and logical-aware recovery in v1. Only the final
+mode currently excludes `ManifestOnly` and logical-aware recovery. Only the final
 page opens the replacement write transaction: it requires zero local changelog
 sequence, an empty applied cursor, and empty manifest DBIs, then applies the
 staged `ClearTable` / `Put` plan. That same transaction removes persisted
@@ -1798,6 +1798,52 @@ interruption, malformed continuation, bound failure, or non-fresh target fails
 before a user-DBI commit.
 Starting a new non-persistent `CompleteUserDatabase` import, or explicitly
 disabling persisted staging, abandons any existing durable session.
+
+The currently shipped headerless `_mdbxc_snapshot_import` layout is legacy raw
+staging. The new durable format does not migrate it and never interprets a
+missing header as `raw-complete`; a newly constructed engine reports it as
+unsupported for resume until the caller explicitly discards it. This is a
+fail-closed boundary for transient staging, not a user-data migration path.
+
+Raw and logical resume expose separate public contracts. The logical path will
+provide a `LogicalRecoveryImportResume` result instead of widening
+`FullSnapshotImportResume`, with at least `available`, `source_node_id`,
+`requester_node_id`, `db_id`, `snapshot_id`, `continuation`, and
+`next_chunk_index`. Its continuation is accepted only by
+`LogicalRecoveryRequest` and cannot be passed to the raw snapshot API.
+
+The next recovery design extends this durable staging contract to the separate
+logical-aware path without changing raw snapshot semantics. Every persisted
+session records an explicit protocol kind (`raw-complete` or `logical-aware`)
+and a versioned identity containing source and requester nodes, `DbId`,
+`snapshot_id`, replacement scope, manifest, immutable source tail, next chunk
+index, opaque continuation, and durable-format version. The accepted page and
+its exact continuation metadata commit together; user DBIs remain untouched
+until the final page.
+
+For a logical-aware final commit, the same transaction installs the physical
+replacement, raw cursor bootstrap, logical schema/replay/pruning state, ordered
+delivery frontiers, receiver-specific pending source-outbox suffix, and staging
+removal. Source outbox records never become receiver-local outbox records. A
+restarted engine resumes the unchanged logical session; it starts a new source
+session only after explicit discard or a source-declared invalid/expired
+continuation. Cancellation and transient transport failure preserve resumable
+staging, while permanent invalidation removes it.
+
+The implementation must fail closed on protocol-kind, source/requester/DB,
+scope, manifest, tail, continuation, adapter/schema, or durable-format
+mismatch; corrupt or stale staging; an already-populated logical receiver; or
+materialization-bound violations. Raw and logical sessions cannot be mixed.
+Discard must not decode staged pages or the logical baseline. A corrupt header
+or page therefore makes resume fail closed while leaving user and logical state
+unchanged, but `discard_full_snapshot_import()` still succeeds by dropping the
+staging DBI directly; a fresh recovery can then start. Acceptance coverage
+must exercise this cleanup path.
+The one-lazy-staging-DBI budget remains the default; any additional durable
+records must be bounded and versioned. Acceptance coverage must exercise
+restart after a non-final logical page, exactly-once baseline installation,
+duplicate final delivery, cancellation, malformed state, and raw/logical
+session mixing.
 
 `SyncWorker` can opt in to `SnapshotRequired` recovery only with a fresh-replica
 `CompleteUserDatabase` session. It starts a new empty-cursor source session and
