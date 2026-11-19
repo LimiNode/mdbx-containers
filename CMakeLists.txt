@@ -625,7 +625,7 @@ endif()
 # ---------------------------------------
 # Install: headers + target + CMake package
 # ---------------------------------------
-install(DIRECTORY include/ DESTINATION include)
+install(DIRECTORY include/ DESTINATION include PATTERN "AGENTS.md" EXCLUDE)
 
 install(TARGETS ${_PKG_EXPORT_TARGET}
     EXPORT mdbx_containersTargets
@@ -686,3 +686,4 @@ add_custom_target(copy_headers_to_build ALL
             ${CMAKE_BINARY_DIR}/include
     COMMENT "Copying headers to build/include"
 )
+

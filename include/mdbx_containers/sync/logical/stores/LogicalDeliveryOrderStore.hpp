@@ -14,6 +14,8 @@
 
 #include <mdbx.h>
 
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
+
 
 namespace mdbxc {
 namespace sync {
@@ -198,6 +200,10 @@ namespace sync {
         }
 
         void open_existing(MDBX_txn* txn) const {
+            if (!dbi_detail::named_dbi_exists(txn, m_dbi_name)) {
+                check_mdbx(MDBX_NOTFOUND,
+                           "LogicalDeliveryOrderStore DBI is missing");
+            }
             check_mdbx(mdbx_dbi_open(txn, m_dbi_name.c_str(),
                                      static_cast<MDBX_db_flags_t>(0), &m_dbi),
                        "Failed to open LogicalDeliveryOrderStore DBI");
@@ -287,3 +293,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_STORES_LOGICAL_DELIVERY_ORDER_STORE_HPP_INCLUDED
+

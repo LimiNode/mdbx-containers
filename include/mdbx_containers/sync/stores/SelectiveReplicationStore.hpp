@@ -14,6 +14,7 @@
 
 #include <mdbx.h>
 #include <mdbx_containers/detail/utils.hpp>
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
 
 namespace mdbxc {
 namespace sync {
@@ -100,6 +101,12 @@ namespace sync {
         void reset_open() { m_open = false; }
 
         bool is_open() const { return m_open; }
+
+        /// rief Validates a descriptor before any transaction or DBI lookup.
+        static void validate_descriptor_for_registration(
+                const SelectiveReplicationDescriptor& descriptor) {
+            validate_descriptor(descriptor);
+        }
 
         void register_or_verify(MDBX_txn* txn,
                                 const SelectiveReplicationDescriptor& descriptor) {
@@ -511,10 +518,10 @@ namespace sync {
         bool open_existing(MDBX_txn* txn) {
             txn = checked_txn(txn, "ScopedChangeLogStore::open_existing");
             if (m_open) return true;
+            if (!dbi_detail::named_dbi_exists(txn, m_dbi_name)) return false;
             const int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
                                          static_cast<MDBX_db_flags_t>(0),
                                          &m_dbi);
-            if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, "Failed to open existing scoped changelog DBI");
             m_open = true;
             return true;
@@ -617,10 +624,10 @@ namespace sync {
         bool open_existing(MDBX_txn* txn) {
             txn = checked_txn(txn, "ScopedProgressStore::open_existing");
             if (m_open) return true;
+            if (!dbi_detail::named_dbi_exists(txn, m_dbi_name)) return false;
             const int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
                                          static_cast<MDBX_db_flags_t>(0),
                                          &m_dbi);
-            if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, "Failed to open existing scoped progress DBI");
             m_open = true;
             return true;
@@ -692,3 +699,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_STORES_SELECTIVE_REPLICATION_STORE_HPP_INCLUDED
+

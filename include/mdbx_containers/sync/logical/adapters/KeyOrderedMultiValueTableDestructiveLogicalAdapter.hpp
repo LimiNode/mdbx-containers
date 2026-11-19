@@ -19,6 +19,7 @@
 
 #include "KeyOrderedMultiValueDestructiveState.hpp"
 
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
 namespace mdbxc {
 namespace sync {
 
@@ -111,9 +112,10 @@ namespace sync {
             {
                 Transaction txn = connection->transaction(TransactionMode::READ_ONLY);
                 MDBX_dbi schema_dbi = 0;
-                const int open_rc = mdbx_dbi_open(
-                    txn.handle(), "_mdbxc_sync_schema",
-                    static_cast<MDBX_db_flags_t>(0), &schema_dbi);
+                const int open_rc = dbi_detail::named_dbi_exists(
+                    txn.handle(), "_mdbxc_sync_schema")
+                    ? MDBX_SUCCESS
+                    : MDBX_NOTFOUND;
                 if (open_rc != MDBX_NOTFOUND) {
                     check_mdbx(open_rc,
                                "KeyOrderedMultiValue destructive schema registry open failed");
@@ -1100,3 +1102,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_ADAPTERS_KEY_ORDERED_MULTI_VALUE_TABLE_DESTRUCTIVE_LOGICAL_ADAPTER_HPP_INCLUDED
+

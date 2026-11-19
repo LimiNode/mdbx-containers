@@ -13,6 +13,8 @@
 
 #include <mdbx.h>
 
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
+
 #include <mdbx_containers/sync/protocol/FullSnapshotProtocol.hpp>
 
 namespace mdbxc {
@@ -121,9 +123,9 @@ namespace sync {
 
         bool try_open_existing(MDBX_txn* txn) const {
             if (m_open) return true;
+            if (!dbi_detail::named_dbi_exists(txn, m_dbi_name)) return false;
             const int rc = mdbx_dbi_open(
                 txn, m_dbi_name.c_str(), static_cast<MDBX_db_flags_t>(0), &m_dbi);
-            if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, "Failed to open FullSnapshotImportStore DBI");
             m_open = true;
             return true;
@@ -149,3 +151,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_STORES_FULL_SNAPSHOT_IMPORT_STORE_HPP_INCLUDED
+

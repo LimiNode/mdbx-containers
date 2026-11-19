@@ -1,5 +1,6 @@
 #include "test_assert.hpp"
 #include <bitset>
+#include <cstddef>
 #include <cmath>
 #include <iostream>
 #include <limits>
@@ -69,6 +70,33 @@ void assert_unordered_uint32_values(const std::unordered_set<std::uint32_t>& out
     MDBXC_TEST_ASSERT(out.find(2u) != out.end());
     MDBXC_TEST_ASSERT(out.find(3u) != out.end());
 }
+
+void assert_scalar_value_serialization_owns_bytes() {
+    mdbxc::SerializeScratch scratch;
+    int value = 42;
+    const MDBX_val encoded = mdbxc::serialize_value(value, scratch);
+    value = 99;
+    int restored = 0;
+    std::memcpy(&restored, encoded.iov_base, sizeof(restored));
+    MDBXC_TEST_ASSERT(restored == 42);
+}
+
+#if __cplusplus >= 201703L
+void assert_std_byte_sequences_decode() {
+    const std::uint8_t raw[] = { 1u, 2u, 3u };
+    MDBX_val value = { const_cast<std::uint8_t*>(raw), sizeof(raw) };
+    const std::vector<std::byte> vector_bytes =
+        mdbxc::deserialize_value<std::vector<std::byte>>(value);
+    MDBXC_TEST_ASSERT(vector_bytes.size() == 3u);
+    MDBXC_TEST_ASSERT(vector_bytes[1] == std::byte(2));
+    const std::deque<std::byte> deque_bytes =
+        mdbxc::deserialize_value<std::deque<std::byte>>(value);
+    MDBXC_TEST_ASSERT(deque_bytes.size() == 3u);
+    const std::list<std::byte> list_bytes =
+        mdbxc::deserialize_value<std::list<std::byte>>(value);
+    MDBXC_TEST_ASSERT(list_bytes.size() == 3u);
+}
+#endif
 
 void assert_serialize_scratch_clear_retains_capacity() {
     mdbxc::SerializeScratch scratch;
@@ -198,6 +226,10 @@ void assert_serialized_key_less(T lhs, T rhs) {
 
 int main() {
     assert_serialize_scratch_clear_retains_capacity();
+    assert_scalar_value_serialization_owns_bytes();
+#if __cplusplus >= 201703L
+    assert_std_byte_sequences_decode();
+#endif
     assert_deserializes_empty<std::string>();
     assert_deserializes_empty<std::vector<std::uint8_t>>();
     assert_deserializes_empty<std::deque<std::uint8_t>>();
@@ -328,3 +360,4 @@ int main() {
 
     return 0;
 }
+

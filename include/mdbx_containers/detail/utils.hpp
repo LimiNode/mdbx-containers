@@ -908,8 +908,7 @@ namespace mdbxc {
         std::is_trivially_copyable<T>::value,
         MDBX_val>::type
     serialize_value(const T& value, SerializeScratch& sc) {
-        (void)sc;
-        return SerializeScratch::view(static_cast<const void*>(&value), sizeof(T));
+        return sc.view_copy(&value, sizeof(T));
     }
 
     /// \brief Serializes a sequence container of strings.
@@ -978,9 +977,6 @@ namespace mdbxc {
     /// \tparam T Vector type containing bytes.
     template<typename T>
     typename std::enable_if<
-#       if __cplusplus >= 201703L
-        std::is_same<T, std::vector<std::byte>>::value ||
-#       endif
         std::is_same<T, std::vector<uint8_t>>::value ||
         std::is_same<T, std::vector<char>>::value ||
         std::is_same<T, std::vector<unsigned char>>::value, T>::type
@@ -992,13 +988,22 @@ namespace mdbxc {
         return T(ptr, ptr + val.iov_len);
     }
 
+#       if __cplusplus >= 201703L
+    template<typename T>
+    typename std::enable_if<std::is_same<T, std::vector<std::byte>>::value, T>::type
+    deserialize_value(const MDBX_val& val) {
+        T out(val.iov_len);
+        if (val.iov_len != 0u) {
+            std::memcpy(out.data(), val.iov_base, val.iov_len);
+        }
+        return out;
+    }
+#       endif
+
     /// \brief Deserializes a deque of bytes.
     /// \tparam T Byte deque type.
     template<typename T>
     typename std::enable_if<
-#       if __cplusplus >= 201703L
-        std::is_same<T, std::deque<std::byte>>::value ||
-#       endif
         std::is_same<T, std::deque<uint8_t>>::value ||
         std::is_same<T, std::deque<char>>::value ||
         std::is_same<T, std::deque<unsigned char>>::value, T>::type
@@ -1010,13 +1015,23 @@ namespace mdbxc {
         return T(ptr, ptr + val.iov_len);
     }
 
+#       if __cplusplus >= 201703L
+    template<typename T>
+    typename std::enable_if<std::is_same<T, std::deque<std::byte>>::value, T>::type
+    deserialize_value(const MDBX_val& val) {
+        T out;
+        const std::uint8_t* ptr = static_cast<const std::uint8_t*>(val.iov_base);
+        for (std::size_t i = 0; i < val.iov_len; ++i) {
+            out.push_back(static_cast<std::byte>(ptr[i]));
+        }
+        return out;
+    }
+#       endif
+
     /// \brief Deserializes a list of bytes.
     /// \tparam T Byte list type.
     template<typename T>
     typename std::enable_if<
-#       if __cplusplus >= 201703L
-        std::is_same<T, std::list<std::byte>>::value ||
-#       endif
         std::is_same<T, std::list<uint8_t>>::value ||
         std::is_same<T, std::list<char>>::value ||
         std::is_same<T, std::list<unsigned char>>::value, T>::type
@@ -1028,6 +1043,19 @@ namespace mdbxc {
         return T(ptr, ptr + val.iov_len);
     }
 
+#       if __cplusplus >= 201703L
+    template<typename T>
+    typename std::enable_if<std::is_same<T, std::list<std::byte>>::value, T>::type
+    deserialize_value(const MDBX_val& val) {
+        T out;
+        const std::uint8_t* ptr = static_cast<const std::uint8_t*>(val.iov_base);
+        for (std::size_t i = 0; i < val.iov_len; ++i) {
+            out.push_back(static_cast<std::byte>(ptr[i]));
+        }
+        return out;
+    }
+#       endif
+
     /// \brief Deserializes a vector of trivially copyable elements.
     /// \tparam T Vector type.
     template<typename T>
@@ -1035,12 +1063,13 @@ namespace mdbxc {
         has_value_type<T>::value &&
         std::is_same<T, std::vector<typename T::value_type>>::value &&
         std::is_trivially_copyable<typename T::value_type>::value &&
-#       if __cplusplus >= 201703L
-        !std::is_same<T, std::vector<std::byte>>::value &&
-#       endif
         !std::is_same<T, std::vector<uint8_t>>::value &&
         !std::is_same<T, std::vector<char>>::value &&
-        !std::is_same<T, std::vector<unsigned char>>::value, T>::type
+        !std::is_same<T, std::vector<unsigned char>>::value
+#       if __cplusplus >= 201703L
+        && !std::is_same<T, std::vector<std::byte>>::value
+#       endif
+        , T>::type
     deserialize_value(const MDBX_val& val) {
         typedef typename T::value_type Elem;
         if (val.iov_len % sizeof(Elem) != 0)
@@ -1060,16 +1089,17 @@ namespace mdbxc {
         (std::is_same<T, std::deque<typename T::value_type>>::value ||
          std::is_same<T, std::list<typename T::value_type>>::value) &&
         std::is_trivially_copyable<typename T::value_type>::value &&
-#       if __cplusplus >= 201703L
-        !std::is_same<T, std::deque<std::byte>>::value &&
-        !std::is_same<T, std::list<std::byte>>::value &&
-#       endif
         !std::is_same<T, std::deque<uint8_t>>::value &&
         !std::is_same<T, std::deque<char>>::value &&
         !std::is_same<T, std::deque<unsigned char>>::value &&
         !std::is_same<T, std::list<uint8_t>>::value &&
         !std::is_same<T, std::list<char>>::value &&
-        !std::is_same<T, std::list<unsigned char>>::value, T>::type
+        !std::is_same<T, std::list<unsigned char>>::value
+#       if __cplusplus >= 201703L
+        && !std::is_same<T, std::deque<std::byte>>::value
+        && !std::is_same<T, std::list<std::byte>>::value
+#       endif
+        , T>::type
     deserialize_value(const MDBX_val& val) {
         typedef typename T::value_type Elem;
         if (val.iov_len % sizeof(Elem) != 0) {
@@ -1397,3 +1427,4 @@ namespace mdbxc {
 #undef MDBXC_NODISCARD
 
 #endif // MDBX_CONTAINERS_HEADER_DETAIL_UTILS_HPP_INCLUDED
+

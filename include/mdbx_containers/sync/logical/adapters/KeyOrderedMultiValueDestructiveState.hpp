@@ -17,6 +17,8 @@
 
 #include <mdbx.h>
 
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
+
 
 namespace mdbxc {
 namespace sync {
@@ -1076,6 +1078,10 @@ namespace sync {
         MDBX_dbi open_named_existing(MDBX_txn* txn,
                                       const std::string& name,
                                       MDBX_db_flags_t expected_flags) const {
+            if (!dbi_detail::named_dbi_exists(txn, name)) {
+                check_mdbx(MDBX_NOTFOUND,
+                           "Ordered element state DBI is missing");
+            }
             MDBX_dbi dbi = 0;
             const int rc = mdbx_dbi_open(txn, name.c_str(),
                                          expected_flags, &dbi);
@@ -1251,3 +1257,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_ADAPTERS_KEY_ORDERED_MULTI_VALUE_DESTRUCTIVE_STATE_HPP_INCLUDED
+
