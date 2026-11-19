@@ -21,8 +21,8 @@ The baseline should not be released as an infrastructure dependency until the P1
 | MSVC | Toolchain and external MDBX combination not available | Classify in CI before support claim |
 | macOS | Runner unavailable locally | Pending CI |
 | Doxygen | Binary unavailable locally | Pending CI |
-| GitHub exact-head Archcheck | Run 369, success | Passed |
-| GitHub exact-head CI | Run 796 for code head, run 801 for final documentation head, success | Passed |
+| GitHub exact-head Archcheck | Run 370, success | Passed |
+| GitHub exact-head CI | Run 802 for current documentation head, success | Passed |
 | Real process raw HTTP smoke | `sync_18_http_node_fleet` master-replica and mesh | Passed |
 
 ## Blockers
