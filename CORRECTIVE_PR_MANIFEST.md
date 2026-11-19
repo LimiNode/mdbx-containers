@@ -46,7 +46,7 @@
 - Draft PR number: `334`
 - Draft PR URL: https://github.com/LimiNode/mdbx-containers/pull/334
 - Remote head SHA: `a5fa2fca9b2a25d628b171f5cd8a4ccf94408e00`
-- CI status: pending exact-head GitHub run
+- CI status: successful. Archcheck run `44502531460` and CI run `44502531351` completed with all jobs green.
 
 ## Migration
 
