@@ -11,7 +11,7 @@
 #include "common.hpp"
 #include "detail/result_containers.hpp"
 #include <map>
-#include <unordered_set>
+#include <set>
 
 namespace mdbxc {
 
@@ -1986,9 +1986,9 @@ namespace mdbxc {
             SerializeScratch sc_value;
             
             // 1. Collect all keys from the container
-            std::unordered_set<KeyT> new_keys;
+            std::set<std::vector<std::uint8_t>> new_keys;
             for (const auto& pair : container) {
-                new_keys.insert(pair.first);
+                new_keys.insert(copy_serialized_key(pair.first, sc_key));
                 MDBX_val db_key = serialize_key<Options::safe_integer_key>(pair.first, sc_key);
                 MDBX_val db_val = serialize_value(pair.second, sc_value);
                 check_mdbx(
@@ -2009,7 +2009,7 @@ namespace mdbxc {
             int rc = MDBX_SUCCESS;
             while ((rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_NEXT)) == MDBX_SUCCESS) {
                 KeyT key = deserialize_key<KeyT>(db_key);
-                if (new_keys.find(key) == new_keys.end()) {
+                if (new_keys.find(copy_serialized_key(key, sc_key)) == new_keys.end()) {
 #                   if MDBXC_SYNC_ENABLED
                     const std::vector<std::uint8_t> kbytes = capture_bytes(db_key);
 #                   endif
@@ -2034,12 +2034,12 @@ namespace mdbxc {
             SerializeScratch sc_value;
             
             // 1. Collect keys and upsert values
-            std::unordered_set<KeyT> new_keys;
+            std::set<std::vector<std::uint8_t>> new_keys;
             for (size_t i = 0; i < container.size(); ++i) {
                 const KeyT& key = container[i].first;
                 const ValueT& value = container[i].second;
 
-                new_keys.insert(key);
+                new_keys.insert(copy_serialized_key(key, sc_key));
 
                 MDBX_val db_key = serialize_key<Options::safe_integer_key>(key, sc_key);
                 MDBX_val db_val = serialize_value(value, sc_value);
@@ -2061,7 +2061,7 @@ namespace mdbxc {
             int rc = MDBX_SUCCESS;
             while ((rc = mdbx_cursor_get(cursor.get(), &db_key, &db_val, MDBX_NEXT)) == MDBX_SUCCESS) {
                 KeyT key = deserialize_key<KeyT>(db_key);
-                if (new_keys.find(key) == new_keys.end()) {
+                if (new_keys.find(copy_serialized_key(key, sc_key)) == new_keys.end()) {
 #                   if MDBXC_SYNC_ENABLED
                     const std::vector<std::uint8_t> kbytes = capture_bytes(db_key);
 #                   endif
@@ -2076,6 +2076,15 @@ namespace mdbxc {
             }
         }
         
+        std::vector<std::uint8_t> copy_serialized_key(
+                const KeyT& key, SerializeScratch& scratch) const {
+            const MDBX_val encoded =
+                serialize_key<Options::safe_integer_key>(key, scratch);
+            const std::uint8_t* const begin =
+                static_cast<const std::uint8_t*>(encoded.iov_base);
+            return std::vector<std::uint8_t>(begin, begin + encoded.iov_len);
+        }
+
         /// \brief Inserts a key-value pair only if the key does not already exist.
         /// \param key The key to insert.
         /// \param value The value to insert.
@@ -2192,3 +2201,4 @@ namespace mdbxc {
 }; // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_KEY_VALUE_TABLE_HPP_INCLUDED
+

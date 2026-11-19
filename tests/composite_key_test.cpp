@@ -281,5 +281,14 @@ int main() {
     MDBXC_TEST_ASSERT(range[0].first == KeyT(-1, "alpha", 1u));
     MDBXC_TEST_ASSERT(range[1].first == KeyT(-1, "beta", 2u));
 
+    std::map<KeyT, std::string> replacement;
+    replacement.insert(std::make_pair(KeyT(-1, "alpha", 1u), "replaced"));
+    replacement.insert(std::make_pair(KeyT(1, "gamma", 3u), "new"));
+    table.reconcile(replacement);
+    MDBXC_TEST_ASSERT(table.at(KeyT(-1, "alpha", 1u)) == "replaced");
+    MDBXC_TEST_ASSERT(table.at(KeyT(1, "gamma", 3u)) == "new");
+    MDBXC_TEST_ASSERT(!table.contains(KeyT(-1, "beta", 2u)));
+
     return 0;
 }
+

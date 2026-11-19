@@ -45,6 +45,9 @@ namespace mdbxc {
                         std::string name,
                         MDBX_db_flags_t flags)
             : m_connection(std::move(connection)), m_name(std::move(name)) {
+            if (!m_connection) {
+                throw std::invalid_argument("BaseTable requires a non-null Connection");
+            }
             if (is_reserved_dbi_name(m_name)) {
                 throw std::invalid_argument(
                     "MDBX Containers table name uses reserved internal prefix '_mdbxc_'");
@@ -305,3 +308,4 @@ namespace mdbxc {
 }; // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_DETAIL_BASE_TABLE_HPP_INCLUDED
+

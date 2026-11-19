@@ -14,6 +14,8 @@
 
 #include <mdbx.h>
 
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
+
 namespace mdbxc {
 namespace sync {
 
@@ -57,10 +59,10 @@ namespace sync {
             txn = checked_txn(
                 txn, "ReceiverReplicationModeStore::open_existing");
             if (m_open) return true;
+            if (!dbi_detail::named_dbi_exists(txn, m_dbi_name)) return false;
             const int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
                                          static_cast<MDBX_db_flags_t>(0),
                                          &m_dbi);
-            if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, "Failed to open existing receiver mode DBI");
             m_open = true;
             return true;
@@ -302,3 +304,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_STORES_RECEIVER_REPLICATION_MODE_STORE_HPP_INCLUDED
+

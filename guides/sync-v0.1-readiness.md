@@ -52,6 +52,10 @@ rules, see [Sync table coverage matrix](sync-table-coverage.md).
   Snapshots](../docs/sync-recovery.md).
 - Ready-made optional backends exist for Simple-Web HTTP, Simple-WebSocket, and
   Kurlyk/libcurl HTTP through feature-gated provider targets.
+- `sync_18_http_node_fleet` exercises the real process boundary. It starts
+  separate child processes with independent MDBX environments and exchanges
+  sync traffic over loopback HTTP. The CI `HTTP node fleet smoke` job builds and
+  runs both its master-replica and mesh scenarios.
 - Installed-package smoke tests cover exported transport provider targets and
   provider argument validation.
 - Negative wire/transport tests cover malformed DTOs, oversized payloads,
@@ -208,3 +212,14 @@ test_sync_replication
 
 For benchmark or backend-provider changes, also run the dedicated benchmark,
 installed-package, and backend smoke jobs or their local equivalents.
+
+## Validation evidence
+
+The local corrective matrix covers Linux GCC C++11 and C++17 Debug suites,
+installed-package consumption, Release benchmarks, and a manual ASan probe.
+The repository CI additionally covers macOS, Windows MinGW64, optional
+transport providers, parent MDBX target variants, and the process-supervised
+HTTP node fleet. These checks establish the tested raw HTTP process path. They
+do not turn selective replication, persisted logical recovery resume, or
+general multi-writer convergence into supported release features.
+

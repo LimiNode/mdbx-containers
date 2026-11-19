@@ -281,6 +281,8 @@ namespace sync {
         /// non-designated origin fails closed before commit.
         void register_selective_replication_scope(
                 const SelectiveReplicationDescriptor& descriptor) {
+            SelectiveReplicationStore::validate_descriptor_for_registration(
+                descriptor);
             auto txn = m_conn->transaction(TransactionMode::WRITABLE);
             initialize_system_stores(txn.handle());
             for (std::size_t i = 0; i < descriptor.manifest.size(); ++i) {
@@ -3096,17 +3098,18 @@ namespace sync {
             for (std::size_t i = 0u; i < session->manifest.size(); ++i) {
                 throw_if_cancelled(cancel_token);
                 const FullSnapshotManifestEntry& entry = session->manifest[i];
+                if (!dbi_detail::named_dbi_exists(
+                        txn.handle(), entry.dbi_name)) {
+                    throw std::runtime_error(
+                        "full snapshot manifest DBI does not exist: " +
+                        entry.dbi_name);
+                }
                 MDBX_dbi dbi = 0;
                 const MDBX_db_flags_t open_flags =
                     static_cast<MDBX_db_flags_t>(
                         persistent_dbi_flags(entry.dbi_flags));
                 int rc = mdbx_dbi_open(txn.handle(), entry.dbi_name.c_str(),
                                        open_flags, &dbi);
-                if (rc == MDBX_NOTFOUND) {
-                    throw std::runtime_error(
-                        "full snapshot manifest DBI does not exist: " +
-                        entry.dbi_name);
-                }
                 check_mdbx(rc, "full snapshot failed to open DBI '" +
                             entry.dbi_name + "'");
 
@@ -4243,6 +4246,10 @@ namespace sync {
             error_code = MDBX_SUCCESS;
             const std::uint32_t open_dbi_flags = persistent_dbi_flags(dbi_flags);
             MDBX_db_flags_t open_flags = static_cast<MDBX_db_flags_t>(open_dbi_flags);
+            if (!dbi_detail::named_dbi_exists(txn, name)) {
+                dbi = 0;
+                return true;
+            }
             int rc = mdbx_dbi_open(txn, name.c_str(), open_flags, &dbi);
             if (rc == MDBX_INCOMPATIBLE &&
                 (open_dbi_flags & static_cast<std::uint32_t>(MDBX_INTEGERKEY)) == 0) {
@@ -4267,6 +4274,9 @@ namespace sync {
                                                  const std::string& name,
                                                  std::uint32_t& actual_flags) {
             actual_flags = 0;
+            if (!dbi_detail::named_dbi_exists(txn, name)) {
+                return false;
+            }
             MDBX_dbi dbi = 0;
             const int rc = mdbx_dbi_open(txn, name.c_str(), MDBX_DB_ACCEDE, &dbi);
             if (rc == MDBX_NOTFOUND ||
@@ -4285,10 +4295,10 @@ namespace sync {
 
         static bool existing_user_dbi_has_entries(
                 MDBX_txn* txn, const std::string& name) {
+            if (!dbi_detail::named_dbi_exists(txn, name)) return false;
             MDBX_dbi dbi = 0;
             const int rc = mdbx_dbi_open(
                 txn, name.c_str(), MDBX_DB_ACCEDE, &dbi);
-            if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(
                 rc,
                 "SyncEngine: failed to inspect selective DBI '" + name + "'");
@@ -4638,9 +4648,12 @@ namespace sync {
         }
 
         static MDBX_dbi open_store_ro(MDBX_txn* txn, const char* name) {
+            if (!dbi_detail::named_dbi_exists(txn, std::string(name))) {
+                return 0;
+            }
             MDBX_dbi dbi = 0;
-            const int rc = mdbx_dbi_open(txn, name, static_cast<MDBX_db_flags_t>(0), &dbi);
-            if (rc == MDBX_NOTFOUND) return 0;
+            const int rc = mdbx_dbi_open(
+                txn, name, static_cast<MDBX_db_flags_t>(0), &dbi);
             check_mdbx(rc, std::string("SyncEngine: failed to open store '") + name + "'");
             return dbi;
         }
@@ -4852,3 +4865,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_ENGINE_SYNCENGINE_HPP_INCLUDED
+

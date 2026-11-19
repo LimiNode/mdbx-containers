@@ -12,6 +12,7 @@
 #include <string>
 #include <vector>
 
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
 namespace mdbxc {
 namespace sync {
 
@@ -254,6 +255,10 @@ namespace sync {
         }
 
         MDBX_dbi open_table_dbi(MDBX_txn* txn) const {
+            if (!dbi_detail::named_dbi_exists(txn, m_table.dbi_name())) {
+                check_mdbx(MDBX_NOTFOUND,
+                           "VersionedKeyValueTable table DBI is missing");
+            }
             MDBX_dbi dbi = 0;
             check_mdbx(mdbx_dbi_open(txn, m_table.dbi_name().c_str(),
                                      MDBX_DB_ACCEDE, &dbi),
@@ -298,3 +303,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_ADAPTERS_VERSIONED_KEY_VALUE_TABLE_HPP_INCLUDED
+

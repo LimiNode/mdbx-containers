@@ -76,9 +76,11 @@ namespace sync {
 
         bool open_existing(MDBX_txn* txn) {
             if (m_open) return true;
+            if (!dbi_detail::named_dbi_exists(txn, "_mdbxc_versioned_dbis")) {
+                return false;
+            }
             const int rc = mdbx_dbi_open(txn, "_mdbxc_versioned_dbis",
                                          static_cast<MDBX_db_flags_t>(0), &m_dbi);
-            if (rc == MDBX_NOTFOUND) return false;
             check_mdbx(rc, "Failed to open VersionedDbiStore DBI");
             m_open = true;
             return true;
@@ -93,3 +95,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_STORES_VERSIONED_DBI_STORE_HPP_INCLUDED
+

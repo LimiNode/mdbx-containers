@@ -1,5 +1,6 @@
 #include "test_assert.hpp"
 #include <iostream>
+#include <memory>
 #include <set>
 #include <stdexcept>
 #include <string>
@@ -15,6 +16,18 @@ int main() {
     cfg.relative_to_exe = false;
 
     auto conn = mdbxc::Connection::create(cfg);
+
+    {
+        bool rejected = false;
+        try {
+            std::shared_ptr<mdbxc::Connection> missing;
+            mdbxc::KeyTable<int> invalid(missing, "null_connection");
+            (void)invalid;
+        } catch (const std::invalid_argument&) {
+            rejected = true;
+        }
+        MDBXC_TEST_ASSERT(rejected);
+    }
 
     {
         mdbxc::KeyTable<std::string> table(conn, "keys");
@@ -287,3 +300,4 @@ int main() {
     std::cout << "KeyTable test passed.\n";
     return 0;
 }
+

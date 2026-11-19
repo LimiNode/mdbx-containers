@@ -15,6 +15,8 @@
 
 #include <mdbx.h>
 
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
+
 
 namespace mdbxc {
 namespace sync {
@@ -284,6 +286,11 @@ namespace sync {
         void open_checked(MDBX_txn* txn) const {
             int rc = mdbx_dbi_open(txn, m_dbi_name.c_str(), MDBX_CREATE, &m_dbi);
             if (rc == MDBX_EACCESS) {
+                if (!dbi_detail::named_dbi_exists(txn, m_dbi_name)) {
+                    check_mdbx(
+                        MDBX_NOTFOUND,
+                        "SchemaRegistryStore DBI does not exist in read-only transaction");
+                }
                 rc = mdbx_dbi_open(txn, m_dbi_name.c_str(),
                                    static_cast<MDBX_db_flags_t>(0), &m_dbi);
             }
@@ -467,3 +474,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_STORES_SCHEMA_REGISTRY_STORE_HPP_INCLUDED
+

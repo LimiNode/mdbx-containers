@@ -1,4 +1,5 @@
 #include "test_assert.hpp"
+#include <cstdio>
 #include <chrono>
 #include <condition_variable>
 #include <iostream>
@@ -85,6 +86,26 @@ int main() {
 
         names.insert_or_assign(2, "two");
         MDBXC_TEST_ASSERT(names.at(2) == "two");
+    }
+
+    {
+        const std::string stale_path = "data/transaction_stale_manual_map.mdbx";
+        mdbxc::Config stale_cfg;
+        stale_cfg.pathname = stale_path;
+        stale_cfg.max_dbs = 2;
+        stale_cfg.no_subdir = true;
+        stale_cfg.relative_to_exe = false;
+        auto stale_conn = mdbxc::Connection::create(stale_cfg);
+        stale_conn->begin(mdbxc::TransactionMode::WRITABLE);
+        std::shared_ptr<mdbxc::Transaction> stale =
+            stale_conn->current_txn();
+        MDBXC_TEST_ASSERT(stale && stale->handle());
+        stale->commit();
+        MDBXC_TEST_ASSERT(!stale->handle());
+        stale_conn->begin(mdbxc::TransactionMode::WRITABLE);
+        stale_conn->rollback();
+        stale_conn->disconnect();
+        std::remove(stale_path.c_str());
     }
 
     {
@@ -377,3 +398,4 @@ int main() {
     std::cout << "Transaction test passed.\n";
     return 0;
 }
+

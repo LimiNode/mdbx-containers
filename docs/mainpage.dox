@@ -231,8 +231,9 @@ LargeValues hash index. Every DBI used by the wrapper must already exist; write
 methods still fail through MDBX.
 
 \section repo_sec Repository
-Sources: [GitHub repository](https://github.com/NewYaroslav/mdbx-containers).
+Sources: [GitHub repository](https://github.com/LimiNode/mdbx-containers).
 
 \section license_sec License
 This project is licensed under the MIT License. It bundles libmdbx under the Apache License 2.0. See files in the repository for full texts.
 */
+

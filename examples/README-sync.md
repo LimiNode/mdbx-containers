@@ -364,7 +364,9 @@ guard, paginated pulls, and worker observer callbacks over
 `mdbxc::sync::simple_web::HttpSyncListener`.
 
 `sync_18_http_node_fleet.cpp` runs several copies of the same executable through
-tiny-process-library. Each child process owns its own MDBX environment, ready
+tiny-process-library. This is the process-level raw HTTP smoke path used by the
+CI `HTTP node fleet smoke` job. Each child process owns its own MDBX environment,
+ready
 Simple-Web HTTP listener/client, sync engine, capture sink, and application
 loop; the parent process only starts nodes and sends `pause` / `stop` commands
 through stdin. The `master-replica` mode shows one active writer and one passive
@@ -392,3 +394,4 @@ the bearer token during the WebSocket handshake, passes the authenticated
 replica `NodeId` plus explicit `SyncDbAccess` to
 `WebSocketSyncServerMiddleware`, rejects oversized messages before decode, and
 classifies close codes for client diagnostics.
+

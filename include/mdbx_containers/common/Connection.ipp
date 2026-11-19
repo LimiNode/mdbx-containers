@@ -47,6 +47,10 @@ namespace mdbxc {
 
     inline void Connection::configure(const Config& config) {
         std::lock_guard<std::mutex> locker(m_mdbx_mutex);
+        if (m_env) {
+            throw std::logic_error(
+                "Connection::configure() must be called before connect()");
+        }
 #       if __cplusplus >= 201703L
         m_config = config;
 #       else
@@ -139,7 +143,16 @@ namespace mdbxc {
             if (!m_env) {
                 throw std::logic_error("Connection is not connected.");
             }
-            if (m_transactions.find(tid) != m_transactions.end()) {
+            std::unordered_map<std::thread::id,
+                               std::shared_ptr<Transaction>>::iterator manual =
+                m_transactions.find(tid);
+            if (manual != m_transactions.end() &&
+                manual->second != nullptr &&
+                manual->second->handle() == nullptr) {
+                m_transactions.erase(manual);
+                manual = m_transactions.end();
+            }
+            if (manual != m_transactions.end()) {
                 throw std::logic_error(
                     "Transaction already started for this thread.");
             }
@@ -1248,3 +1261,4 @@ namespace mdbxc {
     }
 
 } // namespace mdbxc
+

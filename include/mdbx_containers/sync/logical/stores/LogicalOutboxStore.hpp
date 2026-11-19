@@ -14,6 +14,8 @@
 
 #include <mdbx.h>
 
+#include <mdbx_containers/sync/detail/NamedDbiLookup.hpp>
+
 #include "LogicalJournalStore.hpp"
 
 namespace mdbxc {
@@ -518,6 +520,10 @@ namespace sync {
         }
 
         void open_existing(MDBX_txn* txn) const {
+            if (!dbi_detail::named_dbi_exists(txn, m_dbi_name)) {
+                check_mdbx(MDBX_NOTFOUND,
+                           "LogicalOutboxStore DBI is missing");
+            }
             check_mdbx(mdbx_dbi_open(txn, m_dbi_name.c_str(),
                                      static_cast<MDBX_db_flags_t>(0), &m_dbi),
                        "Failed to open LogicalOutboxStore DBI");
@@ -865,3 +871,4 @@ namespace sync {
 } // namespace mdbxc
 
 #endif // MDBX_CONTAINERS_HEADER_SYNC_LOGICAL_STORES_LOGICAL_OUTBOX_STORE_HPP_INCLUDED
+

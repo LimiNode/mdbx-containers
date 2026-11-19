@@ -229,6 +229,45 @@ void test_origin_index_store() {
     cleanup(p);
 }
 
+void test_optional_store_absence_probes_are_non_mutating() {
+    using namespace mdbxc::sync;
+    const std::string p = "test_sync_stores_absence_probes.mdbx";
+    cleanup(p);
+    mdbxc::Config cfg;
+    cfg.pathname = p;
+    cfg.max_dbs = 16;
+    cfg.no_subdir = true;
+    auto conn = mdbxc::Connection::create(cfg);
+    {
+        auto txn = conn->transaction(mdbxc::TransactionMode::READ_ONLY);
+        MetaStore meta(conn->env_handle());
+        OriginIndexStore origins(conn->env_handle());
+        ReceiverReplicationModeStore receiver(conn->env_handle());
+        VersionedDbiStore versioned(conn->env_handle());
+        FullSnapshotImportStore snapshot(conn->env_handle());
+        if (meta.open_existing(txn.handle()) ||
+            origins.open_existing(txn.handle()) ||
+            receiver.open_existing(txn.handle()) ||
+            versioned.contains(txn.handle(), "user") ||
+            snapshot.for_each(txn.handle(), [](const FullSnapshotChunk&) {})) {
+            throw std::runtime_error(
+                "missing optional sync DBI was reported as present");
+        }
+        // Repeat the probes. A negative mdbx_dbi_open probe used to reserve
+        // DBI slots and made later transactions fail in Debug libmdbx.
+        if (meta.open_existing(txn.handle()) ||
+            origins.open_existing(txn.handle()) ||
+            receiver.open_existing(txn.handle()) ||
+            versioned.contains(txn.handle(), "user") ||
+            snapshot.for_each(txn.handle(), [](const FullSnapshotChunk&) {})) {
+            throw std::runtime_error(
+                "repeated missing optional sync probe mutated the catalog");
+        }
+    }
+    conn->disconnect();
+    cleanup(p);
+}
+
 void test_receiver_replication_mode_store_is_durable_and_strict() {
     using namespace mdbxc::sync;
     const std::string p = "test_receiver_replication_mode_store.mdbx";
@@ -1446,6 +1485,7 @@ int main() {
     test_meta_store();
     test_origin_index_store();
     test_receiver_replication_mode_store_is_durable_and_strict();
+    test_optional_store_absence_probes_are_non_mutating();
     test_changelog_store();
     test_changelog_updates_origin_index();
     test_changelog_backfills_legacy_origins_on_append();
@@ -1466,3 +1506,4 @@ int main() {
     test_stores_require_open();
     return 0;
 }
+

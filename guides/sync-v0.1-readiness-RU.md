@@ -27,6 +27,10 @@ Sync экспериментален и включается через `MDBXC_SY
 - Simple-Web HTTP/WebSocket и Kurlyk/libcurl доступны как optional provider
   targets. Installed-provider и negative wire/transport tests покрывают их
   базовые контракты.
+- `sync_18_http_node_fleet` проверяет настоящий process boundary. Он запускает
+  отдельные дочерние процессы с независимыми MDBX environment и обменивается
+  sync-трафиком через loopback HTTP. CI job `HTTP node fleet smoke` собирает и
+  запускает сценарии master-replica и mesh.
 
 ## Эксплуатационные контракты
 
@@ -87,3 +91,14 @@ test_websocket_transport
 test_sync_worker
 test_sync_replication
 ```
+
+## Доказательства проверки
+
+Локальная corrective matrix включает Linux GCC C++11 и C++17 Debug suites,
+installed-package consumer, Release benchmarks и manual ASan probe. CI
+дополнительно проверяет macOS, Windows MinGW64, optional transport providers,
+варианты parent MDBX targets и process-supervised HTTP node fleet. Это
+подтверждает проверенный raw HTTP process path. Selective replication,
+persisted logical recovery resume и general multi-writer convergence при этом
+не становятся готовыми release-возможностями автоматически.
+
