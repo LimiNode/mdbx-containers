@@ -45,9 +45,9 @@
 - Remote corrective code commit SHA: `ec5011090259c3a67db3c10a6fa7a76c3bb8ea27`
 - Draft PR number: `334`
 - Draft PR URL: https://github.com/LimiNode/mdbx-containers/pull/334
-- Documentation follow-up commits: `1a3f2e498604fed971e6e25faa1b88fafec0b42e`, then `bd9df13de665da60006ff18d9394cb0bd8fc7975`
-- Final branch head: `bd9df13de665da60006ff18d9394cb0bd8fc7975`
-- CI status: successful. Archcheck run `44561750088` and CI run `44561750068` completed with all jobs green after the cancelled macOS C++17 job was retried.
+- Documentation follow-up commits: `1a3f2e498604fed971e6e25faa1b88fafec0b42e`, `bd9df13de665da60006ff18d9394cb0bd8fc7975`, and `15536de40dd6f09c037d2b7c01f99dd7f3119210`
+- Last full verification head: `15536de40dd6f09c037d2b7c01f99dd7f3119210`
+- CI status: successful. Archcheck run `44568022084` and CI run `44568022008` completed with all jobs green, including macOS C++17 after the earlier runner cancellation was retried.
 
 ## Migration
 

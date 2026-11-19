@@ -10,7 +10,7 @@
 | GCC 14.2, Linux, Release, C++17 benchmarks | Built | Quick and realistic benchmark presets executed |
 | Installed package consumer | Passed | CMake package consumer built with a fake external MDBX config |
 | Manual AddressSanitizer probe | Passed | Scalar serializer lifetime and absent DBI probes |
-| GitHub exact-head Archcheck and CI | Passed | PR #334 current head `bd9df13`, Archcheck #371 and CI #803 completed successfully, including the retried macOS C++17 job |
+| GitHub exact-head Archcheck and CI | Passed | Verification head `15536de`, Archcheck #372 and CI #804 completed successfully, including macOS C++17 |
 | Real process raw HTTP smoke | Passed | `sync_18_http_node_fleet`, master-replica and mesh scenarios in CI |
 
 The automatic CMake ASan option was disabled by its compiler feature probe. The manual probe used `-fsanitize=address` directly. No claim is made for unsupported sanitizer or platform combinations.
