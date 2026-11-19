@@ -28,7 +28,7 @@ The corrective branch replaces optional named-DBI probes with a MainDB catalog l
 | F-006 | P2 | `CONFIRMED_DEFECT`, corrected in branch | Table construction | A null `Connection` was dereferenced instead of rejected |
 | F-007 | P2 | `CONFIRMED_DEFECT`, corrected in branch | Manual transaction lifecycle | Direct commit or rollback of `current_txn()` left a stale manual transaction map entry |
 | F-008 | P2 | `CONFIRMED_DEFECT`, corrected in branch | Connection configuration | `configure()` changed configuration after the environment had already been opened |
-| F-009 | P3 | `DOCUMENTATION_DEFECT`, deferred | Repository identity | README and Doxygen still contain `NewYaroslav` repository links |
+| F-009 | P3 | `DOCUMENTATION_DEFECT`, corrected in branch | Repository identity | README and Doxygen contained `NewYaroslav` repository links |
 | F-010 | P3 | `DOCUMENTATION_DEFECT`, corrected in branch | Installation | `include/AGENTS.md` files were installed as public headers |
 | F-011 | P3 | `ARCHITECTURAL_RISK`, deferred | Sync engine structure | `SyncEngine.hpp` remains a very large header with many unrelated policy and storage paths |
 | F-012 | P3 | `PERFORMANCE_OPPORTUNITY`, deferred | Reconciliation | Serialized-key set membership is safe and generic but adds a copy and `O(log n)` lookup per source key |
@@ -148,7 +148,7 @@ The public contract says `configure()` must precede `connect()`, but the baselin
 
 ### F-009. Stale repository links
 
-`README.md`, `README-RU.md`, and `docs/mainpage.dox` still point to `github.com/NewYaroslav/mdbx-containers`. The actual repository is under `LimiNode`. This is a documentation-only P3 finding and was left out of the corrective code PR to keep the logic change independently reviewable.
+`README.md`, `README-RU.md`, and `docs/mainpage.dox` pointed to `github.com/NewYaroslav/mdbx-containers` while the repository is under `LimiNode`. The documentation follow-up in the corrective branch updates these links. No code, persisted format, or public API changed.
 
 ### F-010. AGENTS files in installation
 
@@ -186,9 +186,8 @@ The exact vector path intentionally evaluates every stored vector. On this host,
 
 ## Useful but non-blocking
 
-1. Correct stale `NewYaroslav` links in a documentation-only PR.
-2. Split `SyncEngine.hpp` behind existing umbrella headers after measuring compile-time impact.
-3. Profile reconciliation allocation behavior with large composite and binary keys.
-4. Treat exact vector search as a deliberate `O(N * D)` mode and benchmark any future index against the current exact results.
-5. Add a native Doxygen job and fail on warnings from owned headers.
+1. Split `SyncEngine.hpp` behind existing umbrella headers after measuring compile-time impact.
+2. Profile reconciliation allocation behavior with large composite and binary keys.
+3. Treat exact vector search as a deliberate `O(N * D)` mode and benchmark any future index against the current exact results.
+4. Add a native Doxygen job and fail on warnings from owned headers.
 

@@ -24,13 +24,12 @@ Doxygen was not available in the execution environment, so a generated warning c
 
 The reviewed public headers generally contain `brief`, parameter, return, exception, and thread-safety notes for connection and transaction ownership. The primary remaining documentation risk is distributed contract detail. Optional DBI absence, transaction reuse, and logical schema ownership are described across several sync store headers. A future documentation PR should consolidate these rules into the sync guide and link each store's preconditions to that guide.
 
-## Recommended documentation PR
+## Remaining documentation work
 
-1. Replace stale `NewYaroslav` links in `README.md`, `README-RU.md`, and `docs/mainpage.dox`.
-2. Add the supported package name `mdbx_containers` and the exported target `mdbx_containers::mdbx_containers` to the install guide.
-3. Add a compact benchmark table with hardware, compiler, preset, and algorithmic scope.
-4. Run Doxygen in CI and fail only on warnings from owned project files after excluding the vendored theme.
-5. Document that optional DBI existence checks use the MainDB catalog and do not create missing stores.
+1. Add the supported package name `mdbx_containers` and the exported target `mdbx_containers::mdbx_containers` to the install guide.
+2. Add a compact benchmark table with hardware, compiler, preset, and algorithmic scope.
+3. Run Doxygen in CI and fail only on warnings from owned project files after excluding the vendored theme.
+4. Document that optional DBI existence checks use the MainDB catalog and do not create missing stores.
 
 ## Follow-up status
 
