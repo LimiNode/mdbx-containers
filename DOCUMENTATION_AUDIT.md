@@ -10,8 +10,8 @@ Doxygen was not available in the execution environment, so a generated warning c
 
 | Area | Status | Detail |
 | --- | --- | --- |
-| README and README-RU repository links | `DOCUMENTATION_DEFECT` | CI badges still use `NewYaroslav/mdbx-containers` instead of `LimiNode/mdbx-containers` |
-| Doxygen main page | `DOCUMENTATION_DEFECT` | `docs/mainpage.dox` contains the old repository URL |
+| README and README-RU repository links | Corrected in follow-up batch | CI badges now use `LimiNode/mdbx-containers` |
+| Doxygen main page | Corrected in follow-up batch | `docs/mainpage.dox` now uses the `LimiNode` repository URL |
 | Public transaction ownership | Covered | Connection and Transaction headers document thread ownership and lifecycle warnings |
 | Sync ownership and atomicity | Covered | Sync docs describe same-transaction capture, durable cursor progression, and fail-closed apply paths |
 | Unsupported multi-master semantics | Covered | Current docs describe authoritative-origin and designated-writer paths rather than claiming unrestricted multi-master conflict resolution |
@@ -31,4 +31,11 @@ The reviewed public headers generally contain `brief`, parameter, return, except
 3. Add a compact benchmark table with hardware, compiler, preset, and algorithmic scope.
 4. Run Doxygen in CI and fail only on warnings from owned project files after excluding the vendored theme.
 5. Document that optional DBI existence checks use the MainDB catalog and do not create missing stores.
+
+## Follow-up status
+
+The stale repository identity links and the release-readiness wording for the
+real process HTTP smoke are corrected in the post-audit documentation batch.
+Selective HTTP/WebSocket routing, scoped snapshot/resume, retention, and
+persisted logical recovery remain explicitly deferred runtime work.
 

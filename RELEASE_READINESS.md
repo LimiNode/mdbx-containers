@@ -21,17 +21,22 @@ The baseline should not be released as an infrastructure dependency until the P1
 | MSVC | Toolchain and external MDBX combination not available | Classify in CI before support claim |
 | macOS | Runner unavailable locally | Pending CI |
 | Doxygen | Binary unavailable locally | Pending CI |
+| GitHub exact-head Archcheck | Run 369, success | Passed |
+| GitHub exact-head CI | Run 796 for code head, run 801 for final documentation head, success | Passed |
+| Real process raw HTTP smoke | `sync_18_http_node_fleet` master-replica and mesh | Passed |
 
 ## Blockers
 
 1. Review and merge F-001, F-002, and F-003 corrective code with their regression tests.
-2. Run exact-head CI on Linux, Windows MinGW, macOS, and the repository's sync-enabled optional transport jobs.
+2. Merge PR #334 after review. Its exact-head CI and Archcheck are green.
 3. Run the repository Doxygen job and inspect owned-header warnings.
 4. Verify the external MDBX package mode used by the release consumer. The local consumer used a fake config because the bundled build does not install an external MDBX package config.
 
 ## Non-blocking follow-ups
 
-- Stale repository links in README and Doxygen
+- Selective replication HTTP/WebSocket routing, scoped snapshot/resume, and retention
+- Persisted logical recovery resume from PR #332
+- Stale repository links in README and Doxygen, addressed by the follow-up documentation batch
 - Sync engine header decomposition
 - Reconciliation allocation profiling
 - Exact-vector search strategy for large collections
