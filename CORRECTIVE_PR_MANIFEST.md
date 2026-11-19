@@ -7,7 +7,7 @@
 - Branch `audit/independent-20261118`
 - State `Draft`
 - Merge, tag, and release actions were not performed
-- Remote publication is currently blocked by the GitHub connector. No remote branch or PR was created.
+- Draft PR published as #334: https://github.com/LimiNode/mdbx-containers/pull/334
 
 ## Corrective scope
 
@@ -42,17 +42,17 @@
 
 ## Remote publication record
 
-- Initial corrective commit SHA: `82d8958d5b1a16212c4d77f2b7411e0bb1af8a27`
-- Draft PR number: not created because GitHub branch creation timed out
-- Draft PR URL: not available
-- Remote head SHA: not available
-- CI status: not started because the branch could not be published
+- Remote corrective commit SHA: `ec5011090259c3a67db3c10a6fa7a76c3bb8ea27`
+- Draft PR number: `334`
+- Draft PR URL: https://github.com/LimiNode/mdbx-containers/pull/334
+- Remote head SHA: will be filled after this manifest update commit
+- CI status: pending exact-head GitHub run
 
 ## Migration
 
 None. Persisted and wire formats are unchanged.
 
-## Publication blocker
+## Publication record
 
-The authenticated GitHub connector timed out repeatedly on branch creation and blob creation. A direct `git push` was also unavailable because this environment has no GitHub credential helper. No merge, tag, release, or remote mutation was performed. The local branch remains ready for publication from an authenticated git or GitHub session.
+The branch and Draft PR were published through the authenticated GitHub connector. Merge, tag, and release actions remain unperformed.
 
