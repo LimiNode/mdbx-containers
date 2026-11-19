@@ -10,7 +10,7 @@
 | GCC 14.2, Linux, Release, C++17 benchmarks | Built | Quick and realistic benchmark presets executed |
 | Installed package consumer | Passed | CMake package consumer built with a fake external MDBX config |
 | Manual AddressSanitizer probe | Passed | Scalar serializer lifetime and absent DBI probes |
-| GitHub exact-head Archcheck and CI | Passed | PR #334 current head `1a3f2e4`, all jobs green in CI #802 |
+| GitHub exact-head Archcheck and CI | Passed | PR #334 current head `bd9df13`, Archcheck #371 and CI #803 completed successfully, including the retried macOS C++17 job |
 | Real process raw HTTP smoke | Passed | `sync_18_http_node_fleet`, master-replica and mesh scenarios in CI |
 
 The automatic CMake ASan option was disabled by its compiler feature probe. The manual probe used `-fsanitize=address` directly. No claim is made for unsupported sanitizer or platform combinations.
@@ -47,4 +47,3 @@ The automatic CMake ASan option was disabled by its compiler feature probe. The 
 - Allocation-failure injection is present in selected sync paths but does not cover every table family.
 - Full process-crash recovery was exercised through deterministic staging and restart tests, while power-loss durability still depends on the libmdbx and filesystem deployment contract.
 - CMake optional transport combinations were not all available locally and remain CI responsibilities.
-

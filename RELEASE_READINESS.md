@@ -21,8 +21,8 @@ The baseline should not be released as an infrastructure dependency until the P1
 | MSVC | Toolchain and external MDBX combination not available | Classify in CI before support claim |
 | macOS | Runner unavailable locally | Pending CI |
 | Doxygen | Binary unavailable locally | Pending CI |
-| GitHub exact-head Archcheck | Run 370, success | Passed |
-| GitHub exact-head CI | Run 802 for current documentation head, success | Passed |
+| GitHub exact-head Archcheck | Run 371, success | Passed |
+| GitHub exact-head CI | Run 803, success on current branch head | Passed |
 | Real process raw HTTP smoke | `sync_18_http_node_fleet` master-replica and mesh | Passed |
 
 ## Blockers
@@ -49,4 +49,3 @@ The corrective branch does not alter persisted records, key encoding, DBI names,
 ## Release acceptance criteria
 
 A release can proceed after the P1 branch is merged, exact-head CI is green on the supported platform matrix, and the documentation-only stale-link PR is either merged or explicitly tracked. The branch must remain free of unreviewed wire-format changes and release metadata changes.
-
