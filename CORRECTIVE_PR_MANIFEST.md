@@ -45,7 +45,7 @@
 - Remote corrective commit SHA: `ec5011090259c3a67db3c10a6fa7a76c3bb8ea27`
 - Draft PR number: `334`
 - Draft PR URL: https://github.com/LimiNode/mdbx-containers/pull/334
-- Remote head SHA: `16a56c9e0eb501b6ca5f7474187905fc67cf7fbc`
+- Remote head SHA: `1f0ab03ed81376f76579437ba01e6425b4e3809b`
 - CI status: successful. Archcheck run `44502531460` and CI run `44502531351` completed with all jobs green.
 
 ## Migration
