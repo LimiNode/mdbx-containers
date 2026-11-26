@@ -1377,12 +1377,12 @@ namespace mdbxc {
     private:
     
         /// \brief Loads data from the database into the container.
-        /// \tparam ContainerT Template for the container type.
+        /// \tparam ContainerT Associative output container type.
         /// \param container Container to be synchronized with database content.
         /// \param txn_handle Active transaction handle.
         /// \throws MdbxException if a database error occurs.
-        template<template <class...> class ContainerT>
-        void db_load(ContainerT<KeyT, ValueT>& container, MDBX_txn* txn_handle) {
+        template<class ContainerT>
+        void db_load(ContainerT& container, MDBX_txn* txn_handle) {
             CursorGuard cursor;
             check_mdbx(mdbx_cursor_open(txn_handle, m_dbi, cursor.out()), "Failed to open MDBX cursor");
 
