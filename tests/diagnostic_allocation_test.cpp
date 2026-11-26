@@ -342,6 +342,48 @@ void check_manual_connection() {
     connection->disconnect();
 }
 
+void check_manual_begin_failures() {
+#if defined(_MSC_VER) && _ITERATOR_DEBUG_LEVEL > 0
+    std::puts("Manual-begin allocation sweep NOT RUN: MSVC checked-STL noexcept proxy construction");
+#else
+    mdbxc::Config config;
+    config.pathname = "manual-begin-failures.mdbx";
+    config.relative_to_exe = false;
+    config.no_subdir = true;
+    std::size_t allocation_count = 0;
+    {
+        const std::shared_ptr<mdbxc::Connection> connection = mdbxc::Connection::create(config);
+        const AllocationResult baseline = measure([connection]() {
+            connection->begin(mdbxc::TransactionMode::WRITABLE);
+        });
+        require(!baseline.failed, "manual-begin allocation baseline failed");
+        allocation_count = baseline.count;
+        connection->rollback();
+        connection->disconnect();
+    }
+    for (std::size_t ordinal = 1; ordinal <= allocation_count; ++ordinal) {
+        const std::shared_ptr<mdbxc::Connection> connection = mdbxc::Connection::create(config);
+        const AllocationResult injected = measure([connection]() {
+            connection->begin(mdbxc::TransactionMode::WRITABLE);
+        }, ordinal);
+        require(injected.failed && !connection->current_txn(),
+                "manual-begin failure retained an exposed transaction");
+        try {
+            connection->disconnect();
+        } catch (const mdbxc::MdbxException& error) {
+            std::fprintf(stderr, "Manual begin ordinal %zu left tracker reservation: %d\n",
+                         ordinal, error.error_code());
+            throw;
+        }
+        connection->connect();
+        connection->begin(mdbxc::TransactionMode::WRITABLE);
+        connection->rollback();
+        connection->disconnect();
+    }
+    std::printf("Manual-begin allocation failures with clean reconnect: %zu\n", allocation_count);
+#endif
+}
+
 } // namespace
 
 void* operator new(std::size_t size) { return allocate_bytes(size); }
@@ -361,6 +403,7 @@ int main() {
         check_begin_and_renew_failures(environment.get());
         check_commit_error_and_thread_mismatch(environment.get());
         check_manual_connection();
+        check_manual_begin_failures();
         std::puts("PASS diagnostic allocation and transaction lifecycle regression");
         return EXIT_SUCCESS;
     } catch (const std::exception& error) {

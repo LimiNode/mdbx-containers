@@ -152,8 +152,10 @@ namespace mdbxc {
             register_txn_handle();
             env = m_env;
         }
-        std::shared_ptr<Transaction> txn(new Transaction(
-            static_cast<TransactionTracker*>(this), env, mode, true));
+        // Own the reserved handle before allocating the manual guard/control
+        // block. A failed allocation then releases it through the local guard.
+        Transaction pending(static_cast<TransactionTracker*>(this), env, mode, true);
+        std::shared_ptr<Transaction> txn(new Transaction(std::move(pending)));
         std::lock_guard<std::mutex> lock(m_mdbx_mutex);
         const std::pair<std::unordered_map<
                             std::thread::id,
