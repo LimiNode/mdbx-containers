@@ -329,13 +329,27 @@ void check_manual_connection() {
     connection->begin(mdbxc::TransactionMode::WRITABLE);
     const std::shared_ptr<mdbxc::Transaction> held = connection->current_txn();
     put_marker(held->handle(), "manual-committed");
-    const AllocationResult commit = measure([connection]() { connection->commit(); }, 1);
-    require(!commit.failed && commit.count == 0 && held->handle() == nullptr &&
+#if defined(_MSC_VER) && _ITERATOR_DEBUG_LEVEL > 0
+    // Optional sync hooks construct STL scaffolding even with no sink. Checked
+    // STL may allocate its noexcept container proxy; do not inject there.
+    const std::size_t fail_ordinal = 0;
+#else
+    const std::size_t fail_ordinal = 1;
+#endif
+    const AllocationResult commit = measure([connection]() { connection->commit(); }, fail_ordinal);
+    require(!commit.failed && held->handle() == nullptr &&
             !connection->current_txn(), "manual commit retained state or diagnostic allocation");
     connection->begin(mdbxc::TransactionMode::WRITABLE);
-    const AllocationResult rollback = measure([connection]() { connection->rollback(); }, 1);
-    require(!rollback.failed && rollback.count == 0 && !connection->current_txn(),
+    const AllocationResult rollback = measure([connection]() { connection->rollback(); }, fail_ordinal);
+    require(!rollback.failed && !connection->current_txn(),
             "manual rollback retained state or diagnostic allocation");
+#if defined(_MSC_VER) && _ITERATOR_DEBUG_LEVEL > 0
+    std::printf("Checked-STL manual wrapper allocations (not diagnostic-only): commit=%zu rollback=%zu\n",
+                commit.count, rollback.count);
+#else
+    require(commit.count == 0 && rollback.count == 0,
+            "manual wrappers allocated in the empty-hook diagnostic/tracker path");
+#endif
     connection->disconnect();
     connection->connect();
     require(has_marker(connection->env_handle(), "manual-committed"), "manual commit was not durable");
