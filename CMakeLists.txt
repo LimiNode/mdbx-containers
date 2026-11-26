@@ -463,6 +463,7 @@ if(MDBXC_BUILD_TESTS)
     )
     set(MDBXC_SYNC_DISABLED_TESTS
         header_sync_disabled_test
+        diagnostic_allocation_no_sync_test
     )
     set(MDBXC_STANDALONE_PUBLIC_HEADERS
         mdbx_containers/common.hpp
@@ -538,8 +539,14 @@ if(MDBXC_BUILD_TESTS)
         mdbxc_add_test_target(${test_name} ${test_file})
     endforeach()
 
-    # This test alone exposes the header-only transaction commit-failure seam.
-    # Production and all other test targets always call mdbx_txn_commit directly.
+    mdbxc_add_test_target(diagnostic_allocation_no_sync_test tests/diagnostic_allocation_test.cpp)
+    target_compile_definitions(diagnostic_allocation_test PRIVATE
+        MDBXC_TEST_INJECT_TRANSACTION_COMMIT_FAILURE=1)
+    target_compile_definitions(diagnostic_allocation_no_sync_test PRIVATE
+        MDBXC_TEST_INJECT_TRANSACTION_COMMIT_FAILURE=1)
+
+    # Only these regression targets expose the header-only commit-failure seam.
+    # Production and all other test targets call mdbx_txn_commit directly.
     if(TARGET test_key_ordered_multi_value_destructive_adapter)
         target_compile_definitions(
             test_key_ordered_multi_value_destructive_adapter PRIVATE

@@ -47,6 +47,16 @@ namespace mdbxc {
         }
     }
 
+    /// \brief Checks an MDBX result without materializing successful diagnostics.
+    /// \param rc Return code from an MDBX function.
+    /// \param context Non-null, null-terminated description of the calling context.
+    /// \throws MdbxException if the return code indicates an error.
+    inline void check_mdbx(int rc, const char* context) {
+        if (rc != MDBX_SUCCESS) {
+            check_mdbx(rc, std::string(context));
+        }
+    }
+
     namespace detail {
 
         /// \brief Owns an MDBX cursor and closes it when the guard leaves scope.
